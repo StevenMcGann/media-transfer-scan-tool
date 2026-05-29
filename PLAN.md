@@ -225,7 +225,7 @@ Testing: assert findings against **JSON** (the source of truth); HTML/TXT get sm
 |---|---|---|---|---|---|---|---|
 | **Python** *(port)* | `.whl .egg .zip .tar.gz .tgz .py .pyw .ipynb` | yes | Bandit †| detect-secrets †| pip-audit (`Requires-Dist`) + CycloneDX SBOM | PE/ELF triage (`inspect_binary.py`) | notebook code-cell projection (no execution) |
 | **Disguised** *(v0.2 ✅)* | any ext / no ext | n/a | reroute to matched analyzer | detect-secrets | — | — | shebang + magic-byte + **content-signature** sniff (PS/Python/shell/batch, no-shebang); **extension/content mismatch** finding (`MTS-DISGUISE-001/002`) |
-| **Documents** *(v0.3)* | Office `.doc .docx .docm .xls .xlsx .xlsm .ppt .pptx .rtf`; `.pdf` | yes (OOXML=zip; extract embedded) | — | (deep) on extracted text | — | — | **Office:** VBA/XLM macros + auto-exec (`oletools`: olevba/mraptor), DDE, remote-template injection, embedded OLE objects, known exploit indicators. **PDF:** `/JS`, `/OpenAction`/`/AA`/`/Launch`, `/EmbeddedFile`, `/URI` (`pdfid`/`pdf-parser`). Encrypted docs → coverage-gap finding. |
+| **Documents** *(v0.3 ✅)* | Office `.doc .docx .docm .xls .xlsx .xlsm .ppt .pptx .rtf`; `.pdf` | scanned in place | — | — | — | — | **Office** (`OleVbaScan` + `scan_office.py`/oletools): VBA macro presence + auto-exec/suspicious keywords, DDE/DDEAUTO, remote-template injection. **PDF** (`PdfTriage`, pure PowerShell): `/JS` `/JavaScript`, `/OpenAction`/`/AA`/`/Launch`, `/EmbeddedFile`, `/URI`, `/RichMedia`, `/Encrypt`, with name hex-escape de-obfuscation. Never rendered/opened/executed. |
 | **Shell** *(v0.4)* | `.sh .bash .zsh .ksh` | no | ShellCheck + custom rules | detect-secrets | — | — | `curl\|bash`, `eval`, `base64 -d \| sh`, remote-fetch-and-run, hardcoded IPs/URLs |
 | **PowerShell** *(v0.5)* | `.ps1 .psm1 .psd1` | no | PSScriptAnalyzer + custom rules | detect-secrets | — | Authenticode signature check | `IEX`, `DownloadString`/`DownloadFile`, `-EncodedCommand`, hidden-window launch, `FromBase64String`, AMSI/defender tampering |
 | **npm** *(v0.6)* | `.tgz`, `package.json`, `.js .mjs .cjs .ts` | yes (tar) | semgrep/njsscan or eslint rules | detect-secrets | `npm audit` / OSV against `package.json` + lockfile + SBOM | — | **pre/post/install lifecycle scripts** in `package.json` (top signal), `bin` shims, obfuscation, typosquat heuristics |
@@ -310,16 +310,17 @@ media-transfer-scan-tool/
       Engine.ps1                      # ✅ Invoke-Scan pipeline (discover→classify→dispatch→aggregate)
       Report.ps1                      # ✅ JSON + HTML(encoded+CSP) + slim TXT renderers (§3.8)
     analyzers/                        # one file per analyzer module (registry descriptors)
-      FileHash.ps1                    # ✅ real: SHA-256 manifest (core tier, demonstrates contract)
-      Bandit.ps1                      # ✅ stub (deep tier, default-off) — real port lands in v0.1.0
-      DetectSecrets.ps1  PipAudit.ps1  BinaryInspection.ps1   # (v0.1.0 port)
-      ShellCheck.ps1  PSScriptAnalyzer.ps1  NpmAudit.ps1  PickleOpcodeScan.ps1
-      OleVbaScan.ps1  PdfTriage.ps1                            # (later phases)
-    helpers/                          # Python helper scripts (added per phase)
-      inspect_binary.py               # ported PE/ELF triage
-      scan_pickle.py                  # pickle opcode scanner (static, never loads)
-      scan_office.py                  # oletools wrapper (olevba/mraptor/msodde) — static, never opens in Office
-      scan_pdf.py                     # pdfid/pdf-parser wrapper — static, never renders/executes JS
+      FileHash.ps1                    # ✅ SHA-256 manifest (core)
+      PipAudit.ps1  BinaryInspection.ps1   # ✅ v0.1.0 (core)
+      Bandit.ps1  DetectSecrets.ps1        # ✅ v0.1.0 (deep, opt-in)
+      PdfTriage.ps1                   # ✅ v0.3 PDF keyword triage — pure PowerShell, no deps
+      OleVbaScan.ps1                  # ✅ v0.3 Office triage (via scan_office.py)
+      ShellCheck.ps1  PSScriptAnalyzer.ps1  NpmAudit.ps1  PickleOpcodeScan.ps1   # (v0.4–v0.7)
+    helpers/                          # Python helper scripts
+      inspect_binary.py               # ✅ PE/ELF triage (pefile/pyelftools)
+      scan_office.py                  # ✅ oletools + stdlib zip checks — static, never opens in Office
+      scan_pickle.py                  # (v0.6 — pickle opcode scanner, static, never loads)
+      # note: no scan_pdf.py — PdfTriage is pure PowerShell (no third-party PDF parser)
   bundle/                             # offline-bundle build script + manifest (vendored tools/DBs) — later
   tests/
     MediaTransferScan.Tests.ps1       # ✅ Pester 5: classification, registry/tiers, reporting, HTML-injection

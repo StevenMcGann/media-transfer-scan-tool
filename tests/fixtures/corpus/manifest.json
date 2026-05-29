@@ -67,6 +67,39 @@
     },
     "disguised/memo.txt": {
       "expectNoDisguise": true
+    },
+    "pdf/pdf_clean.pdf": {
+      "expectActiveContent": false
+    },
+    "pdf/pdf_js.pdf": {
+      "expectFinding": "PDF-JAVASCRIPT"
+    },
+    "pdf/pdf_launch.pdf": {
+      "expectFinding": "PDF-LAUNCH"
+    },
+    "pdf/pdf_embedded.pdf": {
+      "expectFinding": "PDF-EMBEDDED-FILE"
+    },
+    "pdf/pdf_encrypted.pdf": {
+      "expectFinding": "PDF-ENCRYPTED"
+    },
+    "pdf/pdf_obfuscated.pdf": {
+      "expectFinding": "PDF-JAVASCRIPT"
+    },
+    "pdf/pdf_fake.pdf": {
+      "expectFinding": "PDF-INVALID-FORMAT"
+    },
+    "office/office_clean.docx": {
+      "expectMacroFindings": false
+    },
+    "office/office_macro.docm": {
+      "expectFinding": "OFFICE-VBA-PRESENT"
+    },
+    "office/office_dde.docx": {
+      "expectFinding": "OFFICE-DDE"
+    },
+    "office/office_template.docx": {
+      "expectFinding": "OFFICE-REMOTE-TEMPLATE"
     }
   }
 }

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "0.1.0",
+  "fixtures": {
+    "clean_pkg-1.0-py3-none-any.whl": {
+      "expectCves": false,
+      "expectSbom": false
+    },
+    "vulnerable_deps_pkg-1.0-py3-none-any.whl": {
+      "expectCves": true,
+      "expectSbom": true
+    },
+    "corrupt_pkg-1.0-py3-none-any.whl": {
+      "expectExtractFailure": true
+    },
+    "traversal_pkg-1.0-py3-none-any.whl": {
+      "expectFinding": "MTS-EXTRACT-TRAVERSAL"
+    }
+  }
+}

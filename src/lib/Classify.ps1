@@ -10,6 +10,9 @@
 # Declared type from extension (the weakest signal; the "intent of record").
 $script:ExtTypeMap = @{
     '.py' = 'python'; '.pyw' = 'python'; '.ipynb' = 'python'
+    # .whl and .egg are ZIP-based Python formats — type is python, not generic archive.
+    # The ZIP magic bytes (PK) are expected and should NOT trigger a disguised-file finding.
+    '.whl' = 'python'; '.egg' = 'python'
     '.ps1' = 'powershell'; '.psm1' = 'powershell'; '.psd1' = 'powershell'
     '.sh' = 'shell'; '.bash' = 'shell'; '.zsh' = 'shell'; '.ksh' = 'shell'
     '.pdf' = 'pdf'
@@ -17,10 +20,13 @@ $script:ExtTypeMap = @{
     '.xlsx' = 'office'; '.xlsm' = 'office'; '.ppt' = 'office'; '.pptx' = 'office'; '.rtf' = 'office'
     '.pkl' = 'model'; '.pickle' = 'model'; '.pt' = 'model'; '.pth' = 'model'
     '.joblib' = 'model'; '.safetensors' = 'model'; '.gguf' = 'model'
-    '.whl' = 'archive'; '.egg' = 'archive'; '.zip' = 'archive'; '.tgz' = 'archive'
-    '.tar' = 'archive'; '.gz' = 'archive'
+    '.zip' = 'archive'; '.tgz' = 'archive'; '.tar' = 'archive'; '.gz' = 'archive'
     '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'
 }
+
+# ZIP-based formats whose magic bytes (PK) legitimately don't match their declared type.
+# Suppress the disguised-file finding for these — the ZIP container is expected by design.
+$script:KnownZipContainerTypes = @('python', 'office', 'npm')
 
 function Get-DeclaredType {
     param([System.IO.FileInfo]$File)
@@ -86,7 +92,22 @@ function New-Unit {
     $declared = Get-DeclaredType -File $File
     $magic    = Get-MagicType -Path $File.FullName
 
-    $detected   = if ($magic) { $magic.Type } elseif ($declared) { $declared } else { 'unsupported' }
+    # For known ZIP-container formats (.whl, .docx, .xlsx, etc.) the extension
+    # provides the SEMANTIC type (python / office / npm); the PK magic bytes only
+    # confirm "this is a ZIP archive", not which specific kind. Use the declared
+    # type for routing when magic says archive AND declared is a ZIP-based format.
+    $magicIsZip = $magic -and $magic.Type -eq 'archive'
+    $isKnownContainer = $declared -and $script:KnownZipContainerTypes -contains $declared
+
+    $detected   = if ($magicIsZip -and $isKnownContainer) {
+                      $declared          # semantic ZIP format: .whl→python, .docx→office
+                  } elseif ($magic) {
+                      $magic.Type        # authoritative for all other magic signatures
+                  } elseif ($declared) {
+                      $declared          # extension-only fallback
+                  } else {
+                      'unsupported'
+                  }
     $confidence = if ($magic) { $magic.Confidence } elseif ($declared) { 'LOW' } else { 'LOW' }
 
     $rel = $File.FullName.Substring($ScanRoot.TrimEnd('\').Length).TrimStart('\')
@@ -104,8 +125,14 @@ function New-Unit {
 
     $findings = @()
     # Mismatch: content says one thing, the extension claimed another.
+    # Suppress for known ZIP-container formats (.whl, .docx, .xlsx, etc.) — the PK
+    # magic bytes are expected and declaring them as disguised would be a false positive.
+    $isKnownZipContainer = ($magic -and $magic.Type -eq 'archive' -and
+                            $declared -and $script:KnownZipContainerTypes -contains $declared)
+
     if ($magic -and $declared -and $magic.Type -ne $declared -and
-        -not ($declared -eq 'archive' -and $magic.Type -eq 'archive')) {
+        -not ($declared -eq 'archive' -and $magic.Type -eq 'archive') -and
+        -not $isKnownZipContainer) {
         # Severity scales with how innocent the disguise is.
         $innocent = @('.txt', '.log', '.dat', '', '.csv') -contains $File.Extension.ToLowerInvariant()
         $sev = if ($innocent) { 'HIGH' } else { 'MEDIUM' }

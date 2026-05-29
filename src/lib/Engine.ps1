@@ -1,8 +1,11 @@
 #Requires -Version 7.4
 <#
-    Engine.ps1 - the pipeline (PLAN §3.1): discover -> classify -> dispatch -> aggregate.
+    Engine.ps1 - the pipeline (PLAN §3.1): discover -> classify -> extract -> dispatch -> aggregate.
     Returns a result object that the renderers (Report.ps1) consume.
 #>
+
+# Archive extensions that need extraction before scanning.
+$script:ArchiveExtensions = @('.whl', '.egg', '.zip', '.tgz', '.tar.gz')
 
 function New-AnalyzerContext {
     param(
@@ -31,9 +34,19 @@ function Get-DiscoveredFiles {
         Where-Object { -not $_.FullName.StartsWith($reportsPrefix, [StringComparison]::OrdinalIgnoreCase) }
 }
 
+function Test-IsArchiveUnit {
+    param([PSCustomObject]$Unit)
+    $name = $Unit.Name.ToLowerInvariant()
+    if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
+    $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
+    return $ext -in @('.whl', '.egg', '.zip')
+}
+
 function Invoke-Scan {
     <#
         Run the full pipeline against a folder. Pure orchestration; no rendering.
+        Archive units are extracted to a per-run staging dir in $env:TEMP that is
+        cleaned up in a finally block regardless of success or failure.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -46,8 +59,10 @@ function Invoke-Scan {
         [PSCustomObject]$ProvisionResult = $null
     )
 
-    $startTime = Get-Date
-    $scanRoot  = (Resolve-Path -LiteralPath $Path).Path
+    $startTime    = Get-Date
+    $scanRoot     = (Resolve-Path -LiteralPath $Path).Path
+    $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $stagingRoot  = Join-Path $env:TEMP "mts-staging-$stamp-$(Get-Random)"
 
     Write-Log -Message "Importing analyzer registry from: $AnalyzerDir"
     $registry = Import-AnalyzerRegistry -AnalyzerDir $AnalyzerDir
@@ -56,39 +71,67 @@ function Invoke-Scan {
     Write-Log -Message ("Profile '{0}': {1} analyzer(s) enabled, {2} disabled." -f `
         $Profile, $sel.Enabled.Count, $sel.DisabledNames.Count)
 
-    $context = New-AnalyzerContext -Mode $Mode -WorkDir $env:TEMP -ReportsDir $ReportsDir `
+    $context = New-AnalyzerContext -Mode $Mode -WorkDir $stagingRoot -ReportsDir $ReportsDir `
                    -ProvisionResult $ProvisionResult
 
     $unitResults = [System.Collections.Generic.List[object]]::new()
 
-    foreach ($file in Get-DiscoveredFiles -ScanRoot $scanRoot) {
-        $classified = New-Unit -File $file -ScanRoot $scanRoot
-        $unit       = $classified.Unit
-        $findings   = [System.Collections.Generic.List[object]]::new()
-        foreach ($f in $classified.Findings) { $findings.Add($f) }
+    try {
+        New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
 
-        Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"
+        foreach ($file in Get-DiscoveredFiles -ScanRoot $scanRoot) {
+            $classified = New-Unit -File $file -ScanRoot $scanRoot
+            $unit       = $classified.Unit
+            $findings   = [System.Collections.Generic.List[object]]::new()
+            foreach ($f in $classified.Findings) { $findings.Add($f) }
 
-        foreach ($analyzer in (Select-AnalyzersForUnit -Enabled $sel.Enabled -Unit $unit)) {
-            try {
-                # Return, don't throw (PLAN §3.2 rule 2): a broken analyzer degrades
-                # coverage via an analyzer-error finding, it never aborts the run.
-                $out = & $analyzer.Invoke $unit $context
-                foreach ($f in @($out)) { if ($f) { $findings.Add($f) } }
-            } catch {
-                $findings.Add((New-Finding -Tool $analyzer.Name -Category 'parser' -Severity 'LOW' `
-                    -Confidence 'LOW' -UnitType $unit.Type -File $unit.RelativePath `
-                    -Issue "Analyzer '$($analyzer.Name)' errored: $_" -TestID 'MTS-ANALYZER-ERR'))
-                Write-Log -Level ERROR -Message "Analyzer '$($analyzer.Name)' failed on $($unit.RelativePath): $_"
+            # ── Archive extraction ────────────────────────────────────────────
+            if (Test-IsArchiveUnit -Unit $unit) {
+                $safeName  = $unit.Name -replace '[^\w\-.]', '_'
+                $stageDir  = Join-Path $stagingRoot "unit_$safeName"
+                $fallback  = if ($null -ne $context.Venv) { $context.Venv.Python } else { '' }
+
+                $extraction = Expand-SubmissionArchive `
+                    -InputFile     $unit.Path `
+                    -OutputDir     $stageDir `
+                    -FallbackPython $fallback
+
+                foreach ($f in $extraction.Findings) { $findings.Add($f) }
+
+                if ($extraction.Success) {
+                    $unit.StagingPath = $extraction.StagingPath
+                    Write-Log -Level DEBUG -Message "StagingPath set: $($unit.StagingPath)"
+                } else {
+                    Write-Log -Level WARN -Message "Extraction failed for $($unit.Name) — analyzers requiring staging will skip."
+                }
             }
-        }
 
-        $unitResults.Add([PSCustomObject]@{
-            Name     = $unit.Name
-            Type     = $unit.Type
-            Path     = $unit.RelativePath
-            Findings = $findings.ToArray()
-        })
+            Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"
+
+            # ── Dispatch to analyzers ─────────────────────────────────────────
+            foreach ($analyzer in (Select-AnalyzersForUnit -Enabled $sel.Enabled -Unit $unit)) {
+                try {
+                    # Return, don't throw (PLAN §3.2 rule 2)
+                    $out = & $analyzer.Invoke $unit $context
+                    foreach ($f in @($out)) { if ($f) { $findings.Add($f) } }
+                } catch {
+                    $findings.Add((New-Finding -Tool $analyzer.Name -Category 'parser' -Severity 'LOW' `
+                        -Confidence 'LOW' -UnitType $unit.Type -File $unit.RelativePath `
+                        -Issue "Analyzer '$($analyzer.Name)' errored: $_" -TestID 'MTS-ANALYZER-ERR'))
+                    Write-Log -Level ERROR -Message "Analyzer '$($analyzer.Name)' failed on $($unit.RelativePath): $_"
+                }
+            }
+
+            $unitResults.Add([PSCustomObject]@{
+                Name     = $unit.Name
+                Type     = $unit.Type
+                Path     = $unit.RelativePath
+                Findings = $findings.ToArray()
+            })
+        }
+    } finally {
+        # Always clean up staging — holds extracted submission content
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     [PSCustomObject]@{

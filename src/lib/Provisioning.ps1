@@ -161,7 +161,10 @@ function Update-PipBootstrap {
     param([Parameter(Mandatory)][string]$PythonExe)
     Write-Log -Level INFO -Message 'Upgrading pip/setuptools/wheel...'
     $out = & $PythonExe -m pip install --upgrade pip setuptools wheel 2>&1
-    foreach ($line in $out) { Write-Log -Level DEBUG -Message ([string]$line) }
+    foreach ($line in $out) {
+        $s = ([string]$line).Trim()
+        if ($s) { Write-Log -Level DEBUG -Message $s }
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Log -Level WARN -Message "pip bootstrap upgrade exited $LASTEXITCODE — continuing."
     }

@@ -16,7 +16,9 @@ bundle/cache/
 
 # Test artifacts
 test-results/
-tests/fixtures/corpus/
+# Corpus — generated synthetic fixtures excluded; committed static wheels tracked
+tests/fixtures/corpus/python/corrupt_pkg*.whl
+tests/fixtures/corpus/python/traversal_pkg*.whl
 tests/fixtures/__pycache__/
 
 # Python

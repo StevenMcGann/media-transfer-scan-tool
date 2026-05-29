@@ -17,7 +17,7 @@
 .PARAMETER OutputFormat
     'all' (default) or 'json' to also echo the JSON report path/content for capture.
 .NOTES
-    Version : 0.1.0
+    Version : 0.2.0
 #>
 [CmdletBinding()]
 param(
@@ -34,6 +34,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Single source of truth for the tool version (keep in sync with the .NOTES block,
+# CHANGELOG, and the git tag). Report schemaVersion is tracked separately in Report.ps1.
+$script:ToolVersion = '0.2.0'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
@@ -67,7 +71,7 @@ function Invoke-Main {
     $reportsDir = Join-Path $scanRoot '.reports'
     Initialize-Log -LogDir (Join-Path $here 'logs') | Out-Null
 
-    Write-Log -Message "media-transfer-scan-tool v0.1.0 - scanning: $scanRoot"
+    Write-Log -Message "media-transfer-scan-tool v$($script:ToolVersion) - scanning: $scanRoot"
 
     # ── Registry + provisioning (before scan so Context.Tools is populated) ──
     $registry = Import-AnalyzerRegistry -AnalyzerDir (Join-Path $here 'analyzers')

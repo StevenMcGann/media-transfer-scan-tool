@@ -8,6 +8,10 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-29
+
+Disguised-script detection — the first new file-type capability beyond Python parity.
+
 ### Added
 - **Disguised-script detection (v0.2):** content-signature classification (PLAN §3.7
   signal #3) scores a file's text against PowerShell / Python / shell / batch

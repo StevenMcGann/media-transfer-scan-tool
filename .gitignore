@@ -24,6 +24,7 @@ tests/fixtures/corpus/python/traversal_pkg*.whl
 tests/fixtures/corpus/native/
 tests/fixtures/corpus/pysource/
 tests/fixtures/corpus/notebook/
+tests/fixtures/corpus/disguised/
 tests/fixtures/__pycache__/
 
 # Python

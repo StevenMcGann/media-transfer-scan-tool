@@ -8,6 +8,17 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **Disguised-script detection (v0.2):** content-signature classification (PLAN §3.7
+  signal #3) scores a file's text against PowerShell / Python / shell / batch
+  signatures, catching a script hidden in an innocent extension (e.g. `.txt`,
+  `.log`, `.dat`) with **no shebang** — the classic media-transfer evasion. The
+  router uses the detected type (content over extension), emits a `disguised-file`
+  finding (`MTS-DISGUISE-001/002`, severity scaled by how innocent the extension
+  is), and dispatches the unit to the matching analyzer as those analyzers land.
+  Includes a text-likeness gate (binaries skipped) and a ≥2-distinct-signature
+  threshold so ordinary prose is not flagged. `.bat`/`.cmd` recognized as `batch`.
+
 ## [0.1.0] - 2026-05-29
 
 First tagged release. Engine + full **Python** analyzer set + offline deployment.

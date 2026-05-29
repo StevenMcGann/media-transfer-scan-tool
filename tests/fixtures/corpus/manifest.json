@@ -48,6 +48,25 @@
     },
     "notebook/nb_malformed.ipynb": {
       "expectFinding": "NOTEBOOK-MALFORMED"
+    },
+    "disguised/readme.txt": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "powershell"
+    },
+    "disguised/output.log": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "shell"
+    },
+    "disguised/data.dat": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "python"
+    },
+    "disguised/notes2.txt": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "batch"
+    },
+    "disguised/memo.txt": {
+      "expectNoDisguise": true
     }
   }
 }

@@ -4,7 +4,7 @@
 
 Operator-driven **static** security scanner for media-transfer review: point it at a submission folder of untrusted artifacts and get a durable, per-submission report before anything is admitted to a trusted environment.
 
-> **Status:** pre-v0.1.0 (scaffold). Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
+> **Status:** v0.1.0 in progress — the engine and full **Python** analyzer set are implemented and tested (CVE audit + SBOM, PE/ELF binary triage, risky-code, secrets, notebook projection). Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
 
 ## What it is / is not
 

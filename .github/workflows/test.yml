@@ -24,6 +24,12 @@ jobs:
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
 
+      - name: Generate synthetic fixtures
+        shell: pwsh
+        # corpus/native/ and the corrupt/traversal wheels are gitignored
+        # (regenerated deterministically) — build them before the suite runs.
+        run: python tests/fixtures/build_fixtures.py
+
       - name: Run tests
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -CI

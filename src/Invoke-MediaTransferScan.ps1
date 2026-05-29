@@ -17,7 +17,7 @@
 .PARAMETER OutputFormat
     'all' (default) or 'json' to also echo the JSON report path/content for capture.
 .NOTES
-    Version : 0.1.0 (scaffold)
+    Version : 0.1.0
 #>
 [CmdletBinding()]
 param(

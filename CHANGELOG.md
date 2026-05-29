@@ -8,6 +8,11 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-29
+
+First tagged release. Engine + full **Python** analyzer set + offline deployment.
+Parity with `scan-python-packages` v1.6.1 on the new file-type-agnostic engine.
+
 ### Added
 - Initial repository scaffold: engine pipeline (discover → classify → extract/project →
   dispatch → render), analyzer registry contract, normalized finding schema, and
@@ -26,6 +31,11 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     outputs/attachments/malformed surfaced as findings (notebook is never executed)
 - Analyzer tiers (`core` default-on / `deep` opt-in) with `-Profile core|full` and
   `-EnableAnalyzers`/`-DisableAnalyzers`; disabled analyzers surfaced in every report.
+- **Deployment:** 5.1-safe `bootstrap.ps1` + `Scan.cmd` operator entry point that
+  resolves PowerShell 7.4+ (bundled-authoritative → PATH → fail) and re-launches the
+  engine; `-VenvDir` engine override; `bundle/build-bundle.ps1` offline-bundle builder
+  (portable pwsh 7.4 LTS + scanner venv + manifest).
+- Documented exit codes (0 clean / 10 findings / 2 error / 3 bad input / 4 no runtime).
 - Test-environment runbook for isolated real-untrusted scanning ([docs/test-environment.md](docs/test-environment.md)).
 - Project plan and feature roadmap ([PLAN.md](PLAN.md)).
-- Pester suite (47 tests) + GitHub Actions CI on PowerShell 7.
+- Pester suite (53 tests) + GitHub Actions CI on PowerShell 7.

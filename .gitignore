@@ -1,0 +1,33 @@
+# Scanner runtime artifacts
+.scan-venv/
+**/.scan-venv/
+logs/
+**/logs/
+.reports/
+**/.reports/
+
+# Extraction staging (should never be committed; lives in TEMP at runtime)
+staging/
+**/staging/
+
+# Offline bundle vendored binaries (built, not source — large)
+bundle/tools/
+bundle/cache/
+
+# Test artifacts
+test-results/
+tests/fixtures/corpus/
+tests/fixtures/__pycache__/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.swp
+.vs/
+.vscode/

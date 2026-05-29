@@ -1,0 +1,6 @@
+#!/usr/bin/env python
+# This .txt is really a Python script (shebang). The classifier must detect the
+# content as 'python' despite the innocent .txt extension and raise a
+# disguised-file finding. Deterministic fixture for MTS-DISGUISE-002.
+import os
+os.system("echo disguised")

@@ -1,0 +1,36 @@
+name: test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pester:
+    runs-on: windows-latest   # PowerShell 7 (pwsh) is preinstalled
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show pwsh version
+        shell: pwsh
+        run: $PSVersionTable.PSVersion.ToString()
+
+      - name: Install Pester 5
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run tests
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1 -CI
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results
+          path: tests/test-results.xml

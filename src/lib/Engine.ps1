@@ -5,9 +5,17 @@
 #>
 
 function New-AnalyzerContext {
-    param([string]$Mode, [string]$WorkDir, [string]$ReportsDir, [int]$TimeoutSeconds = 300)
+    param(
+        [string]$Mode,
+        [string]$WorkDir,
+        [string]$ReportsDir,
+        [int]$TimeoutSeconds = 300,
+        [PSCustomObject]$ProvisionResult = $null
+    )
     [PSCustomObject]@{
-        Tools          = @{}        # resolved tool handles (provisioning layer - stub for v0.1)
+        # Tools: keyed by tool Id; each has .Available, .Version, .ScriptsDir / .Command
+        Tools          = if ($null -ne $ProvisionResult) { $ProvisionResult.Tools } else { @{} }
+        Venv           = if ($null -ne $ProvisionResult) { $ProvisionResult.Venv  } else { $null }
         Mode           = $Mode
         WorkDir        = $WorkDir
         ReportsDir     = $ReportsDir
@@ -34,7 +42,8 @@ function Invoke-Scan {
         [string[]]$DisableAnalyzers = @(),
         [string]$Mode = 'online',
         [string]$AnalyzerDir,
-        [string]$ReportsDir
+        [string]$ReportsDir,
+        [PSCustomObject]$ProvisionResult = $null
     )
 
     $startTime = Get-Date
@@ -47,7 +56,8 @@ function Invoke-Scan {
     Write-Log -Message ("Profile '{0}': {1} analyzer(s) enabled, {2} disabled." -f `
         $Profile, $sel.Enabled.Count, $sel.DisabledNames.Count)
 
-    $context = New-AnalyzerContext -Mode $Mode -WorkDir $env:TEMP -ReportsDir $ReportsDir
+    $context = New-AnalyzerContext -Mode $Mode -WorkDir $env:TEMP -ReportsDir $ReportsDir `
+                   -ProvisionResult $ProvisionResult
 
     $unitResults = [System.Collections.Generic.List[object]]::new()
 

@@ -26,6 +26,7 @@ param(
     [string[]]$EnableAnalyzers = @(),
     [string[]]$DisableAnalyzers = @(),
     [ValidateSet('online', 'offline')][string]$Mode = 'online',
+    [switch]$AutoInstall,
     [switch]$Quiet,
     [ValidateSet('all', 'json')][string]$OutputFormat = 'all'
 )
@@ -35,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
-foreach ($lib in 'Logging', 'Findings', 'Classify', 'Registry', 'Report', 'Engine') {
+foreach ($lib in 'Logging', 'Findings', 'Classify', 'Registry', 'Provisioning', 'Report', 'Engine') {
     . (Join-Path $here "lib/$lib.ps1")
 }
 
@@ -47,7 +48,8 @@ $script:ExitBadInput = 3
 
 function Invoke-Main {
     param([string]$Path, [string]$Profile, [string[]]$EnableAnalyzers,
-          [string[]]$DisableAnalyzers, [string]$Mode, [bool]$Quiet, [string]$OutputFormat)
+          [string[]]$DisableAnalyzers, [string]$Mode, [bool]$AutoInstall,
+          [bool]$Quiet, [string]$OutputFormat)
 
     $script:Quiet = $Quiet
 
@@ -64,12 +66,34 @@ function Invoke-Main {
     $reportsDir = Join-Path $scanRoot '.reports'
     Initialize-Log -LogDir (Join-Path $here 'logs') | Out-Null
 
-    Write-Log -Message "media-transfer-scan-tool v0.1.0 (scaffold) - scanning: $scanRoot"
+    Write-Log -Message "media-transfer-scan-tool v0.1.0 - scanning: $scanRoot"
+
+    # ── Registry + provisioning (before scan so Context.Tools is populated) ──
+    $registry = Import-AnalyzerRegistry -AnalyzerDir (Join-Path $here 'analyzers')
+    $sel      = Resolve-EnabledAnalyzers -Registry $registry -Profile $Profile `
+                    -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers
+
+    $provision = $null
+    $analyzersNeedingTools = @($sel.Enabled | Where-Object { $_.RequiredTools.Count -gt 0 })
+    if ($analyzersNeedingTools.Count -gt 0) {
+        Show-Status 'Provisioning scanner tools...'
+        try {
+            $provision = Invoke-Provisioning `
+                -EnabledAnalyzers $sel.Enabled `
+                -VenvDir          (Join-Path $here '.scan-venv') `
+                -Mode             $Mode `
+                -AutoInstall:     $AutoInstall
+        } catch {
+            Write-Log -Level ERROR -Message "Provisioning failed: $_"
+            return $script:ExitError
+        }
+    }
 
     try {
         $result = Invoke-Scan -Path $scanRoot -Profile $Profile `
             -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers `
-            -Mode $Mode -AnalyzerDir (Join-Path $here 'analyzers') -ReportsDir $reportsDir
+            -Mode $Mode -AnalyzerDir (Join-Path $here 'analyzers') -ReportsDir $reportsDir `
+            -ProvisionResult $provision
     } catch {
         Write-Log -Level ERROR -Message "Scan failed: $_"
         return $script:ExitError
@@ -87,6 +111,7 @@ function Invoke-Main {
 # Guarded main: when dot-sourced (Pester), InvocationName is '.' and we skip running.
 if ($MyInvocation.InvocationName -ne '.') {
     $code = Invoke-Main -Path $Path -Profile $Profile -EnableAnalyzers $EnableAnalyzers `
-        -DisableAnalyzers $DisableAnalyzers -Mode $Mode -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat
+        -DisableAnalyzers $DisableAnalyzers -Mode $Mode -AutoInstall:$AutoInstall.IsPresent `
+        -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat
     exit $code
 }

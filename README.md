@@ -1,5 +1,7 @@
 # media-transfer-scan-tool
 
+[![Tests](https://github.com/StevenMcGann/media-transfer-scan-tool/actions/workflows/test.yml/badge.svg)](https://github.com/StevenMcGann/media-transfer-scan-tool/actions/workflows/test.yml)
+
 Operator-driven **static** security scanner for media-transfer review: point it at a submission folder of untrusted artifacts and get a durable, per-submission report before anything is admitted to a trusted environment.
 
 > **Status:** pre-v0.1.0 (scaffold). Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).

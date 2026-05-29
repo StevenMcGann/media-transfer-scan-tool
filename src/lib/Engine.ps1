@@ -113,6 +113,22 @@ function Invoke-Scan {
                     Write-Log -Level WARN -Message "Extraction failed for $($unit.Name) — analyzers requiring staging will skip."
                 }
             }
+            # ── Notebook projection ───────────────────────────────────────────
+            # Like extraction, this is a pre-dispatch transform: it emits structural
+            # NotebookParser findings (always, core behavior) and points downstream
+            # analyzers (Bandit/detect-secrets, deep tier) at the projected .py.
+            elseif (Test-IsNotebookUnit -Unit $unit) {
+                $safeName = $unit.Name -replace '[^\w\-.]', '_'
+                $projDir  = Join-Path $stagingRoot "nb_$safeName"
+                $proj = Convert-NotebookToPythonSource `
+                    -NotebookPath $unit.Path -OutputRoot $projDir `
+                    -OutputName "$safeName.py" -RelPath $unit.RelativePath
+                foreach ($f in $proj.Findings) { $findings.Add($f) }
+                if ($proj.Success) {
+                    $unit.StagingPath = $projDir   # code-cell projection; scanners read this
+                    Write-Log -Level DEBUG -Message "Notebook projection dir: $projDir"
+                }
+            }
 
             Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"
 

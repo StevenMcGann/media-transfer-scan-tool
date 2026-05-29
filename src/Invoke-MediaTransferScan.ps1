@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
-foreach ($lib in 'Logging', 'Findings', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Report', 'Engine') {
+foreach ($lib in 'Logging', 'Findings', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Report', 'Engine') {
     . (Join-Path $here "lib/$lib.ps1")
 }
 

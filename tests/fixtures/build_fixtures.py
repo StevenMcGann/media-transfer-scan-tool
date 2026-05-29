@@ -23,9 +23,11 @@ CORPUS_DIR   = os.path.join(FIXTURES_DIR, 'corpus')
 PYTHON_DIR   = os.path.join(CORPUS_DIR, 'python')
 NATIVE_DIR   = os.path.join(CORPUS_DIR, 'native')
 PYSRC_DIR    = os.path.join(CORPUS_DIR, 'pysource')
+NOTEBOOK_DIR = os.path.join(CORPUS_DIR, 'notebook')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
+os.makedirs(NOTEBOOK_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -249,6 +251,33 @@ secrets_py = (
 write_text(os.path.join(PYSRC_DIR, 'secrets.py'), secrets_py)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Jupyter notebook fixtures (.ipynb — JSON, never executed by the scanner)
+# ─────────────────────────────────────────────────────────────────────────────
+def notebook(cells):
+    return json.dumps({"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}, indent=1)
+
+def code_cell(src, outputs=None):
+    return {"cell_type": "code", "execution_count": None, "metadata": {},
+            "source": src, "outputs": outputs or []}
+
+# Clean notebook — benign code cell, no outputs
+write_text(os.path.join(NOTEBOOK_DIR, 'nb_clean.ipynb'),
+           notebook([code_cell(["x = 1 + 1\n", "print(x)\n"])]))
+
+# Eval notebook — risky code cell (Bandit flags via projection under -Profile full)
+write_text(os.path.join(NOTEBOOK_DIR, 'nb_eval.ipynb'),
+           notebook([code_cell(["user = 'data'\n", "eval(user)\n"])]))
+
+# Outputs notebook — code cell with saved outputs (NOTEBOOK-SAVED-OUTPUT)
+write_text(os.path.join(NOTEBOOK_DIR, 'nb_outputs.ipynb'),
+           notebook([code_cell(["print('hi')\n"],
+                     outputs=[{"output_type": "stream", "name": "stdout", "text": ["hi\n"]}])]))
+
+# Malformed notebook — valid JSON but no cells array (NOTEBOOK-MALFORMED)
+write_text(os.path.join(NOTEBOOK_DIR, 'nb_malformed.ipynb'),
+           json.dumps({"not_cells": [], "nbformat": 4}))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -265,6 +294,10 @@ manifest = {
         "pysource/clean.py":   {"expectBandit": False, "expectSecrets": False},
         "pysource/risky.py":   {"expectBandit": True},
         "pysource/secrets.py": {"expectSecrets": True},
+        "notebook/nb_clean.ipynb":     {"expectNotebookFinding": False},
+        "notebook/nb_eval.ipynb":      {"expectBanditViaProjection": True},
+        "notebook/nb_outputs.ipynb":   {"expectFinding": "NOTEBOOK-SAVED-OUTPUT"},
+        "notebook/nb_malformed.ipynb": {"expectFinding": "NOTEBOOK-MALFORMED"},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

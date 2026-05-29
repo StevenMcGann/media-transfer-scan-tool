@@ -36,6 +36,18 @@
     },
     "pysource/secrets.py": {
       "expectSecrets": true
+    },
+    "notebook/nb_clean.ipynb": {
+      "expectNotebookFinding": false
+    },
+    "notebook/nb_eval.ipynb": {
+      "expectBanditViaProjection": true
+    },
+    "notebook/nb_outputs.ipynb": {
+      "expectFinding": "NOTEBOOK-SAVED-OUTPUT"
+    },
+    "notebook/nb_malformed.ipynb": {
+      "expectFinding": "NOTEBOOK-MALFORMED"
     }
   }
 }

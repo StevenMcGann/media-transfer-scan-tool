@@ -12,6 +12,7 @@ function New-AnalyzerContext {
         [string]$Mode,
         [string]$WorkDir,
         [string]$ReportsDir,
+        [string]$HelperDir = '',
         [int]$TimeoutSeconds = 300,
         [PSCustomObject]$ProvisionResult = $null
     )
@@ -22,6 +23,7 @@ function New-AnalyzerContext {
         Mode           = $Mode
         WorkDir        = $WorkDir
         ReportsDir     = $ReportsDir
+        HelperDir      = $HelperDir   # src/helpers — Python helper scripts (inspect_binary.py, etc.)
         TimeoutSeconds = $TimeoutSeconds
         AdvisoryDbDate = $null
     }
@@ -56,6 +58,7 @@ function Invoke-Scan {
         [string]$Mode = 'online',
         [string]$AnalyzerDir,
         [string]$ReportsDir,
+        [string]$HelperDir = '',
         [PSCustomObject]$ProvisionResult = $null
     )
 
@@ -63,6 +66,11 @@ function Invoke-Scan {
     $scanRoot     = (Resolve-Path -LiteralPath $Path).Path
     $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
     $stagingRoot  = Join-Path $env:TEMP "mts-staging-$stamp-$(Get-Random)"
+
+    # Default HelperDir as sibling of the analyzers dir (src/helpers).
+    if (-not $HelperDir -and $AnalyzerDir) {
+        $HelperDir = Join-Path (Split-Path $AnalyzerDir -Parent) 'helpers'
+    }
 
     Write-Log -Message "Importing analyzer registry from: $AnalyzerDir"
     $registry = Import-AnalyzerRegistry -AnalyzerDir $AnalyzerDir
@@ -72,7 +80,7 @@ function Invoke-Scan {
         $Profile, $sel.Enabled.Count, $sel.DisabledNames.Count)
 
     $context = New-AnalyzerContext -Mode $Mode -WorkDir $stagingRoot -ReportsDir $ReportsDir `
-                   -ProvisionResult $ProvisionResult
+                   -HelperDir $HelperDir -ProvisionResult $ProvisionResult
 
     $unitResults = [System.Collections.Generic.List[object]]::new()
 

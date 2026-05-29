@@ -93,7 +93,7 @@ function Invoke-Main {
         $result = Invoke-Scan -Path $scanRoot -Profile $Profile `
             -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers `
             -Mode $Mode -AnalyzerDir (Join-Path $here 'analyzers') -ReportsDir $reportsDir `
-            -ProvisionResult $provision
+            -HelperDir (Join-Path $here 'helpers') -ProvisionResult $provision
     } catch {
         Write-Log -Level ERROR -Message "Scan failed: $_"
         return $script:ExitError

@@ -27,6 +27,7 @@ param(
     [string[]]$DisableAnalyzers = @(),
     [ValidateSet('online', 'offline')][string]$Mode = 'online',
     [switch]$AutoInstall,
+    [string]$VenvDir = '',   # override scanner venv location (offline bundle points at its vendored venv)
     [switch]$Quiet,
     [ValidateSet('all', 'json')][string]$OutputFormat = 'all'
 )
@@ -49,7 +50,7 @@ $script:ExitBadInput = 3
 function Invoke-Main {
     param([string]$Path, [string]$Profile, [string[]]$EnableAnalyzers,
           [string[]]$DisableAnalyzers, [string]$Mode, [bool]$AutoInstall,
-          [bool]$Quiet, [string]$OutputFormat)
+          [string]$VenvDir, [bool]$Quiet, [string]$OutputFormat)
 
     $script:Quiet = $Quiet
 
@@ -73,6 +74,9 @@ function Invoke-Main {
     $sel      = Resolve-EnabledAnalyzers -Registry $registry -Profile $Profile `
                     -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers
 
+    # Venv: caller override (offline bundle's vendored venv) or default beside the engine.
+    $effectiveVenv = if ($VenvDir) { $VenvDir } else { Join-Path $here '.scan-venv' }
+
     $provision = $null
     $analyzersNeedingTools = @($sel.Enabled | Where-Object { $_.RequiredTools.Count -gt 0 })
     if ($analyzersNeedingTools.Count -gt 0) {
@@ -80,7 +84,7 @@ function Invoke-Main {
         try {
             $provision = Invoke-Provisioning `
                 -EnabledAnalyzers $sel.Enabled `
-                -VenvDir          (Join-Path $here '.scan-venv') `
+                -VenvDir          $effectiveVenv `
                 -Mode             $Mode `
                 -AutoInstall:     $AutoInstall
         } catch {
@@ -112,6 +116,6 @@ function Invoke-Main {
 if ($MyInvocation.InvocationName -ne '.') {
     $code = Invoke-Main -Path $Path -Profile $Profile -EnableAnalyzers $EnableAnalyzers `
         -DisableAnalyzers $DisableAnalyzers -Mode $Mode -AutoInstall:$AutoInstall.IsPresent `
-        -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat
+        -VenvDir $VenvDir -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat
     exit $code
 }

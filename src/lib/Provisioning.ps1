@@ -219,21 +219,23 @@ function Resolve-PipTool {
     }
 
     # Missing or below-minimum.
+    # Offline mode: never install — bind to the bundle or report a coverage gap.
     if ($Mode -eq 'offline') {
         Write-Log -Level WARN -Message "OFFLINE: $pkg not available (installed: $($installedVer ?? 'none'), min: $($minVer ? $minVer : 'any')). Coverage reduced."
         return [PSCustomObject]@{ Name = $pkg; Version = $null; Available = $false; ScriptsDir = $Venv.Scripts }
     }
 
-    if (-not $AutoInstall) {
-        $response = (Read-Host "  Install/update '$pkg'? (Y/N)").Trim()
-        if ($response -notmatch '^[Yy]') {
-            Write-Log -Level WARN -Message "Skipping $pkg — coverage reduced."
-            return [PSCustomObject]@{ Name = $pkg; Version = $null; Available = $false; ScriptsDir = $Venv.Scripts }
-        }
+    # Online mode is the convenience mode: install on demand. We do NOT prompt —
+    # the engine must run non-interactively under the bootstrapper (§3.9), where
+    # Read-Host has no console. ($AutoInstall is implied online and kept only for
+    # explicit callers / signature stability.)
+    try {
+        $ver = Install-PipPackage -PythonExe $Venv.Python -Package $pkg -MinVersion $minVer
+        return [PSCustomObject]@{ Name = $pkg; Version = $ver; Available = $true; ScriptsDir = $Venv.Scripts }
+    } catch {
+        Write-Log -Level WARN -Message "Install of $pkg failed ($_). Coverage reduced."
+        return [PSCustomObject]@{ Name = $pkg; Version = $null; Available = $false; ScriptsDir = $Venv.Scripts }
     }
-
-    $ver = Install-PipPackage -PythonExe $Venv.Python -Package $pkg -MinVersion $minVer
-    return [PSCustomObject]@{ Name = $pkg; Version = $ver; Available = $true; ScriptsDir = $Venv.Scripts }
 }
 
 function Resolve-ExeTool {

@@ -34,6 +34,23 @@ jobs:
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -CI
 
+      - name: Smoke test — operator entry point (cmd -> WinPS 5.1 -> bootstrap -> pwsh 7 -> engine)
+        shell: cmd
+        # Faithfully runs the real operator chain via Scan.cmd. The committed
+        # sample fixture contains a Python script disguised as .txt, so the
+        # classifier yields HIGH -> the engine exits 10. -Mode offline skips tool
+        # installation (provisioning is covered by the Pester suite); the value
+        # here is the 5.1->7 handoff + exit-code propagation, which unit tests
+        # can't exercise. (A comma-list -DisableAnalyzers does not bind through
+        # -File, so offline mode is the reliable fast path.)
+        run: |
+          call Scan.cmd -Path tests\fixtures\sample -Profile core -Mode offline
+          set RC=%ERRORLEVEL%
+          echo Scan.cmd exit code: %RC%
+          if not "%RC%"=="10" (echo Expected exit 10 from disguised fixture, got %RC% & exit /b 1)
+          if not exist tests\fixtures\sample\.reports\*.html (echo No HTML report produced & exit /b 1)
+          echo Smoke OK: bootstrapper resolved pwsh 7, engine ran, exit 10, report present.
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v5

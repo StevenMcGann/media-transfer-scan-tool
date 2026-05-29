@@ -99,6 +99,7 @@ function New-Unit {
         Name         = $File.Name
         Path         = $File.FullName
         RelativePath = $rel
+        StagingPath  = $null   # populated by archive extraction (v0.1.0 port)
     }
 
     $findings = @()

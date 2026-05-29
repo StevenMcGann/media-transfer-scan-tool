@@ -181,7 +181,10 @@ function Install-PipPackage {
     Show-Status "Installing $Package..."
     Write-Log -Level INFO -Message "Installing/upgrading pip package: $Package"
     $out = & $PythonExe -m pip install --upgrade $Package 2>&1
-    foreach ($line in $out) { Write-Log -Level DEBUG -Message ([string]$line) }
+    foreach ($line in $out) {
+        $s = ([string]$line).Trim()
+        if ($s) { Write-Log -Level DEBUG -Message $s }
+    }
 
     $ver = Get-InstalledPipVersion -PythonExe $PythonExe -PackageName $Package
     if (-not $ver) { throw "pip install of '$Package' appeared to succeed but package not found afterwards." }

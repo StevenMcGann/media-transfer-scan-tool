@@ -26,6 +26,16 @@
     },
     "native/fake_native_pkg-1.0-py3-none-any.whl": {
       "expectFinding": "BINARY-INVALID-FORMAT"
+    },
+    "pysource/clean.py": {
+      "expectBandit": false,
+      "expectSecrets": false
+    },
+    "pysource/risky.py": {
+      "expectBandit": true
+    },
+    "pysource/secrets.py": {
+      "expectSecrets": true
     }
   }
 }

@@ -22,8 +22,10 @@ FIXTURES_DIR = os.path.dirname(__file__)
 CORPUS_DIR   = os.path.join(FIXTURES_DIR, 'corpus')
 PYTHON_DIR   = os.path.join(CORPUS_DIR, 'python')
 NATIVE_DIR   = os.path.join(CORPUS_DIR, 'native')
+PYSRC_DIR    = os.path.join(CORPUS_DIR, 'pysource')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
+os.makedirs(PYSRC_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -215,6 +217,38 @@ write(os.path.join(NATIVE_DIR, 'fake_native_pkg-1.0-py3-none-any.whl'),
       }))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Loose Python source fixtures (for Bandit + detect-secrets, deep tier)
+# Secret-like strings are ASSEMBLED FROM FRAGMENTS so this generator file does
+# not itself trip GitHub push-protection / secret scanning.
+# ─────────────────────────────────────────────────────────────────────────────
+clean_py = (
+    '"""Benign module — no risky calls, no secrets."""\n'
+    'def add(a, b):\n'
+    '    return a + b\n'
+)
+write_text = lambda p, s: (open(p, 'w', encoding='utf-8').write(s), print(f'  wrote {p}'))[1]
+write_text(os.path.join(PYSRC_DIR, 'clean.py'), clean_py)
+
+# Risky code — Bandit B307 (eval, MEDIUM) + B602 (subprocess shell=True, HIGH)
+risky_py = (
+    'import subprocess\n'
+    'def run(user_input, cmd):\n'
+    '    eval(user_input)\n'
+    '    subprocess.Popen(cmd, shell=True)\n'
+)
+write_text(os.path.join(PYSRC_DIR, 'risky.py'), risky_py)
+
+# Secrets — assembled so the literals never appear whole in this file.
+aws_key = 'AKIA' + 'QWERTYUIOP123456'                       # AWS key format: AKIA + 16
+pem_hdr = '-----BEGIN ' + 'RSA PRIVATE KEY' + '-----'        # PrivateKeyDetector trigger
+secrets_py = (
+    '# Deterministic fixture with fake credentials (not real).\n'
+    f'aws_access_key = "{aws_key}"\n'
+    f'private_key = "{pem_hdr}\\nMIIBfake/not/a/real/key==\\n"\n'
+)
+write_text(os.path.join(PYSRC_DIR, 'secrets.py'), secrets_py)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -228,6 +262,9 @@ manifest = {
         "native/suspicious_imports_pkg-1.0-py3-none-any.whl": {"expectFinding": "BINARY-SUSPICIOUS-IMPORT"},
         "native/network_native_pkg-1.0-py3-none-any.whl":   {"expectFinding": "BINARY-NETWORK-IMPORT"},
         "native/fake_native_pkg-1.0-py3-none-any.whl":      {"expectFinding": "BINARY-INVALID-FORMAT"},
+        "pysource/clean.py":   {"expectBandit": False, "expectSecrets": False},
+        "pysource/risky.py":   {"expectBandit": True},
+        "pysource/secrets.py": {"expectSecrets": True},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

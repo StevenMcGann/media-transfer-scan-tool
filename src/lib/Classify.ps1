@@ -29,7 +29,14 @@ $script:ExtTypeMap = @{
     '.pkl' = 'model'; '.pickle' = 'model'; '.pt' = 'model'; '.pth' = 'model'
     '.joblib' = 'model'; '.safetensors' = 'model'; '.gguf' = 'model'
     '.zip' = 'archive'; '.tgz' = 'archive'; '.tar' = 'archive'; '.gz' = 'archive'
-    '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'
+    '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'; '.ts' = 'npm'
+}
+
+# Specific filenames that determine type regardless of extension (.json is generic,
+# but package.json / package-lock.json are npm manifests).
+$script:FilenameTypeMap = @{
+    'package.json'      = 'npm'
+    'package-lock.json' = 'npm'
 }
 
 # ZIP-based formats whose magic bytes (PK) legitimately don't match their declared type.
@@ -85,6 +92,7 @@ $script:ContentSignatures = [ordered]@{
 function Get-DeclaredType {
     param([System.IO.FileInfo]$File)
     $name = $File.Name.ToLowerInvariant()
+    if ($script:FilenameTypeMap.ContainsKey($name)) { return $script:FilenameTypeMap[$name] }
     if ($name.EndsWith('.tar.gz')) { return 'archive' }
     $ext = $File.Extension.ToLowerInvariant()
     return $script:ExtTypeMap[$ext]   # $null if unknown

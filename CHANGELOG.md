@@ -8,6 +8,23 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-30
+
+### Added
+- **npm analysis (v0.6):** `NpmScan` (core, dependency-free core) on `npm` units
+  (loose `package.json` / `.js` / `.ts`) and extracted `.tgz` tarballs:
+  1. **package.json lifecycle scripts** — `preinstall`/`install`/`postinstall`
+     (run on `npm install`, the #1 npm supply-chain vector) flagged HIGH; their
+     command strings inspected for risky tooling; `prepare`/`prepublish` MEDIUM;
+     `bin` shims noted.
+  2. **JavaScript risky patterns** — `child_process`/`exec`/`spawn`, `eval()`,
+     `Function()` constructor, long hex-escape obfuscation.
+  3. **OSV dependency audit** (online, no tool install — OSV.dev REST API): when a
+     `package-lock.json` with exact versions is present, batch-queries OSV for
+     known vulnerabilities. Offline / no lockfile → coverage-gap note.
+- Classifier: `package.json` / `package-lock.json` routed to `npm` by filename;
+  `.ts` added to npm extensions.
+
 ## [0.5.0] - 2026-05-30
 
 ### Added

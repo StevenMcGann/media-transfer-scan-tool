@@ -12,7 +12,7 @@ jobs:
   pester:
     runs-on: windows-latest   # PowerShell 7 (pwsh) is preinstalled
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Show pwsh version
         shell: pwsh

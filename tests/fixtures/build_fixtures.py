@@ -31,6 +31,7 @@ SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
 PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
 NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
+ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -43,6 +44,7 @@ os.makedirs(PS_DIR, exist_ok=True)
 for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -547,6 +549,50 @@ with zipfile.ZipFile(buf, 'w') as z:
 write(_pt, buf.getvalue())
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Generic-archive hazard fixtures (v0.8)
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean zip — normal files, no hazards
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('a.txt', FIXED_ZIP_DT), 'hello\n')
+    z.writestr(zipfile.ZipInfo('dir/b.txt', FIXED_ZIP_DT), 'world\n')
+write(os.path.join(ARCHIVE_DIR, 'clean.zip'), buf.getvalue())
+
+# Decompression bomb — one entry of 16 MiB zeros. NOTE: a ZipInfo defaults to
+# ZIP_STORED, so compress_type must be passed explicitly or it won't compress.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w') as z:
+    z.writestr(zipfile.ZipInfo('bomb.bin', FIXED_ZIP_DT),
+               b'\x00' * (16 * 1024 * 1024), zipfile.ZIP_DEFLATED)
+write(os.path.join(ARCHIVE_DIR, 'bomb.zip'), buf.getvalue())
+
+# Symlink entry (unix S_IFLNK mode in external attributes)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+    zi = zipfile.ZipInfo('evil-link', FIXED_ZIP_DT)
+    zi.external_attr = (0o120777 << 16)        # S_IFLNK | 0777
+    z.writestr(zi, '/etc/passwd')
+    z.writestr(zipfile.ZipInfo('readme.txt', FIXED_ZIP_DT), 'ok\n')
+write(os.path.join(ARCHIVE_DIR, 'symlink.zip'), buf.getvalue())
+
+# Nested archive — a zip containing another zip
+_inner = io.BytesIO()
+with zipfile.ZipFile(_inner, 'w') as iz:
+    iz.writestr(zipfile.ZipInfo('inner.txt', FIXED_ZIP_DT), 'nested\n')
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('payload.zip', FIXED_ZIP_DT), _inner.getvalue())
+    z.writestr(zipfile.ZipInfo('notes.txt', FIXED_ZIP_DT), 'see payload.zip\n')
+write(os.path.join(ARCHIVE_DIR, 'nested.zip'), buf.getvalue())
+
+# Path traversal (zip-slip)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w') as z:
+    z.writestr('safe.txt', 'ok\n')
+    z.writestr('../../escape.txt', 'pwned\n')
+write(os.path.join(ARCHIVE_DIR, 'traversal.zip'), buf.getvalue())
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -605,6 +651,11 @@ manifest = {
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},
         "model/model.pt":          {"expectFinding": "PICKLE-REDUCE"},
+        "archive/clean.zip":     {"expectHazard": False},
+        "archive/bomb.zip":      {"expectFinding": "MTS-EXTRACT-BOMB", "blocked": True},
+        "archive/symlink.zip":   {"expectFinding": "MTS-EXTRACT-SYMLINK"},
+        "archive/nested.zip":    {"expectFinding": "MTS-EXTRACT-NESTED"},
+        "archive/traversal.zip": {"expectFinding": "MTS-EXTRACT-TRAVERSAL", "blocked": True},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

@@ -166,6 +166,23 @@
     },
     "model/model.pt": {
       "expectFinding": "PICKLE-REDUCE"
+    },
+    "archive/clean.zip": {
+      "expectHazard": false
+    },
+    "archive/bomb.zip": {
+      "expectFinding": "MTS-EXTRACT-BOMB",
+      "blocked": true
+    },
+    "archive/symlink.zip": {
+      "expectFinding": "MTS-EXTRACT-SYMLINK"
+    },
+    "archive/nested.zip": {
+      "expectFinding": "MTS-EXTRACT-NESTED"
+    },
+    "archive/traversal.zip": {
+      "expectFinding": "MTS-EXTRACT-TRAVERSAL",
+      "blocked": true
     }
   }
 }

@@ -8,6 +8,22 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-30
+
+### Added
+- **Archive hardening (v0.8):** ZIP-family archives are inspected BEFORE extraction
+  and hard-blocked (never written to disk) on a hazard:
+  - **Zip-slip / path traversal** (`..`, absolute, drive-rooted) → HARD block.
+  - **Decompression bomb** → HARD block: per-entry ratio (>100× over a 10 MB floor),
+    512 MB aggregate-uncompressed cap, and a 50k entry-count cap.
+  - **Symlink entries** (unix `S_IFLNK` in external attributes) → flagged (MEDIUM).
+  - **Nested archives** → flagged (LOW; scanned at top level only).
+  - tar (`.tgz`/`.tar.gz`): a `tar -tzf` listing is checked for traversal before
+    extraction; the Python tarfile fallback uses the secure PEP 706 `data` filter.
+
+### Changed
+- Path-traversal handling moved from advisory to a true pre-extraction block.
+
 ## [0.7.0] - 2026-05-30
 
 ### Added

@@ -1,33 +1,137 @@
 #Requires -Version 7.4
 <#
-    Expand-Archive.ps1 - extract Python package archives into a staging directory.
+    Expand-Archive.ps1 - safely extract submission archives into a staging dir.
 
-    Ported from scan-python-packages v1.6.1 Expand-PythonArchive with:
+    Ported from scan-python-packages v1.6.1 Expand-PythonArchive, then hardened
+    for v0.8 archive analysis:
       - PS 7: [System.IO.Compression.ZipFile] used directly for ZIP-family
         archives (.whl, .egg, .zip) — no temp-copy-to-.zip workaround needed
-        (that workaround existed solely for PS 5.1's Expand-Archive restriction)
-      - PS 7: no EAP wrapper around tar (native stderr no longer triggers Stop)
-      - Zip-family disambiguation: after extraction, peek at entries to detect
-        OOXML (.docx etc.) vs Python wheel/egg vs plain ZIP — logged for now;
-        full routing to office/npm analyzers arrives in v0.3/v0.6
-      - Archive-hazard guards (PLAN §4 v0.8): path-traversal and size cap stubs
-        that log warnings and will be enforcement-hardened in v0.8.0
+        (that workaround existed solely for PS 5.1's Expand-Archive restriction).
+      - PS 7: no EAP wrapper around tar (native stderr no longer triggers Stop).
+      - ZIP-family disambiguation: peek at entries to distinguish OOXML / Python
+        wheel / npm / plain ZIP (informational; routing is by classified type).
+      - v0.8 archive hardening (ZIP): the archive is inspected BEFORE extraction
+        and HARD-BLOCKED (never extracted) on a path-traversal entry or a
+        decompression bomb; symlink entries and nested archives are flagged.
+      - tar: a `tar -tzf` listing is checked for path traversal before extraction;
+        the Python tarfile fallback uses the secure `data` extraction filter.
 
-    Returns a PSCustomObject { Success; StagingPath; Findings }
-    Findings carry any archive-hazard parser findings. On failure, Success=$false
-    and StagingPath is the partially-extracted directory (may be empty).
+    Returns @{ Success; StagingPath; Findings }. On failure (corrupt / blocked /
+    error) Success=$false and the staging dir is left empty or partial.
 #>
 
 Set-StrictMode -Version Latest
 
-# Maximum uncompressed bytes we'll extract (256 MB); prevents decompression bombs.
-# Will become a hard abort in v0.8.0 archive hardening.
-$script:MaxExtractedBytes = 256MB
+# Decompression-bomb thresholds (v0.8).
+$script:MaxTotalUncompressed = 512MB   # aggregate cap across all entries
+$script:BombEntryFloor       = 10MB    # only ratio-check entries above this size
+$script:BombRatio            = 100      # uncompressed/compressed ratio that signals a bomb
+$script:MaxEntryCount        = 50000    # absurd entry counts are bomb-like
+
+# Extensions that indicate a nested archive (flagged, not recursively expanded).
+$script:NestedArchiveExt = @('.zip', '.whl', '.egg', '.jar', '.tgz', '.gz', '.tar', '.7z', '.rar', '.bz2', '.xz')
+
+function Test-ZipArchiveHazards {
+    <#
+        Inspect a ZIP's entries (without extracting) for path traversal,
+        decompression bombs, symlinks, and nested archives. Returns
+        @{ Block = <bool>; Findings = <object[]>; EntryNames = <string[]> }.
+        Block is set for traversal or bomb hazards — the caller must NOT extract.
+    #>
+    param([string]$InputFile, [string]$RelPath)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $entryNames = @()
+    $block = $false
+
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($InputFile)   # throws InvalidDataException if corrupt
+    try {
+        $entries = @($zip.Entries)
+        $entryNames = @($entries | ForEach-Object { $_.FullName })
+
+        # ── Path traversal (zip-slip) — HARD block ───────────────────────────
+        $traversal = @($entryNames | Where-Object {
+            $_ -match '\.\.[/\\]' -or [IO.Path]::IsPathRooted($_) -or $_.StartsWith('/') -or $_ -match '^[A-Za-z]:'
+        })
+        if ($traversal.Count -gt 0) {
+            $block = $true
+            $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $RelPath `
+                -Issue "Path-traversal (zip-slip) entry/entries: $(($traversal | Select-Object -First 3) -join ', ')" `
+                -TestID 'MTS-EXTRACT-TRAVERSAL' `
+                -Recommendation 'Rejected — the archive tries to write outside the extraction directory.'))
+        }
+
+        # ── Decompression bomb — HARD block ──────────────────────────────────
+        $totalUncompressed = 0L
+        foreach ($e in $entries) {
+            $totalUncompressed += [int64]$e.Length
+            if ($e.Length -gt $script:BombEntryFloor -and $e.CompressedLength -gt 0) {
+                $ratio = [double]$e.Length / [double]$e.CompressedLength
+                if ($ratio -gt $script:BombRatio) {
+                    $block = $true
+                    $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                        -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $RelPath `
+                        -Issue ("Decompression-bomb entry '{0}': {1:N0} bytes from {2:N0} (ratio {3:N0}x)." -f `
+                            $e.FullName, $e.Length, $e.CompressedLength, $ratio) `
+                        -TestID 'MTS-EXTRACT-BOMB' `
+                        -Recommendation 'Rejected — entry expands far beyond its compressed size.'))
+                }
+            }
+        }
+        if ($totalUncompressed -gt $script:MaxTotalUncompressed) {
+            $block = $true
+            $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $RelPath `
+                -Issue ("Total uncompressed size {0:N0} bytes exceeds the {1:N0}-byte cap." -f $totalUncompressed, $script:MaxTotalUncompressed) `
+                -TestID 'MTS-EXTRACT-BOMB' `
+                -Recommendation 'Rejected — aggregate decompressed size exceeds the safety cap.'))
+        }
+        if ($entries.Count -gt $script:MaxEntryCount) {
+            $block = $true
+            $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $RelPath `
+                -Issue "Archive has $($entries.Count) entries (cap $($script:MaxEntryCount))." `
+                -TestID 'MTS-EXTRACT-BOMB'))
+        }
+
+        # ── Symlink entries — flag (not blocked; .NET extract ignores them) ──
+        $symlinks = @($entries | Where-Object {
+            # Unix mode is the high 16 bits of ExternalAttributes; S_IFLNK = 0xA000.
+            # Mask to 32 bits first so a sign-extended int32 doesn't skew the shift.
+            ((([int64]$_.ExternalAttributes -band 0xFFFFFFFF) -shr 16) -band 0xF000) -eq 0xA000
+        })
+        if ($symlinks.Count -gt 0) {
+            $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                -Severity 'MEDIUM' -Confidence 'MEDIUM' -UnitType 'archive' -File $RelPath `
+                -Issue "Archive contains $($symlinks.Count) symlink entry/entries: $((@($symlinks | ForEach-Object { $_.FullName }) | Select-Object -First 3) -join ', ')" `
+                -TestID 'MTS-EXTRACT-SYMLINK' `
+                -Recommendation 'Review — symlinks in archives can redirect writes/reads outside the tree.'))
+        }
+
+        # ── Nested archives — flag (extracted top-level only; no recursion) ──
+        $nested = @($entryNames | Where-Object {
+            $n = $_.ToLowerInvariant()
+            @($script:NestedArchiveExt | Where-Object { $n.EndsWith($_) }).Count -gt 0
+        })
+        if ($nested.Count -gt 0) {
+            $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                -Severity 'LOW' -Confidence 'MEDIUM' -UnitType 'archive' -File $RelPath `
+                -Issue "Archive contains $($nested.Count) nested archive(s) (scanned at top level only): $(($nested | Select-Object -First 3) -join ', ')" `
+                -TestID 'MTS-EXTRACT-NESTED' `
+                -Recommendation 'Review nested archives separately — they are a common bomb/evasion vector.'))
+        }
+    } finally {
+        $zip.Dispose()
+    }
+
+    return @{ Block = $block; Findings = $findings.ToArray(); EntryNames = $entryNames }
+}
 
 function Expand-SubmissionArchive {
     <#
-        Extract one archive file into $OutputDir.
-        Returns @{ Success; StagingPath; Findings }
+        Extract one archive file into $OutputDir, with v0.8 hazard guards.
+        Returns @{ Success; StagingPath; Findings }.
     #>
     param(
         [Parameter(Mandatory)][string]$InputFile,
@@ -44,18 +148,13 @@ function Expand-SubmissionArchive {
     $isTar = $name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')
     $isZip = $ext -in @('.whl', '.egg', '.zip')
 
-    Write-Log -Level INFO -Message "Extracting: $(Split-Path $InputFile -Leaf) -> $OutputDir"
+    Write-Log -Level INFO -Message "Extracting: $relPath -> $OutputDir"
 
     try {
         if ($isZip) {
-            # ── Pre-extraction inspection (PLAN §3.7 disambiguation + path-traversal)
-            # Must happen BEFORE ExtractToDirectory because .NET 6+ throws IOException
-            # on traversal entries during extraction — we need to flag them first.
-            $entryNames = @()
+            # Inspect BEFORE extracting (zip-slip / bomb must be caught pre-write).
             try {
-                $zip = [System.IO.Compression.ZipFile]::OpenRead($InputFile)
-                try { $entryNames = @($zip.Entries | ForEach-Object { $_.FullName }) }
-                finally { $zip.Dispose() }
+                $hazards = Test-ZipArchiveHazards -InputFile $InputFile -RelPath $relPath
             } catch [System.IO.InvalidDataException] {
                 $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `
                     -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' `
@@ -64,60 +163,41 @@ function Expand-SubmissionArchive {
                     -Recommendation 'Reject this archive — content cannot be inspected.'))
                 return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
             }
+            foreach ($f in $hazards.Findings) { $findings.Add($f) }
 
-            # ZIP-family disambiguation
-            $isOoxml = $entryNames -contains '[Content_Types].xml'
-            $isWheel = @($entryNames | Where-Object { $_ -match '\.dist-info/' }).Count -gt 0
-            $isNpm   = $entryNames -contains 'package/package.json'
-            if ($isOoxml)       { Write-Log -Level DEBUG -Message "ZIP disambiguation: $name → OOXML/Office (routes to office analyzer in v0.3)" }
-            elseif ($isNpm)     { Write-Log -Level DEBUG -Message "ZIP disambiguation: $name → npm package (routes to npm analyzer in v0.6)" }
-            elseif ($isWheel)   { Write-Log -Level DEBUG -Message "ZIP disambiguation: $name → Python wheel/egg ✓" }
-            else                { Write-Log -Level DEBUG -Message "ZIP disambiguation: $name → plain ZIP archive" }
+            # ZIP-family disambiguation (informational).
+            $en = $hazards.EntryNames
+            if     ($en -contains '[Content_Types].xml')                       { Write-Log -Level DEBUG -Message "ZIP: $name -> OOXML/Office" }
+            elseif ($en -contains 'package/package.json')                      { Write-Log -Level DEBUG -Message "ZIP: $name -> npm package" }
+            elseif (@($en | Where-Object { $_ -match '\.dist-info/' }).Count)  { Write-Log -Level DEBUG -Message "ZIP: $name -> Python wheel/egg" }
+            else                                                               { Write-Log -Level DEBUG -Message "ZIP: $name -> plain ZIP" }
 
-            # Path-traversal guard — flag before extracting (v0.8.0 will make this a hard abort)
-            $traversal = @($entryNames | Where-Object {
-                $_ -match '\.\.[/\\]' -or [IO.Path]::IsPathRooted($_) -or $_.StartsWith('/')
-            })
-            if ($traversal.Count -gt 0) {
-                $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
-                    -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $relPath `
-                    -Issue "Archive contains $($traversal.Count) path-traversal entry/entries: $(($traversal | Select-Object -First 3) -join ', ')" `
-                    -TestID 'MTS-EXTRACT-TRAVERSAL' `
-                    -Recommendation 'Reject this archive — it may attempt to write files outside the extraction directory.'))
-                Write-Log -Level WARN -Message "Path-traversal entries detected in $name — extraction will be attempted (hard block in v0.8.0)"
-            }
-
-            # ── Extract ────────────────────────────────────────────────────
-            # PS 7: use ZipFile directly — no temp-copy-to-.zip workaround (PLAN §6)
-            try {
-                [System.IO.Compression.ZipFile]::ExtractToDirectory($InputFile, $OutputDir, $true)
-            } catch [System.IO.InvalidDataException] {
-                $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `
-                    -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' `
-                    -File $relPath -Issue 'Archive appears corrupt or is not a valid ZIP.' `
-                    -TestID 'MTS-EXTRACT-CORRUPT' `
-                    -Recommendation 'Reject this archive — content cannot be inspected.'))
+            # HARD block: never extract a traversal/bomb archive.
+            if ($hazards.Block) {
+                Write-Log -Level WARN -Message "Blocked extraction of $name (archive hazard)."
                 return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
-            } catch [System.IO.IOException] {
-                # .NET 6+ throws IOException on path-traversal entries during extraction.
-                # We already flagged this above; mark extraction as failed.
-                if ($traversal.Count -gt 0) {
-                    return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
-                }
-                throw   # unexpected IOException — re-raise
             }
 
+            # Safe to extract. PS 7: ZipFile directly (PLAN §6).
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($InputFile, $OutputDir, $true)
             Write-Log -Level DEBUG -Message "Extracted ZIP-family archive OK."
         }
         elseif ($isTar) {
             $tarCmd = Get-Command 'tar' -ErrorAction SilentlyContinue
             if ($tarCmd) {
-                # PS 7: no EAP wrapper needed (PLAN §6 retire)
-                $tarOut = & tar -xzf $InputFile -C $OutputDir 2>&1
-                foreach ($line in $tarOut) {
-                    $s = ([string]$line).Trim()
-                    if ($s) { Write-Log -Level DEBUG -Message "tar: $s" }
+                # Pre-list and block path traversal before extracting (zip-slip for tar).
+                $listing = & tar -tzf $InputFile 2>$null
+                $traversal = @($listing | Where-Object { $_ -match '\.\.[/\\]' -or $_ -match '^/' -or $_ -match '^[A-Za-z]:' })
+                if ($traversal.Count -gt 0) {
+                    $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
+                        -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' -File $relPath `
+                        -Issue "Path-traversal entry/entries in tarball: $(($traversal | Select-Object -First 3) -join ', ')" `
+                        -TestID 'MTS-EXTRACT-TRAVERSAL' `
+                        -Recommendation 'Rejected — tarball tries to write outside the extraction directory.'))
+                    return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
                 }
+                $tarOut = & tar -xzf $InputFile -C $OutputDir 2>&1
+                foreach ($line in $tarOut) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "tar: $s" } }
                 if ($LASTEXITCODE -ne 0) {
                     $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `
                         -Severity 'HIGH' -Confidence 'MEDIUM' -UnitType 'archive' `
@@ -128,36 +208,35 @@ function Expand-SubmissionArchive {
                 }
                 Write-Log -Level DEBUG -Message "Extracted tarball with system tar OK."
             } else {
-                # Fallback: Python tarfile module (always available in any venv)
                 if (-not $FallbackPython) {
                     $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `
                         -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'archive' `
-                        -File $relPath -Issue "system tar not found and no Python fallback available." `
+                        -File $relPath -Issue 'system tar not found and no Python fallback available.' `
                         -TestID 'MTS-EXTRACT-NO-TAR'))
                     return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
                 }
-
-                Write-Log -Level WARN -Message "system tar not found; using Python tarfile fallback."
+                Write-Log -Level WARN -Message "system tar not found; using Python tarfile fallback (secure 'data' filter)."
+                # tarfile's 'data' filter (PEP 706) blocks path traversal, absolute
+                # paths, and dangerous symlinks during extraction.
                 $pyScript = @'
 import sys, tarfile, os
 infile, outdir = sys.argv[1], sys.argv[2]
 os.makedirs(outdir, exist_ok=True)
 with tarfile.open(infile, 'r:*') as t:
-    t.extractall(outdir)
+    try:
+        t.extractall(outdir, filter='data')
+    except TypeError:
+        t.extractall(outdir)  # Python < 3.12 has no filter kwarg
 '@
                 $tmpScript = Join-Path $env:TEMP "mts_tar_$([IO.Path]::GetRandomFileName()).py"
                 Set-Content -LiteralPath $tmpScript -Value $pyScript -Encoding utf8
                 try {
                     $pyOut = & $FallbackPython $tmpScript $InputFile $OutputDir 2>&1
-                    foreach ($line in $pyOut) {
-                        $s = ([string]$line).Trim()
-                        if ($s) { Write-Log -Level DEBUG -Message "tarfile: $s" }
-                    }
+                    foreach ($line in $pyOut) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "tarfile: $s" } }
                     if ($LASTEXITCODE -ne 0) {
                         $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `
-                            -Severity 'HIGH' -Confidence 'MEDIUM' -UnitType 'archive' `
-                            -File $relPath `
-                            -Issue "Python tarfile extraction exited $LASTEXITCODE — archive may be corrupt." `
+                            -Severity 'HIGH' -Confidence 'MEDIUM' -UnitType 'archive' -File $relPath `
+                            -Issue "Python tarfile extraction exited $LASTEXITCODE — archive may be corrupt or unsafe." `
                             -TestID 'MTS-EXTRACT-PYTAR-ERR'))
                         return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
                     }

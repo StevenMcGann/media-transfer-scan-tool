@@ -8,6 +8,21 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-30
+
+### Added
+- **Model / pickle analysis (v0.7):** `PickleOpcodeScan` (core) + `helpers/scan_pickle.py`
+  on `model` units (`.pkl .pickle .pt .pth .bin .joblib .h5 .pb .onnx .safetensors
+  .gguf .npy .npz`) and model files inside extracted archives.
+  - **Pickle opcode triage** via `pickletools.genops` — walks the opcode stream
+    and is NEVER unpickled (unpickling executes code). Flags `REDUCE` (the
+    code-exec primitive, CRITICAL), `GLOBAL`/`STACK_GLOBAL` arbitrary imports, and
+    dangerous modules (`os`/`nt`/`subprocess`/`builtins`/...) as CRITICAL.
+  - **Safe-format recognition:** safetensors and GGUF cleared as safe-by-design.
+  - **Embedded pickles:** PyTorch `.pt`/`.pth` ZIP containers are opened and their
+    `data.pkl` scanned; `.pt` is routed to `model` (not generic archive).
+- Classifier: `model` added to the ZIP-container types (PyTorch `.pt` is a ZIP).
+
 ## [0.6.0] - 2026-05-30
 
 ### Added

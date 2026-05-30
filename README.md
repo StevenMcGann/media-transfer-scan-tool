@@ -4,7 +4,7 @@
 
 Operator-driven **static** security scanner for media-transfer review: point it at a submission folder of untrusted artifacts and get a durable, per-submission report before anything is admitted to a trusted environment.
 
-> **Status:** **v0.6.0** — Python · disguised scripts · Office/PDF · shell · PowerShell · **npm** (package.json install-script analysis + JS risky patterns + OSV dependency audit) + offline deployment. Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
+> **Status:** **v0.7.0** — Python · disguised scripts · Office/PDF · shell · PowerShell · npm · **ML/model files** (pickle opcode scan — flags `REDUCE`/dangerous-imports without ever unpickling; safetensors/GGUF recognized safe) + offline deployment. Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
 
 ## What it is / is not
 

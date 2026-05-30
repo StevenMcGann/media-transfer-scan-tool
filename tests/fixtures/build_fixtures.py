@@ -30,6 +30,7 @@ OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
 PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
 NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
+MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -41,6 +42,7 @@ os.makedirs(SHELL_DIR, exist_ok=True)
 os.makedirs(PS_DIR, exist_ok=True)
 for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -515,6 +517,36 @@ write_text(os.path.join(NPM_DIR, 'locked', 'package-lock.json'),
                              "node_modules/lodash": {"version": "4.17.4"}}}, indent=2))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Model / pickle fixtures (v0.7)
+# ─────────────────────────────────────────────────────────────────────────────
+import pickle as _pickle
+import struct as _struct
+
+# Benign pickle — plain data, no GLOBAL/REDUCE
+write(os.path.join(MODEL_DIR, 'safe.pkl'),
+      _pickle.dumps({"weights": [1, 2, 3], "name": "clean-model"}))
+
+# Malicious pickle — __reduce__ returns os.system(...) => GLOBAL + REDUCE.
+# Only DUMPED here (never loaded); the class need not be importable later.
+class _Exploit:
+    def __reduce__(self):
+        import os
+        return (os.system, ("echo pwned",))
+write(os.path.join(MODEL_DIR, 'malicious.pkl'), _pickle.dumps(_Exploit()))
+
+# safetensors — safe-by-design (8-byte LE header length + JSON header)
+_st_header = b'{"__metadata__":{"format":"pt"}}'
+write(os.path.join(MODEL_DIR, 'model.safetensors'),
+      _struct.pack('<Q', len(_st_header)) + _st_header)
+
+# PyTorch-style .pt — a ZIP containing <name>/data.pkl (malicious pickle)
+_pt = os.path.join(MODEL_DIR, 'model.pt')
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w') as z:
+    z.writestr(zipfile.ZipInfo('model/data.pkl', FIXED_ZIP_DT), _pickle.dumps(_Exploit()))
+write(_pt, buf.getvalue())
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -569,6 +601,10 @@ manifest = {
         "npm/js/clean.js":             {"expectRiskyCode": False},
         "npm/tarball/evil_pkg-1.0.0.tgz": {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
         "npm/locked/package-lock.json":{"expectOsvOnline": True},
+        "model/safe.pkl":          {"expectDeserialization": False},
+        "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
+        "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},
+        "model/model.pt":          {"expectFinding": "PICKLE-REDUCE"},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

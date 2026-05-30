@@ -40,7 +40,8 @@ $script:FilenameTypeMap = @{
 }
 
 # ZIP-based formats whose magic bytes (PK) legitimately don't match their declared type.
-$script:KnownZipContainerTypes = @('python', 'office', 'npm')
+# 'model' is here because PyTorch .pt/.pth are ZIP archives containing data.pkl.
+$script:KnownZipContainerTypes = @('python', 'office', 'npm', 'model')
 
 # Types that represent executable scripts — disguising one of these under an
 # innocent extension is the high-value evasion this module exists to catch.

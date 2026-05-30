@@ -154,6 +154,18 @@
     },
     "npm/locked/package-lock.json": {
       "expectOsvOnline": true
+    },
+    "model/safe.pkl": {
+      "expectDeserialization": false
+    },
+    "model/malicious.pkl": {
+      "expectFinding": "PICKLE-REDUCE"
+    },
+    "model/model.safetensors": {
+      "expectFinding": "MODEL-SAFE-FORMAT"
+    },
+    "model/model.pt": {
+      "expectFinding": "PICKLE-REDUCE"
     }
   }
 }

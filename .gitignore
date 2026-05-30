@@ -27,6 +27,7 @@ tests/fixtures/corpus/notebook/
 tests/fixtures/corpus/disguised/
 tests/fixtures/corpus/pdf/
 tests/fixtures/corpus/office/
+tests/fixtures/corpus/shell/
 tests/fixtures/__pycache__/
 
 # Python

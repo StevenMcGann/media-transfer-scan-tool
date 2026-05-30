@@ -8,6 +8,18 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **Shell script analysis (v0.4):** two-layer analysis on `.sh`/`.bash`/`.zsh`/`.ksh`
+  units and shell content detected via the classifier (v0.2 disguised scripts):
+  1. **ShellCheck** (via `shellcheck-py` pip package, which bundles the binary):
+     full structural static analysis — quoting bugs, undefined variables, command
+     injection, deprecated constructs (SC-coded findings).
+  2. **Custom risky-pattern rules** (pure PowerShell, always runs): catches
+     `curl|bash`, `base64 -d|bash`, `eval` with expansion, `chmod 777`, and
+     hardcoded IPv4 addresses. These are intentionally not ShellCheck errors
+     (syntactically valid shell) but operationally dangerous in a media-transfer
+     context.
+
 ## [0.3.0] - 2026-05-29
 
 Document analysis — Office + PDF triage.

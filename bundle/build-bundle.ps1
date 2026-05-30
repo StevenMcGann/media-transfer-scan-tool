@@ -51,6 +51,8 @@ $SCANNER_PACKAGES = @(
     @{ Id = 'detect-secrets'; Min = '1.4.0' }
     @{ Id = 'pefile';         Min = '2023.2.7' }
     @{ Id = 'pyelftools';     Min = '0.29' }
+    @{ Id = 'shellcheck-py';  Min = '0.9.0' }
+    @{ Id = 'oletools';       Min = '0.60' }
 )
 
 # Reuse the proven provisioning functions for the venv build.

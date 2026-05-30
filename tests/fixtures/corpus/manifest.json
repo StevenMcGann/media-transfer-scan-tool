@@ -100,6 +100,27 @@
     },
     "office/office_template.docx": {
       "expectFinding": "OFFICE-REMOTE-TEMPLATE"
+    },
+    "shell/clean.sh": {
+      "expectRiskyCode": false
+    },
+    "shell/remote_exec.sh": {
+      "expectFinding": "SHELL-REMOTE-EXEC"
+    },
+    "shell/b64_exec.sh": {
+      "expectFinding": "SHELL-B64-EXEC"
+    },
+    "shell/eval_expand.sh": {
+      "expectFinding": "SHELL-EVAL"
+    },
+    "shell/chmod777.sh": {
+      "expectFinding": "SHELL-CHMOD-777"
+    },
+    "shell/hardcoded_ip.sh": {
+      "expectFinding": "SHELL-HARDCODED-IP"
+    },
+    "shell/sc_bugs.sh": {
+      "expectShellCheckFindings": true
     }
   }
 }

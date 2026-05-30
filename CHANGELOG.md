@@ -8,6 +8,10 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-29
+
+Shell script analysis — ShellCheck + risky-pattern rules.
+
 ### Added
 - **Shell script analysis (v0.4):** two-layer analysis on `.sh`/`.bash`/`.zsh`/`.ksh`
   units and shell content detected via the classifier (v0.2 disguised scripts):

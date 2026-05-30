@@ -21,7 +21,11 @@ jobs:
       - name: Install Pester 5
         shell: pwsh
         run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          # PSGallery is occasionally unregistered on fresh runner images — register it first.
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default -ErrorAction SilentlyContinue
+          }
+          Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
           Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
 
       - name: Generate synthetic fixtures

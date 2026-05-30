@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keep GitHub Actions current — auto-PRs when an action publishes a new version.
+  # This is what removes the Node-20-deprecation treadmill going forward.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - github-actions

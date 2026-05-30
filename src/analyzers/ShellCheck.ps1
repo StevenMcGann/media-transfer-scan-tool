@@ -117,7 +117,6 @@
                    Sev = 'LOW'; Msg = 'Hardcoded IPv4 address — possible C2 endpoint or credential exposure'
                    TID = 'SHELL-HARDCODED-IP' }
             )
-            $lineMap = $text -split '\r?\n'
             foreach ($p in $patterns) {
                 $matches = [regex]::Matches($text, $p.Re, [System.Text.RegularExpressions.RegexOptions]::Multiline)
                 foreach ($m in $matches) {

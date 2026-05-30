@@ -8,6 +8,21 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Changed
+- Bootstrapper: when a vendored venv is present it now passes `-VenvDir` but no
+  longer force-sets `-Mode offline`. An online host running the bundle reuses the
+  vendored tools *and* keeps live CVE coverage (pip-audit / OSV); air-gapped use
+  selects `-Mode offline` explicitly.
+
+### Security / CI
+- Added a `security` workflow: PSScriptAnalyzer over `src/` (fails on Error
+  severity; tuned via `PSScriptAnalyzerSettings.psd1`), gitleaks secret scanning,
+  and CodeQL static analysis of the Python helpers. Weekly schedule + on push/PR.
+- Added Dependabot for the `github-actions` ecosystem (keeps action versions
+  current — removes the Node-runtime-deprecation treadmill).
+- Cleaned the engine to a clean PSScriptAnalyzer run (removed dead variables,
+  made best-effort `catch` blocks explicit).
+
 ## [0.8.0] - 2026-05-30
 
 ### Added

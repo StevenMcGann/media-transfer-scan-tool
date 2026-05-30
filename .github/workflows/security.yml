@@ -1,0 +1,65 @@
+name: security
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly Monday 06:00 UTC — catch newly-published advisories
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Lint our own PowerShell with PSScriptAnalyzer (dogfooding) ──────────────
+  psscriptanalyzer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default -ErrorAction SilentlyContinue
+          }
+          Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          Install-Module PSScriptAnalyzer -MinimumVersion 1.21.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Analyze src/ (fail on Error severity)
+        shell: pwsh
+        run: |
+          $settings = Join-Path $PWD 'PSScriptAnalyzerSettings.psd1'
+          $r = Invoke-ScriptAnalyzer -Path ./src -Recurse -Settings $settings
+          $r | Sort-Object Severity, ScriptName, Line |
+            Format-Table Severity, RuleName, ScriptName, Line, Message -AutoSize | Out-String -Width 240 | Write-Host
+          $errors = @($r | Where-Object { $_.Severity -eq 'Error' })
+          Write-Host "PSScriptAnalyzer: $($r.Count) finding(s), $($errors.Count) error(s)."
+          if ($errors.Count -gt 0) { throw "PSScriptAnalyzer found $($errors.Count) error-severity issue(s)." }
+
+  # ── Secret scanning across the repo + history ──────────────────────────────
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # full history so gitleaks scans past commits too
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # ── CodeQL static analysis for the Python helper scripts ────────────────────
+  codeql-python:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF to the Security tab
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3

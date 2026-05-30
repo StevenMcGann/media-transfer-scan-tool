@@ -17,7 +17,9 @@
 
     The engine is launched with -NoProfile so no host $PROFILE / module shadowing
     leaks into the run. If a vendored venv (tools\venv) is present, the engine is
-    pointed at it in offline mode.
+    pointed at it via -VenvDir (reusing the bundled tools); the scan mode is left
+    to the engine default (online) or whatever the operator passes, so an online
+    host still gets live CVE feeds. Air-gapped use passes -Mode offline.
 
     NOTE: the engine invocation and `exit` happen at SCRIPT scope, not inside a
     function. Running `& $pwsh ...` inside a function would capture the engine's
@@ -82,8 +84,14 @@ function Resolve-EnginePath {
 function Get-EngineLaunchArgs {
     <#
         Build the pwsh argument array (pure — unit testable). Prepends host args
-        (-NoProfile, -ExecutionPolicy Bypass, -File <engine>), adds offline +
-        vendored-venv args when a bundle venv exists, then forwards operator args.
+        (-NoProfile, -ExecutionPolicy Bypass, -File <engine>), points the engine at
+        the bundle's vendored venv when present, then forwards operator args.
+
+        NOTE: we pass -VenvDir but deliberately do NOT force -Mode offline. On an
+        online host the bundle should still use live advisory feeds (pip-audit /
+        OSV) for full CVE coverage while reusing the vendored tools. An air-gapped
+        deployment selects offline explicitly via `-Mode offline` (forwarded here),
+        which the operator/bundle config supplies.
     #>
     param([string]$Engine, [string]$BundledVenv, $ForwardArgs)
     $a = New-Object System.Collections.Generic.List[string]
@@ -91,8 +99,7 @@ function Get-EngineLaunchArgs {
     $a.Add('-ExecutionPolicy'); $a.Add('Bypass')
     $a.Add('-File');            $a.Add($Engine)
     if ($BundledVenv -and (Test-Path -LiteralPath $BundledVenv)) {
-        $a.Add('-Mode');    $a.Add('offline')
-        $a.Add('-VenvDir'); $a.Add($BundledVenv)
+        $a.Add('-VenvDir'); $a.Add($BundledVenv)   # use vendored tools; mode left to default/operator
     }
     if ($ForwardArgs) { foreach ($x in $ForwardArgs) { $a.Add([string]$x) } }
     return $a.ToArray()

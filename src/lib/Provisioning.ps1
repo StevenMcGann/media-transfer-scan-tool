@@ -42,7 +42,9 @@ function Find-Python {
                 Write-Log -Level INFO -Message "Found Python: $candidate  ($ver)"
                 return $candidate
             }
-        } catch { }
+        } catch {
+            continue   # candidate not present / not runnable — try the next one
+        }
     }
     Write-Log -Level WARN -Message 'No Python 3 found on PATH.'
     return $null
@@ -108,7 +110,9 @@ function Get-InstalledPipVersion {
         $output = & $PythonExe -m pip show $PackageName 2>$null
         $verLine = $output | Where-Object { $_ -match '^Version:' } | Select-Object -First 1
         if ($verLine) { return ($verLine -replace '^Version:\s*').Trim() }
-    } catch { }
+    } catch {
+        return $null   # package not installed / pip show failed — treat as absent
+    }
     return $null
 }
 

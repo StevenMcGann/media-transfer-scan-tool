@@ -36,6 +36,20 @@ Describe 'Bootstrap — runtime resolution' {
         Resolve-EngineRuntime -BundledPwsh 'Z:\nope\pwsh.exe' -AllowPath $false | Should -BeNullOrEmpty
     }
 
+    It 'launch args point at a vendored venv but do NOT force offline mode' {
+        $venv = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "mts-bsvenv-$(Get-Random)") -Force
+        $args = Get-EngineLaunchArgs -Engine 'C:\eng.ps1' -BundledVenv $venv.FullName -ForwardArgs @('-Path','X')
+        Remove-Item $venv -Recurse -Force -ErrorAction SilentlyContinue
+        $args | Should -Contain '-VenvDir'
+        # online coverage on a connected host: mode is left to the engine default
+        ($args -join ' ') | Should -Not -Match '-Mode\s+offline'
+        $args | Should -Contain '-Path'
+    }
+    It 'forwards an explicit -Mode offline through to the engine' {
+        $args = Get-EngineLaunchArgs -Engine 'C:\eng.ps1' -BundledVenv '' -ForwardArgs @('-Path','X','-Mode','offline')
+        ($args -join ' ') | Should -Match '-Mode offline'
+    }
+
     It 'Get-PwshVersion reports a version >= 7.4 for the real runtime' {
         $v = Get-PwshVersion -Exe $script:RealPwsh
         $v | Should -Not -BeNullOrEmpty

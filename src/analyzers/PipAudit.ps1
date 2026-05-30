@@ -99,15 +99,10 @@
                 foreach ($dep in $raw.dependencies) {
                     foreach ($vuln in $dep.vulns) {
 
-                        # Severity from CVSS score where available; fall back to HIGH.
+                        # pip-audit/OSV records don't carry a normalized CVSS score,
+                        # so we tier severity from description keywords (conservative
+                        # heuristic; default HIGH for any known CVE).
                         $sev = 'HIGH'
-                        $cvssScore = $vuln.fix_versions ? $null : $null  # probe shape
-                        if ($vuln.PSObject.Properties['aliases']) {
-                            # pip-audit >= 2.4 exposes fix_versions and aliases but not
-                            # CVSS directly. We use description keywords as a heuristic
-                            # until we add osv-schema CVSS parsing in a later increment.
-                        }
-                        # Simple CVSS tier from description keyword (conservative heuristic)
                         if ($vuln.description -match 'critical|remote code execution|rce') { $sev = 'CRITICAL' }
                         elseif ($vuln.description -match 'high|privilege escalation') { $sev = 'HIGH' }
                         elseif ($vuln.description -match 'medium|moderate') { $sev = 'MEDIUM' }

@@ -8,6 +8,17 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added (v1.0.0 prep)
+- **Frozen the public contract** ahead of the 1.0.0 release: JSON report
+  `schemaVersion` set to `1.0.0`; [docs/contract.md](docs/contract.md) documents the
+  stable JSON schema, CLI surface, and exit codes, and what a breaking change is.
+- **Operator guide** ([docs/operator-guide.md](docs/operator-guide.md)) — running the
+  bundle (`Scan.cmd`), reading the report, severities, exit codes.
+- **Maintainer guide** ([docs/maintainer-guide.md](docs/maintainer-guide.md)) — dev
+  setup, tests, CI, bundle build, adding analyzers, release steps.
+- *(Remaining for the 1.0.0 tag: operator validation on real untrusted transfers
+  on the isolated host.)*
+
 ### Changed
 - Bootstrapper: when a vendored venv is present it now passes `-VenvDir` but no
   longer force-sets `-Mode offline`. An online host running the bundle reuses the

@@ -5,7 +5,9 @@
     HTML encodes ALL submission-derived values and sets a strict inline CSP.
 #>
 
-$script:SchemaVersion = '0.1.0'
+# Frozen at 1.0.0 — the JSON report is a stable public contract (see docs/contract.md).
+# A backward-incompatible change requires a MAJOR bump.
+$script:SchemaVersion = '1.0.0'
 
 function ConvertTo-HtmlEncoded {
     # Encode untrusted submission-derived text before it enters HTML (PLAN §3.8

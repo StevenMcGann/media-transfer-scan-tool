@@ -17,7 +17,7 @@
 .PARAMETER OutputFormat
     'all' (default) or 'json' to also echo the JSON report path/content for capture.
 .NOTES
-    Version : 0.4.0
+    Version : 0.5.0
 #>
 [CmdletBinding()]
 param(
@@ -37,7 +37,7 @@ $ErrorActionPreference = 'Stop'
 
 # Single source of truth for the tool version (keep in sync with the .NOTES block,
 # CHANGELOG, and the git tag). Report schemaVersion is tracked separately in Report.ps1.
-$script:ToolVersion = '0.4.0'
+$script:ToolVersion = '0.5.0'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot

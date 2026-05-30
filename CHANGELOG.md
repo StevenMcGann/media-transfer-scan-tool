@@ -8,6 +8,10 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-29
+
+Document analysis — Office + PDF triage.
+
 ### Added
 - **Document analysis (v0.3) — Office + PDF:**
   - **PdfTriage** (core, pure PowerShell, no dependency): static keyword triage of

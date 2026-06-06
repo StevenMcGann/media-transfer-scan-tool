@@ -32,6 +32,7 @@ PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
 NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
+PYRULES_DIR = os.path.join(CORPUS_DIR, 'python_rules')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -45,6 +46,7 @@ for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+os.makedirs(PYRULES_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -267,6 +269,48 @@ secrets_py = (
     f'private_key = "{pem_hdr}\\nMIIBfake/not/a/real/key==\\n"\n'
 )
 write_text(os.path.join(PYSRC_DIR, 'secrets.py'), secrets_py)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PythonRules (core middle-tier) fixtures — curated high-signal indicators.
+# These exercise the AST helper scan_python.py: per-call rules + combinations.
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean: imports and uses subprocess SAFELY (no shell=True) + benign logic.
+pyr_clean = (
+    '"""Benign utility — no high-signal indicators."""\n'
+    'import subprocess\n'
+    'def list_dir(path):\n'
+    '    return subprocess.run(["ls", path], capture_output=True)\n'
+    'def add(a, b):\n'
+    '    return a + b\n'
+)
+write_text(os.path.join(PYRULES_DIR, 'pyr_clean.py'), pyr_clean)
+
+# Malicious: eval + os.system + subprocess shell=True + pickle.loads, plus a
+# download-and-run combo (urlopen -> base64 decode -> eval).
+pyr_evil = (
+    'import os, base64, subprocess\n'
+    'import pickle as pk\n'
+    'from urllib.request import urlopen\n'
+    'def stage(url):\n'
+    '    blob = urlopen(url).read()\n'
+    '    payload = base64.b64decode(blob)\n'
+    '    eval(payload)\n'                     # PY-EVAL + PY-DECODE-EXEC + PY-DOWNLOAD-EXEC
+    '    os.system("id")\n'                   # PY-OS-SYSTEM
+    '    subprocess.Popen("sh -i", shell=True)\n'  # PY-SUBPROCESS-SHELL
+    '    return pk.loads(payload)\n'          # PY-PICKLE-LOAD
+)
+write_text(os.path.join(PYRULES_DIR, 'pyr_malicious.py'), pyr_evil)
+
+# Negative control for false positives: the trigger words appear only inside a
+# string literal and a comment — the AST scanner must NOT flag these.
+pyr_strings = (
+    '"""Doc mentions eval() and os.system() but never calls them."""\n'
+    'NOTE = "do not use eval or os.system here"\n'
+    '# pickle.loads is dangerous; this line is just a comment\n'
+    'def safe():\n'
+    '    return len(NOTE)\n'
+)
+write_text(os.path.join(PYRULES_DIR, 'pyr_strings.py'), pyr_strings)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Jupyter notebook fixtures (.ipynb — JSON, never executed by the scanner)

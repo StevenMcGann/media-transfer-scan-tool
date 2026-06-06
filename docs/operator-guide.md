@@ -52,6 +52,13 @@ Scan.cmd -Path "D:\incoming\sub" -Mode offline
 > By default (`-Profile core`) the high-signal analyzers run and the broad,
 > false-positive-prone ones (Bandit, detect-secrets) are **off**. The report
 > always lists what was *not* checked, so a clean report never hides a gap.
+>
+> **Python in core:** scripts are scanned by **PythonRules** — a curated set that
+> reports only attacker-grade indicators (`eval`/`exec`, `os.system`,
+> `subprocess(shell=True)`, `pickle`/`marshal` loads, download-and-run,
+> decode-then-exec, etc.), *not* general code-quality noise. This is the middle
+> tier: `-Profile full` / `-EnableAnalyzers Bandit` adds the deeper, noisier pass
+> only when you want everything.
 
 ## 3. Read the report
 Three files are written per scan (same timestamp):

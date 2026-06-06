@@ -57,6 +57,15 @@ engine, a vendored portable **PowerShell 7.4 LTS**, the scanner **venv**, and
 Deliver the bundle to the operator host via the controlled read-only channel
 (see [test-environment.md](test-environment.md)).
 
+## Python helper scripts
+Stdlib-only helpers under `src/helpers/` give precise, dependency-free analysis
+that runs offline from the bundled venv or system Python (never importing the
+target): `scan_pickle.py` (pickle opcode triage) and `scan_python.py` (the
+AST-based curated rules behind the `PythonRules` analyzer). When adding a rule to
+`scan_python.py`, also add a fixture in `build_fixtures.py` (`python_rules/`) and
+assert it in `PythonRules.Tests.ps1` — including a precision case proving trigger
+words inside strings/comments are **not** flagged.
+
 ## Adding an analyzer
 1. Drop a descriptor in `src/analyzers/<Name>.ps1` returning a hashtable with
    `Name, Version, UnitTypes, RequiredTools, Offline, Tier, DefaultEnabled, Invoke`

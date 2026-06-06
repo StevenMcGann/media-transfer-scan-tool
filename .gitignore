@@ -32,6 +32,7 @@ tests/fixtures/corpus/powershell/
 tests/fixtures/corpus/npm/
 tests/fixtures/corpus/model/
 tests/fixtures/corpus/archive/
+tests/fixtures/corpus/python_rules/
 tests/fixtures/__pycache__/
 
 # Python

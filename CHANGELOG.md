@@ -8,6 +8,23 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **PythonRules — curated, high-signal Python analysis (core, default-on).** The
+  Python analogue of the PowerShell/shell risky-pattern layers: it reports ONLY
+  attacker-grade indicators relevant to ingress — `eval`/`exec`/`compile`,
+  dynamic import, `os.system`/`os.popen`, `subprocess(shell=True)`, `pickle`/
+  `marshal`/unsafe-`yaml` loads, network fetch (`urllib`/`requests`/`socket`),
+  base64/zlib decode, `ctypes` native loads — plus file-level **combination**
+  escalations (download-and-run, decode-then-exec, reverse-shell, ctypes
+  shellcode). It deliberately omits the broad code-quality findings of the
+  deep-tier Bandit analyzer: the "middle tier" between blind and noisy.
+  - Backed by `src/helpers/scan_python.py` (stdlib `ast`, no pip package): real
+    call sites, not substrings — no false hits on trigger words in comments or
+    strings, verified by fixtures. Runs under the bundled venv or system Python,
+    so it works **offline / air-gapped**.
+  - Pure-PowerShell regex fallback when no Python interpreter is present (marked
+    LOW/`PY-RULES-DEGRADED`) so a scan is never fully blind.
+
 ### Added (v1.0.0 prep)
 - **Frozen the public contract** ahead of the 1.0.0 release: JSON report
   `schemaVersion` set to `1.0.0`; [docs/contract.md](docs/contract.md) documents the

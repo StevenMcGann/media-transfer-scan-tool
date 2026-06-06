@@ -223,7 +223,7 @@ Testing: assert findings against **JSON** (the source of truth); HTML/TXT get sm
 
 | Unit type | Inputs | Extract? | Risky-code | Secrets | Dependency/CVE | Binary/Deserialization | Type-specific high-value checks |
 |---|---|---|---|---|---|---|---|
-| **Python** *(port)* | `.whl .egg .zip .tar.gz .tgz .py .pyw .ipynb` | yes | Bandit †| detect-secrets †| pip-audit (`Requires-Dist`) + CycloneDX SBOM | PE/ELF triage (`inspect_binary.py`) | notebook code-cell projection (no execution) |
+| **Python** *(port)* | `.whl .egg .zip .tar.gz .tgz .py .pyw .ipynb` | yes | **PythonRules** (core, curated high-signal: `eval`/`exec`, `os.system`, `subprocess(shell=True)`, `pickle`/`marshal` loads, download-and-run, decode-then-exec, ctypes — via AST helper `scan_python.py`); Bandit (deep †) | detect-secrets †| pip-audit (`Requires-Dist`) + CycloneDX SBOM | PE/ELF triage (`inspect_binary.py`) | notebook code-cell projection (no execution) |
 | **Disguised** *(v0.2 ✅)* | any ext / no ext | n/a | reroute to matched analyzer | detect-secrets | — | — | shebang + magic-byte + **content-signature** sniff (PS/Python/shell/batch, no-shebang); **extension/content mismatch** finding (`MTS-DISGUISE-001/002`) |
 | **Documents** *(v0.3 ✅)* | Office `.doc .docx .docm .xls .xlsx .xlsm .ppt .pptx .rtf`; `.pdf` | scanned in place | — | — | — | — | **Office** (`OleVbaScan` + `scan_office.py`/oletools): VBA macro presence + auto-exec/suspicious keywords, DDE/DDEAUTO, remote-template injection. **PDF** (`PdfTriage`, pure PowerShell): `/JS` `/JavaScript`, `/OpenAction`/`/AA`/`/Launch`, `/EmbeddedFile`, `/URI`, `/RichMedia`, `/Encrypt`, with name hex-escape de-obfuscation. Never rendered/opened/executed. |
 | **Shell** *(v0.4 ✅)* | `.sh .bash .zsh .ksh` | no | ShellCheck (`shellcheck-py`) + custom rules (`curl\|bash`, `base64 -d\|sh`, `eval`, `chmod 777`, hardcoded IPs) | detect-secrets | — | — | Two-layer: ShellCheck flags shell bugs (SC-coded); custom rules flag dangerous-but-valid patterns ShellCheck intentionally skips |
@@ -313,6 +313,7 @@ media-transfer-scan-tool/
       FileHash.ps1                    # ✅ SHA-256 manifest (core)
       PipAudit.ps1  BinaryInspection.ps1   # ✅ v0.1.0 (core)
       Bandit.ps1  DetectSecrets.ps1        # ✅ v0.1.0 (deep, opt-in)
+      PythonRules.ps1                 # ✅ curated high-signal Python rules (core; AST helper scan_python.py)
       PdfTriage.ps1                   # ✅ v0.3 PDF keyword triage — pure PowerShell, no deps
       OleVbaScan.ps1                  # ✅ v0.3 Office triage (via scan_office.py)
       ShellCheck.ps1  PSScriptAnalyzer.ps1  NpmAudit.ps1  PickleOpcodeScan.ps1   # (v0.4–v0.7)
@@ -320,6 +321,7 @@ media-transfer-scan-tool/
       inspect_binary.py               # ✅ PE/ELF triage (pefile/pyelftools)
       scan_office.py                  # ✅ oletools + stdlib zip checks — static, never opens in Office
       scan_pickle.py                  # (v0.6 — pickle opcode scanner, static, never loads)
+      scan_python.py                  # ✅ curated high-signal Python rules (stdlib ast; never imports/executes)
       # note: no scan_pdf.py — PdfTriage is pure PowerShell (no third-party PDF parser)
   bundle/                             # offline-bundle build script + manifest (vendored tools/DBs) — later
   tests/

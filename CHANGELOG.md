@@ -8,6 +8,8 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-06
+
 ### Added
 - **PythonRules — curated, high-signal Python analysis (core, default-on).** The
   Python analogue of the PowerShell/shell risky-pattern layers: it reports ONLY
@@ -24,8 +26,6 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     so it works **offline / air-gapped**.
   - Pure-PowerShell regex fallback when no Python interpreter is present (marked
     LOW/`PY-RULES-DEGRADED`) so a scan is never fully blind.
-
-### Added (v1.0.0 prep)
 - **Frozen the public contract** ahead of the 1.0.0 release: JSON report
   `schemaVersion` set to `1.0.0`; [docs/contract.md](docs/contract.md) documents the
   stable JSON schema, CLI surface, and exit codes, and what a breaking change is.

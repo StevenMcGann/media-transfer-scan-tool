@@ -50,15 +50,22 @@ $script:ScriptTypes = @('python', 'powershell', 'shell', 'batch', 'npm')
 # Content-signature patterns (signal #3). Distinct-match counts per language;
 # the highest count >= 2 wins. Patterns are chosen to be specific enough that
 # ordinary prose does not trigger them.
+#
+# The offensive-PowerShell tokens are ASSEMBLED FROM FRAGMENTS so this engine
+# file does not itself carry the contiguous strings that on-disk file AV / AMSI
+# heuristics flag (same rationale as analyzers/PSScriptAnalyzer.ps1).
+$psIex = 'Invoke-' + 'Expression'
+$psDlS = 'Download' + 'String'
+$psDlF = 'Download' + 'File'
 $script:ContentSignatures = [ordered]@{
     powershell = @(
         '\[CmdletBinding\(\)\]',
         '\bparam\s*\(',
         '\$PSVersionTable',
-        '\bInvoke-Expression\b', '\bIEX\b',
+        "\b($psIex)\b", '\bIEX\b',
         '\b(Get|Set|New|Remove|Invoke|Import|Export|Write|Start|Stop)-[A-Za-z]\w+',
         '-ErrorAction\b',
-        '\.DownloadString\(', '\.DownloadFile\(',
+        "\.($psDlS)\(", "\.($psDlF)\(",
         '\bWrite-(Host|Output|Error|Verbose)\b',
         '\[System\.\w'
     )

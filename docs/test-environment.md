@@ -41,6 +41,43 @@ Recommended on this workstation: a **Hyper-V VM** (Windows 11 Pro for Workstatio
 
 ---
 
+## AV / EDR on the review host (Microsoft Defender, etc.)
+
+A malware-handling host almost always has AV/EDR watching. There are **two
+distinct interactions**, and they are not the same problem:
+
+**1. The scanner tripping AV on its *own* code — should not happen, by design.**
+The PowerShell analyzer's detection signatures (AMSI-tamper, Defender-preference,
+downloader, encoded-command, etc.) are **assembled from string fragments at
+runtime**, so the contiguous trigger strings never appear in the engine's source
+on disk. Without that, simply *loading* the engine made Defender fire **“Possible
+AMSI tampering” (DefenseEvasion, High)** — a false positive caused by our own
+detection patterns. If you still see an AMSI/EDR alert attributed to the
+scanner's own scripts (`src\...`), treat it as a regression and report it — do
+**not** add a blanket exclusion for the engine to paper over it.
+
+**2. AV acting on the *submissions* — expected, and it can hide findings.**
+When you scan genuinely malicious files, the host's real-time AV will detect and
+often **quarantine/delete the submission files itself** — independently of this
+tool. That is a valid signal (a quarantined file is a strong “reject”), but it
+has a side effect: **if AV removes a file before the scanner reads it, the
+scanner can’t report on it**, so the report under-counts. To get a complete,
+attributable scanner report on the isolated host, pick one:
+
+- **Exclude the scan paths for the run** — add the submission folder **and** the
+  scanner’s staging dir (`%TEMP%\mts-staging-*`) to Defender exclusions while you
+  run, then remove the exclusions. The host stays protected for everything else.
+- **Audit/passive mode** — put Defender in passive/audit on the *isolated,
+  reverted* VM so it logs rather than quarantines. Only acceptable because the VM
+  is disposable and offline.
+- **Accept AV quarantine as the verdict** — if a file is quarantined, record that
+  as the finding and move on. Simplest, but you lose the scanner’s detail.
+
+Whichever you choose: the isolated VM should be a host where malware alerts are
+**expected and understood**, not auto-escalated to a SOC as live incidents.
+
+---
+
 ## Dev host — what it needs
 
 For building and running the **trusted fixture** suite (no untrusted files here):

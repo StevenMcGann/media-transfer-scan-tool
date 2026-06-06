@@ -16,8 +16,25 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
   bundle (`Scan.cmd`), reading the report, severities, exit codes.
 - **Maintainer guide** ([docs/maintainer-guide.md](docs/maintainer-guide.md)) — dev
   setup, tests, CI, bundle build, adding analyzers, release steps.
+- **Defender/AMSI self-check** (`tools/verify-amsi.ps1`): on a Windows + Defender
+  host, snapshots the threat-detection history, loads the full engine in a fresh
+  `pwsh`, and fails if any new detection appears — guards against an offensive
+  token leaking back into shipped source. Documented in the maintainer guide.
 - *(Remaining for the 1.0.0 tag: operator validation on real untrusted transfers
   on the isolated host.)*
+
+### Fixed
+- **AMSI/EDR false positive on the scanner's own code.** The PowerShell analyzer's
+  detection signatures (AMSI-tamper, Defender-preference, downloader,
+  encoded-command) and the classifier's PowerShell content-signatures previously
+  sat as contiguous literal strings in the engine source. Microsoft Defender's
+  AMSI inspection scanned that source as `pwsh` loaded it and fired **“Possible
+  AMSI tampering” (DefenseEvasion, High)** — a false positive triggered by our own
+  patterns, which would also let on-disk file AV quarantine the analyzer. These
+  tokens are now **assembled from fragments at runtime**, so the contiguous
+  strings never appear in any shipped file (detection behavior is unchanged;
+  verified by the full suite). See `docs/test-environment.md` → *AV / EDR on the
+  review host* for the operator-side AV guidance this surfaced.
 
 ### Changed
 - Bootstrapper: when a vendored venv is present it now passes `-VenvDir` but no

@@ -7,6 +7,14 @@ How to scan a submission and read the result. This guide assumes you received a
 > (no network or egress-filtered, snapshot-reverted). Static analysis is lower
 > risk than opening files, but the analyzer tooling itself has parser attack
 > surface. See [test-environment.md](test-environment.md).
+>
+> **Expect AV/EDR alerts on real malware.** Microsoft Defender (or your EDR) will
+> independently flag genuinely malicious *submissions* — that's normal on a
+> malware-handling host. If AV quarantines a file before the scanner reads it, the
+> report will under-count, so review the AV alerts alongside the scan. See
+> [test-environment.md](test-environment.md#av--edr-on-the-review-host-microsoft-defender-etc)
+> for how to run a complete scan (path exclusions / audit mode). The scanner does
+> **not** trip AV on its *own* code — if it appears to, report it as a bug.
 
 ## 1. Set up (once)
 1. Copy the bundle folder to the review host (via the controlled read-only channel).

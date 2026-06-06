@@ -28,6 +28,22 @@ python ./tests/fixtures/build_fixtures.py   # (re)generate synthetic fixtures
 - **security.yml** — PSScriptAnalyzer (fails on Error; tuned by `PSScriptAnalyzerSettings.psd1`), gitleaks, CodeQL (Python).
 - **dependabot.yml** — keeps GitHub Actions current.
 
+## Defender / AMSI self-check
+The PowerShell analyzer detects offensive-PowerShell signatures (AMSI-tamper,
+Defender-preference, downloaders, ...). Those tokens must **never** appear as
+contiguous literals in shipped source — if they do, simply loading the engine
+trips Defender's `Trojan:PowerShell/PsAttack.*` signature ("Possible AMSI
+tampering"). They are assembled from fragments at runtime to avoid this.
+
+On a Windows + Microsoft Defender host, verify the engine loads without tripping
+Defender:
+```powershell
+pwsh ./tools/verify-amsi.ps1   # exit 0 = no new detection; 1 = a token leaked into a shipped file
+```
+It snapshots `Get-MpThreatDetection`, loads the full engine in a fresh `pwsh`, and
+fails if any new detection appears. Run it after touching analyzer signatures.
+**Never** add a literal trigger token (even in a comment) to a `src/` file.
+
 ## Build the offline bundle
 On a **connected** host:
 ```powershell

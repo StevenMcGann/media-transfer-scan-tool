@@ -128,6 +128,26 @@ function Test-ZipArchiveHazards {
     return @{ Block = $block; Findings = $findings.ToArray(); EntryNames = $entryNames }
 }
 
+function Resolve-TarExe {
+    <#
+        Resolve a tar executable, preferring Windows' built-in bsdtar (libarchive)
+        at %SystemRoot%\System32\tar.exe. MSYS / Git-for-Windows GNU tar misreads a
+        native path like 'D:\dir\file.tgz' as a remote host spec ('Cannot connect
+        to D: resolve failed') because of the drive-letter colon, and silently
+        produces an EMPTY extraction tree — a false negative for a scanner. bsdtar
+        handles drive-letter paths natively and is what GitHub's windows-latest
+        runner already uses. On non-Windows, falls back to the PATH 'tar' (GNU tar,
+        no colon issue there). Returns the exe path, or $null if none is found.
+    #>
+    if ($IsWindows) {
+        $bsd = Join-Path $env:SystemRoot 'System32\tar.exe'
+        if (Test-Path -LiteralPath $bsd) { return $bsd }
+    }
+    $c = Get-Command 'tar' -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    return $null
+}
+
 function Expand-SubmissionArchive {
     <#
         Extract one archive file into $OutputDir, with v0.8 hazard guards.
@@ -183,10 +203,11 @@ function Expand-SubmissionArchive {
             Write-Log -Level DEBUG -Message "Extracted ZIP-family archive OK."
         }
         elseif ($isTar) {
-            $tarCmd = Get-Command 'tar' -ErrorAction SilentlyContinue
-            if ($tarCmd) {
+            $tarExe = Resolve-TarExe
+            if ($tarExe) {
+                Write-Log -Level DEBUG -Message "Using tar: $tarExe"
                 # Pre-list and block path traversal before extracting (zip-slip for tar).
-                $listing = & tar -tzf $InputFile 2>$null
+                $listing = & $tarExe -tzf $InputFile 2>$null
                 $traversal = @($listing | Where-Object { $_ -match '\.\.[/\\]' -or $_ -match '^/' -or $_ -match '^[A-Za-z]:' })
                 if ($traversal.Count -gt 0) {
                     $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
@@ -196,7 +217,7 @@ function Expand-SubmissionArchive {
                         -Recommendation 'Rejected — tarball tries to write outside the extraction directory.'))
                     return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
                 }
-                $tarOut = & tar -xzf $InputFile -C $OutputDir 2>&1
+                $tarOut = & $tarExe -xzf $InputFile -C $OutputDir 2>&1
                 foreach ($line in $tarOut) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "tar: $s" } }
                 if ($LASTEXITCODE -ne 0) {
                     $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' `

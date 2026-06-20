@@ -13,7 +13,7 @@
           src/                      engine + lib + analyzers + helpers
           tools/pwsh/               vendored portable PowerShell 7.4 (Windows x64)
           tools/venv/               vendored scanner venv (bandit, pip-audit, ...)
-          manifest.json             versions + build date (surfaced in reports)
+          manifest.json             versions + build date + SHA-256 file seals
 
     The bootstrapper prefers tools/pwsh (authoritative) and, seeing tools/venv,
     runs the engine in offline mode against the vendored venv.
@@ -61,6 +61,32 @@ $SCANNER_PACKAGES = @(
 $script:Quiet = $false
 
 function Write-Step { param([string]$m) Write-Host "==> $m" -ForegroundColor Cyan }
+
+function Get-SealedFileHashes {
+    <#
+        SHA-256 every file the bootstrapper verifies at launch (issue #8): all of
+        src/ (engine + lib + analyzers + helpers) plus the entry scripts, keyed by
+        POSIX-relative path. Excludes the manifest itself and the heavy, volatile
+        vendored runtime/venv — sealing those is the signing follow-up. Sorted for
+        a deterministic, reproducible manifest.
+    #>
+    param([Parameter(Mandatory)][string]$BundleDir)
+    $hashes  = [ordered]@{}
+    $targets = New-Object System.Collections.Generic.List[string]
+    $srcDir  = Join-Path $BundleDir 'src'
+    if (Test-Path -LiteralPath $srcDir) {
+        Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { $targets.Add($_.FullName) }
+    }
+    foreach ($f in 'bootstrap.ps1', 'Scan.cmd') {
+        $p = Join-Path $BundleDir $f
+        if (Test-Path -LiteralPath $p) { $targets.Add($p) }
+    }
+    foreach ($t in ($targets | Sort-Object)) {
+        $rel = ($t.Substring($BundleDir.Length).TrimStart('\', '/')) -replace '\\', '/'
+        $hashes[$rel] = (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash
+    }
+    return $hashes
+}
 
 $bundleName = "media-transfer-scan-tool-$Version"
 $bundleDir  = Join-Path $OutputDir $bundleName
@@ -125,6 +151,8 @@ $manifest = [ordered]@{
     runtime       = 'powershell-7.4-lts-win-x64'
     toolVersions  = $toolVersions
     advisoryDb    = @{ note = 'live (online) until vendored CVE/OSV cache is added'; date = $null }
+    hashAlgorithm = 'SHA256'
+    fileHashes    = (Get-SealedFileHashes -BundleDir $bundleDir)
     complete      = (-not $SkipPwsh -and -not $SkipVenv)
 }
 $manifestPath = Join-Path $bundleDir 'manifest.json'

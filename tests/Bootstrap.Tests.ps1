@@ -57,6 +57,57 @@ Describe 'Bootstrap — runtime resolution' {
     }
 }
 
+Describe 'Bootstrap — bundle integrity (F1 / issue #8)' {
+    BeforeAll {
+        # Build a tiny fake "bundle": a couple of sealed files + a manifest whose
+        # fileHashes are their real SHA-256. No build-bundle.ps1 needed.
+        function script:New-FakeBundle {
+            $b = Join-Path $env:TEMP "mts-intg-$(Get-Random)"
+            New-Item -ItemType Directory -Path (Join-Path $b 'src/lib') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $b 'src/lib/Engine.ps1') -Value 'Write-Output 1' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $b 'Scan.cmd')           -Value '@echo off'      -Encoding ascii
+            $hashes = [ordered]@{}
+            foreach ($rel in 'src/lib/Engine.ps1', 'Scan.cmd') {
+                $hashes[$rel] = (Get-FileHash -LiteralPath (Join-Path $b ($rel -replace '/','\')) -Algorithm SHA256).Hash
+            }
+            @{ bundleVersion = 't'; hashAlgorithm = 'SHA256'; fileHashes = $hashes } |
+                ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $b 'manifest.json') -Encoding utf8
+            return $b
+        }
+    }
+
+    It 'passes for an intact sealed bundle' {
+        $b = New-FakeBundle
+        Test-BundleIntegrity -Root $b | Should -BeTrue
+        Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    It 'FAILS when a sealed file is modified' {
+        $b = New-FakeBundle
+        Add-Content -LiteralPath (Join-Path $b 'src/lib/Engine.ps1') -Value 'malicious'
+        Test-BundleIntegrity -Root $b | Should -BeFalse
+        Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    It 'FAILS when a sealed file is missing' {
+        $b = New-FakeBundle
+        Remove-Item (Join-Path $b 'Scan.cmd') -Force
+        Test-BundleIntegrity -Root $b | Should -BeFalse
+        Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    It 'proceeds (true) for an unsealed dev checkout with no manifest' {
+        $b = Join-Path $env:TEMP "mts-nomani-$(Get-Random)"
+        New-Item -ItemType Directory -Path $b -Force | Out-Null
+        Test-BundleIntegrity -Root $b | Should -BeTrue
+        Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    It 'proceeds (true) when manifest has no fileHashes (older bundle)' {
+        $b = Join-Path $env:TEMP "mts-nohash-$(Get-Random)"
+        New-Item -ItemType Directory -Path $b -Force | Out-Null
+        @{ bundleVersion = 't' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $b 'manifest.json') -Encoding utf8
+        Test-BundleIntegrity -Root $b | Should -BeTrue
+        Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Describe 'Invoke-Provisioning — full path (regression: non-interactive crash)' -Tag 'Online' {
     BeforeAll {
         $py = Find-Python

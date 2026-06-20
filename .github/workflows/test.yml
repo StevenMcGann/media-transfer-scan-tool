@@ -12,7 +12,7 @@ jobs:
   pester:
     runs-on: windows-latest   # PowerShell 7 (pwsh) is preinstalled
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Show pwsh version
         shell: pwsh
@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pester-results
           path: tests/test-results.xml

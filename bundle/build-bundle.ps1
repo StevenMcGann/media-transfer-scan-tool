@@ -71,6 +71,14 @@ function Get-SealedFileHashes {
         a deterministic, reproducible manifest.
     #>
     param([Parameter(Mandatory)][string]$BundleDir)
+    # Resolve to an absolute path FIRST: Get-ChildItem returns absolute .FullName
+    # values, so a relative $BundleDir (e.g. -OutputDir 'out') would make the
+    # Substring below strip the wrong prefix length and emit bogus fileHashes keys
+    # — the bundle would then fail its own bootstrap integrity check. Resolve-Path
+    # (not [IO.Path]::GetFullPath) so this honours the PowerShell location the rest
+    # of the build used; GetFullPath would resolve against the process cwd, which
+    # Set-Location/Push-Location does not update.
+    $BundleDir = (Resolve-Path -LiteralPath $BundleDir).Path.TrimEnd('\', '/')
     $hashes  = [ordered]@{}
     $targets = New-Object System.Collections.Generic.List[string]
     $srcDir  = Join-Path $BundleDir 'src'
@@ -82,6 +90,8 @@ function Get-SealedFileHashes {
         if (Test-Path -LiteralPath $p) { $targets.Add($p) }
     }
     foreach ($t in ($targets | Sort-Object)) {
+        # $t is absolute (Get-ChildItem .FullName / Join-Path of an absolute base)
+        # and shares the resolved $BundleDir prefix exactly, so strip directly.
         $rel = ($t.Substring($BundleDir.Length).TrimStart('\', '/')) -replace '\\', '/'
         $hashes[$rel] = (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash
     }

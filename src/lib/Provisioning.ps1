@@ -26,6 +26,33 @@
 Set-StrictMode -Version Latest
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pinned dependency versions (F3 / issue #10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Get-DependencyPins {
+    <#
+        Load the single-source-of-truth pinned-version map (src/dependency-pins.psd1):
+        @{ pip = @{ name=version }; psmodule = @{ name=version } }. If the file is
+        missing/unparseable, returns empty maps so the caller degrades to legacy
+        'latest' installs rather than failing the scan. (No cache - the file is
+        tiny and read only a handful of times per run; a $script: cache would trip
+        StrictMode on first read.)
+    #>
+    $pinFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'dependency-pins.psd1'
+    $pins = $null
+    if (Test-Path -LiteralPath $pinFile) {
+        try { $pins = Import-PowerShellDataFile -LiteralPath $pinFile }
+        catch { Write-Log -Level WARN -Message "Could not parse dependency-pins.psd1 ($_) - falling back to unpinned installs." }
+    } else {
+        Write-Log -Level WARN -Message "dependency-pins.psd1 not found at '$pinFile' - falling back to unpinned installs."
+    }
+    if ($null -eq $pins) { $pins = @{} }
+    if (-not $pins.ContainsKey('pip'))      { $pins['pip'] = @{} }
+    if (-not $pins.ContainsKey('psmodule')) { $pins['psmodule'] = @{} }
+    return $pins
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Python runtime discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -183,11 +210,17 @@ function Install-PipPackage {
     param(
         [Parameter(Mandatory)][string]$PythonExe,
         [Parameter(Mandatory)][string]$Package,
-        [string]$MinVersion = ''
+        [string]$MinVersion = '',
+        [string]$Version = ''      # exact pinned version (F3); '' = legacy --upgrade to latest
     )
     Show-Status "Installing $Package..."
-    Write-Log -Level INFO -Message "Installing/upgrading pip package: $Package"
-    $out = & $PythonExe -m pip install --upgrade $Package 2>&1
+    if ($Version) {
+        Write-Log -Level INFO -Message "Installing pinned pip package: $Package==$Version"
+        $out = & $PythonExe -m pip install --no-input "$Package==$Version" 2>&1
+    } else {
+        Write-Log -Level INFO -Message "Installing/upgrading pip package: $Package (unpinned)"
+        $out = & $PythonExe -m pip install --no-input --upgrade $Package 2>&1
+    }
     foreach ($line in $out) {
         $s = ([string]$line).Trim()
         if ($s) { Write-Log -Level DEBUG -Message $s }
@@ -195,6 +228,9 @@ function Install-PipPackage {
 
     $ver = Get-InstalledPipVersion -PythonExe $PythonExe -PackageName $Package
     if (-not $ver) { throw "pip install of '$Package' appeared to succeed but package not found afterwards." }
+    if ($Version -and $ver -ne $Version) {
+        throw "Pinned install of '$Package' expected $Version but pip resolved $ver."
+    }
     if (-not (Compare-PipVersions -PythonExe $PythonExe -Installed $ver -Minimum $MinVersion)) {
         throw "Installed $Package $ver is still below minimum $MinVersion."
     }
@@ -215,10 +251,14 @@ function Resolve-PipTool {
     )
     $pkg        = $Descriptor.Id
     $minVer     = $Descriptor.MinVersion ?? ''
+    $pin        = (Get-DependencyPins).pip[$pkg]    # exact pinned version, or $null if unpinned
     $installedVer = Get-InstalledPipVersion -PythonExe $Venv.Python -PackageName $pkg
 
-    if ($installedVer -and (Compare-PipVersions -PythonExe $Venv.Python -Installed $installedVer -Minimum $minVer)) {
-        Write-Log -Level INFO -Message "$pkg $installedVer — OK."
+    # Already satisfied? Pinned -> require the EXACT version; unpinned -> >= floor.
+    $alreadyOk = if ($pin) { $installedVer -eq $pin }
+                 else { $installedVer -and (Compare-PipVersions -PythonExe $Venv.Python -Installed $installedVer -Minimum $minVer) }
+    if ($alreadyOk) {
+        Write-Log -Level INFO -Message "$pkg $installedVer - OK$(if ($pin) { ' (pinned)' })."
         return [PSCustomObject]@{ Name = $pkg; Version = $installedVer; Available = $true; ScriptsDir = $Venv.Scripts }
     }
 
@@ -234,7 +274,7 @@ function Resolve-PipTool {
     # Read-Host has no console. ($AutoInstall is implied online and kept only for
     # explicit callers / signature stability.)
     try {
-        $ver = Install-PipPackage -PythonExe $Venv.Python -Package $pkg -MinVersion $minVer
+        $ver = Install-PipPackage -PythonExe $Venv.Python -Package $pkg -MinVersion $minVer -Version ($pin ?? '')
         return [PSCustomObject]@{ Name = $pkg; Version = $ver; Available = $true; ScriptsDir = $Venv.Scripts }
     } catch {
         Write-Log -Level WARN -Message "Install of $pkg failed ($_). Coverage reduced."
@@ -277,9 +317,14 @@ function Resolve-PsModuleTool {
     #>
     param([PSCustomObject]$Descriptor, [string]$Mode = 'online')
 
-    $mod = Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+    $pin = (Get-DependencyPins).psmodule[$Descriptor.Id]    # exact pinned version, or $null
+    $mod = if ($pin) {
+        Get-Module -ListAvailable $Descriptor.Id | Where-Object { $_.Version -eq [version]$pin } | Select-Object -First 1
+    } else {
+        Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+    }
     if ($mod) {
-        Write-Log -Level INFO -Message "PS module '$($Descriptor.Id)' $($mod.Version) — OK."
+        Write-Log -Level INFO -Message "PS module '$($Descriptor.Id)' $($mod.Version) - OK$(if ($pin) { ' (pinned)' })."
         return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $mod.Version.ToString(); Available = $true }
     }
 
@@ -297,9 +342,14 @@ function Resolve-PsModuleTool {
         }
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         $params = @{ Name = $Descriptor.Id; Scope = 'CurrentUser'; Force = $true; ErrorAction = 'Stop' }
-        if ($Descriptor.MinVersion) { $params.MinimumVersion = $Descriptor.MinVersion }
+        if ($pin) { $params.RequiredVersion = $pin }
+        elseif ($Descriptor.MinVersion) { $params.MinimumVersion = $Descriptor.MinVersion }
         Install-Module @params
-        $mod = Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+        $mod = if ($pin) {
+            Get-Module -ListAvailable $Descriptor.Id | Where-Object { $_.Version -eq [version]$pin } | Select-Object -First 1
+        } else {
+            Get-AvailablePsModule -Id $Descriptor.Id -MinVersion $Descriptor.MinVersion
+        }
         if ($mod) {
             Write-Log -Level INFO -Message "PS module '$($Descriptor.Id)' $($mod.Version) installed."
             return [PSCustomObject]@{ Name = $Descriptor.Id; Version = $mod.Version.ToString(); Available = $true }

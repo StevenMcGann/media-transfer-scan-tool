@@ -37,7 +37,14 @@
         $tool = $Context.Tools['PSScriptAnalyzer']
         if ($tool -and $tool.Available) {
             try {
-                Import-Module PSScriptAnalyzer -ErrorAction Stop
+                # Import the EXACT resolved/pinned version. By name alone, a host
+                # with a newer side-by-side copy would load that instead, silently
+                # bypassing the F3 pin (Import-Module defaults to the highest version).
+                if ($tool.PSObject.Properties['Version'] -and $tool.Version) {
+                    Import-Module PSScriptAnalyzer -RequiredVersion $tool.Version -ErrorAction Stop
+                } else {
+                    Import-Module PSScriptAnalyzer -ErrorAction Stop
+                }
                 $records = Invoke-ScriptAnalyzer -Path $target -Severity @('Error','Warning','Information') -ErrorAction Stop
                 foreach ($r in @($records)) {
                     $sev = switch ([string]$r.Severity) {

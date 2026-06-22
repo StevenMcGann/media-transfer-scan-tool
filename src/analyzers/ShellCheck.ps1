@@ -54,8 +54,16 @@
                     # Write JSON to a file (not stdout) — matches pattern used by all
                     # other analyzers and avoids 2>&1 corrupting the JSON stream.
                     # Exit 0 = clean; exit 1 = findings; exit >1 = error.
-                    & $scExe -f json1 $target 2>$null | Set-Content -LiteralPath $tmpJson -Encoding utf8
-                    $exit = $LASTEXITCODE
+                    $r = Invoke-BoundedProcess -FilePath $scExe -Arguments @('-f', 'json1', $target) -TimeoutSeconds $Context.TimeoutSeconds
+                    if ($r.TimedOut) {
+                        Write-Log -Level WARN -Message "ShellCheck: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                        $findings.Add((New-TimeoutFinding -Tool 'ShellCheck' -UnitType 'shell' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds))
+                        $exit = 0   # nothing to parse; fall through to the always-on custom-rule layer
+                        Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
+                    } else {
+                        Set-Content -LiteralPath $tmpJson -Value $r.StdOut -Encoding utf8
+                        $exit = $r.ExitCode
+                    }
                     if ($exit -gt 1) {
                         Write-Log -Level WARN -Message "ShellCheck: unexpected exit $exit for $($Unit.RelativePath)."
                     } elseif (Test-Path -LiteralPath $tmpJson) {

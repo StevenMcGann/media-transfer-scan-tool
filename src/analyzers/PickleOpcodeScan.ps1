@@ -58,9 +58,14 @@
                    else { "$($Unit.RelativePath)!" + $binPath.Substring($Unit.StagingPath.Length).TrimStart('\','/') }
             $tmpJson = Join-Path $env:TEMP "mts_pickle_$([IO.Path]::GetRandomFileName()).json"
             try {
-                $out  = & $pythonExe $helper $binPath $tmpJson 2>&1
-                $exit = $LASTEXITCODE
-                foreach ($line in $out) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_pickle: $s" } }
+                $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $binPath, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+                if ($r.TimedOut) {
+                    Write-Log -Level WARN -Message "PickleOpcodeScan: helper timed out ($($Context.TimeoutSeconds)s) for $rel."
+                    $findings.Add((New-TimeoutFinding -Tool 'PickleOpcodeScan' -UnitType 'model' -File $rel -TimeoutSeconds $Context.TimeoutSeconds))
+                    continue
+                }
+                $exit = $r.ExitCode
+                foreach ($line in (($r.StdOut + $r.StdErr) -split "`n")) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_pickle: $s" } }
                 if ($exit -ne 0 -or -not (Test-Path -LiteralPath $tmpJson)) {
                     Write-Log -Level WARN -Message "PickleOpcodeScan: helper exit $exit for $rel."
                     continue

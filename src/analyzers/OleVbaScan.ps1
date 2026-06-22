@@ -44,9 +44,13 @@
         $tmpJson  = Join-Path $env:TEMP "mts_office_$([IO.Path]::GetRandomFileName()).json"
         $findings = [System.Collections.Generic.List[object]]::new()
         try {
-            $out = & $pythonExe $helper $Unit.Path $tmpJson 2>&1
-            $exit = $LASTEXITCODE
-            foreach ($line in $out) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_office: $s" } }
+            $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $Unit.Path, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if ($r.TimedOut) {
+                Write-Log -Level WARN -Message "OleVbaScan: helper timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                return @(New-TimeoutFinding -Tool 'OleVbaScan' -UnitType 'office' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)
+            }
+            $exit = $r.ExitCode
+            foreach ($line in (($r.StdOut + $r.StdErr) -split "`n")) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_office: $s" } }
 
             if ($exit -ne 0 -or -not (Test-Path -LiteralPath $tmpJson)) {
                 Write-Log -Level WARN -Message "OleVbaScan: helper exit $exit for $($Unit.RelativePath)."

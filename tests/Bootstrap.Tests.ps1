@@ -106,6 +106,25 @@ Describe 'Bootstrap — bundle integrity (F1 / issue #8)' {
         Test-BundleIntegrity -Root $b | Should -BeTrue
         Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue
     }
+    It 'a bundle built with a RELATIVE -OutputDir passes its own integrity check' {
+        # Regression: relative -OutputDir left fileHashes keys absolute-vs-relative
+        # mismatched, so the bundle failed its own bootstrap integrity check.
+        $tmp = Join-Path $env:TEMP "mts-relbuild-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Push-Location $tmp
+        try {
+            & (Join-Path $Root 'bundle/build-bundle.ps1') -OutputDir 'rel' -Version 'reltest' -SkipPwsh -SkipVenv *> $null
+            $bundle = Join-Path $tmp 'rel/media-transfer-scan-tool-reltest'
+            Test-BundleIntegrity -Root $bundle | Should -BeTrue
+            $man = Get-Content (Join-Path $bundle 'manifest.json') -Raw | ConvertFrom-Json
+            # keys must be clean POSIX-relative paths under src/, not drive-letter tails
+            @($man.fileHashes.PSObject.Properties.Name | Where-Object { $_ -like 'src/*' }).Count | Should -BeGreaterThan 0
+            @($man.fileHashes.PSObject.Properties.Name | Where-Object { $_ -match '^[A-Za-z]:' }).Count | Should -Be 0
+        } finally {
+            Pop-Location
+            Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'Invoke-Provisioning — full path (regression: non-interactive crash)' -Tag 'Online' {

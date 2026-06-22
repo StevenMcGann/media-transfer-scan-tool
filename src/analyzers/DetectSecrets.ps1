@@ -60,14 +60,16 @@
         $tmpJson  = Join-Path $env:TEMP "mts_ds_$([IO.Path]::GetRandomFileName()).json"
         $findings = [System.Collections.Generic.List[object]]::new()
         try {
-            Push-Location -LiteralPath $pushDir
-            try {
-                # 2>$null is essential: detect-secrets pollutes stdout JSON via stderr otherwise
-                & $dsExe scan --all-files --no-verify $scanArg 2>$null |
-                    Out-File -FilePath $tmpJson -Encoding utf8
-            } finally {
-                Pop-Location
+            # WorkingDirectory replaces Push-Location; the helper keeps stdout (the
+            # JSON) and stderr separate, so detect-secrets' stderr progress noise
+            # never pollutes the JSON we persist.
+            $r = Invoke-BoundedProcess -FilePath $dsExe -Arguments @('scan', '--all-files', '--no-verify', $scanArg) `
+                -TimeoutSeconds $Context.TimeoutSeconds -WorkingDirectory $pushDir
+            if ($r.TimedOut) {
+                Write-Log -Level WARN -Message "DetectSecrets: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                return @(New-TimeoutFinding -Tool 'DetectSecrets' -UnitType $Unit.Type -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)
             }
+            Set-Content -LiteralPath $tmpJson -Value $r.StdOut -Encoding utf8
 
             if (Test-Path -LiteralPath $tmpJson) {
                 $raw = Get-Content -LiteralPath $tmpJson -Raw | ConvertFrom-Json

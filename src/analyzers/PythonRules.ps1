@@ -45,9 +45,14 @@
             # ── Primary: AST helper ──────────────────────────────────────────
             $tmpJson = Join-Path $env:TEMP "mts_pyrules_$([IO.Path]::GetRandomFileName()).json"
             try {
-                $out  = & $pythonExe $helper $target $tmpJson 2>&1
-                $exit = $LASTEXITCODE
-                foreach ($line in $out) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_python: $s" } }
+                $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $target, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+                if ($r.TimedOut) {
+                    Write-Log -Level WARN -Message "PythonRules: scan_python timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                    $findings.Add((New-TimeoutFinding -Tool 'PythonRules' -UnitType 'python' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds))
+                    return $findings.ToArray()
+                }
+                $exit = $r.ExitCode
+                foreach ($line in (($r.StdOut + $r.StdErr) -split "`n")) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "scan_python: $s" } }
                 if ($exit -eq 0 -and (Test-Path -LiteralPath $tmpJson)) {
                     $raw = Get-Content -LiteralPath $tmpJson -Raw | ConvertFrom-Json
                     foreach ($f in @($raw.findings)) {

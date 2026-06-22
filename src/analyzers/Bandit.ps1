@@ -48,8 +48,12 @@
         $findings = [System.Collections.Generic.List[object]]::new()
         try {
             # -ll : report MEDIUM and HIGH severity only (cuts low-value noise)
-            $out = & $banditExe -r $target -ll -f json -o $tmpJson 2>&1
-            foreach ($line in $out) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "bandit: $s" } }
+            $r = Invoke-BoundedProcess -FilePath $banditExe -Arguments @('-r', $target, '-ll', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if ($r.TimedOut) {
+                Write-Log -Level WARN -Message "Bandit: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                return @(New-TimeoutFinding -Tool 'Bandit' -UnitType 'python' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)
+            }
+            foreach ($line in (($r.StdOut + $r.StdErr) -split "`n")) { $s = ([string]$line).Trim(); if ($s) { Write-Log -Level DEBUG -Message "bandit: $s" } }
 
             if (Test-Path -LiteralPath $tmpJson) {
                 $raw = Get-Content -LiteralPath $tmpJson -Raw | ConvertFrom-Json

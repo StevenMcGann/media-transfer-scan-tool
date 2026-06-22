@@ -41,7 +41,7 @@ $script:ToolVersion = '0.9.0'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
-foreach ($lib in 'Logging', 'Findings', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Report', 'Engine') {
+foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Report', 'Engine') {
     . (Join-Path $here "lib/$lib.ps1")
 }
 

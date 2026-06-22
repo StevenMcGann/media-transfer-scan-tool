@@ -91,8 +91,12 @@
             # PS 7: no EAP wrapper needed; pip-audit stderr doesn't trigger Stop.
             # --no-deps --disable-pip: audit only what the package declares, not
             # the scanner's own environment. Pattern carried from v1.6.1.
-            $auditOut = & $auditExe -r $reqFile --no-deps --disable-pip -f json -o $tmpJson 2>&1
-            foreach ($line in $auditOut) { Write-Log -Level DEBUG -Message "pip-audit: $line" }
+            $r = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if ($r.TimedOut) {
+                Write-Log -Level WARN -Message "PipAudit: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
+                return @(New-TimeoutFinding -Tool 'PipAudit' -UnitType 'python' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)
+            }
+            foreach ($line in (($r.StdOut + $r.StdErr) -split "`n")) { if ($line.Trim()) { Write-Log -Level DEBUG -Message "pip-audit: $line" } }
 
             if (Test-Path -LiteralPath $tmpJson) {
                 $raw = Get-Content -LiteralPath $tmpJson -Raw | ConvertFrom-Json
@@ -134,9 +138,13 @@
             $tmpSbom  = Join-Path $env:TEMP "mts_sbom_$([IO.Path]::GetRandomFileName()).json"
 
             try {
-                $sbomOut = & $auditExe -r $reqFile --no-deps --disable-pip `
-                               -f cyclonedx-json -o $tmpSbom 2>&1
-                foreach ($line in $sbomOut) { Write-Log -Level DEBUG -Message "pip-audit sbom: $line" }
+                $rs = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'cyclonedx-json', '-o', $tmpSbom) -TimeoutSeconds $Context.TimeoutSeconds
+                if ($rs.TimedOut) {
+                    Write-Log -Level WARN -Message "PipAudit: SBOM generation timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath) - skipped."
+                    Remove-Item -LiteralPath $tmpSbom -Force -ErrorAction SilentlyContinue
+                } else {
+                    foreach ($line in (($rs.StdOut + $rs.StdErr) -split "`n")) { if ($line.Trim()) { Write-Log -Level DEBUG -Message "pip-audit sbom: $line" } }
+                }
 
                 if (Test-Path -LiteralPath $tmpSbom) {
                     if (-not (Test-Path -LiteralPath $Context.ReportsDir)) {

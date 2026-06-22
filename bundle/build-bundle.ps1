@@ -146,8 +146,9 @@ if ($SkipVenv) {
     Write-Step "Building scanner venv at tools/venv"
     $venv = Initialize-ScannerVenv -PythonCmd $py -VenvDir $venvDir
     Update-PipBootstrap -PythonExe $venv.Python
+    $pipPins = (Get-DependencyPins).pip   # exact versions, shared with online provisioning (F3)
     foreach ($pkg in $SCANNER_PACKAGES) {
-        $v = Install-PipPackage -PythonExe $venv.Python -Package $pkg.Id -MinVersion $pkg.Min
+        $v = Install-PipPackage -PythonExe $venv.Python -Package $pkg.Id -MinVersion $pkg.Min -Version ($pipPins[$pkg.Id] ?? '')
         $toolVersions[$pkg.Id] = $v
     }
 }

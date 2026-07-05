@@ -13,6 +13,8 @@ jobs:
     runs-on: windows-latest   # PowerShell 7 (pwsh) is preinstalled
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false   # no job pushes back — don't leave the token in git config
 
       - name: Show pwsh version
         shell: pwsh

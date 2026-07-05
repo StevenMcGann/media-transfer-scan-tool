@@ -11,3 +11,17 @@ updates:
     labels:
       - dependencies
       - github-actions
+    # CodeQL init/analyze must run at the same version — bumping them in
+    # separate PRs leaves a mixed-version workflow that fails analysis.
+    # Group them (and batch other minor/patch bumps) into single PRs;
+    # majors still arrive individually for closer review.
+    groups:
+      codeql:
+        patterns:
+          - github/codeql-action*
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

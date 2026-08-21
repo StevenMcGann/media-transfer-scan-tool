@@ -58,10 +58,24 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
   report as "reviewed, clean" when it means "never looked at."
   **Consumer impact:** `TotalFindings` rises on submissions containing ordinary
   unanalyzed files. Severity is INFO, so overall risk and exit codes are unaffected.
+  **Known limitation:** this answers "did any analyzer claim this *unit*", not "was
+  the content *inside* an archive inspected". A generic archive's contents are only
+  inspected for npm and model content, and that gap is not yet reported — inferring
+  it from analyzer descriptors was attempted and reverted, because descriptors cannot
+  distinguish an analyzer that declined from one that inspected, which produced false
+  warnings on every clean wheel and notebook. Tracked separately.
 - `docs/contract.md` now documents `batch` in the `Type` enum. It was always
   producible from `.bat`/`.cmd`; the omission was a documentation bug, not a change.
 
 ### Fixed
+- **`.hta`/`.wsf` were wrongly assumed to be VB**, caught in review of #28 and fixed
+  before release. They are language-neutral wrappers that host JScript as readily as
+  VBScript, so routing them to `VbaRules` by extension meant a JScript dropper
+  (`new ActiveXObject("WScript.Shell").Run(...)`) matched no VB rule, reported clean,
+  *and* suppressed `MTS-NO-ANALYZER` because a VB analyzer had claimed the unit —
+  silent and falsely reassuring. Such a wrapper now reports `VBA-NON-VB-SCRIPT`
+  (MEDIUM) saying the embedded script was not inspected. Genuine VBScript wrappers
+  are unaffected.
 - **Flaky deep-tier tests.** `BanditSecrets` and `Notebook` tests failed
   intermittently — a different one each run, each passing in isolation. The cause
   was not a race or PyPI: Smart App Control was blocking `bandit.exe` per-binary by

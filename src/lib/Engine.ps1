@@ -140,6 +140,18 @@ function Invoke-Scan {
             # was hashed and listed but never actually understood. Say so, at INFO,
             # rather than letting it read as "reviewed and clean". Fires for
             # 'unsupported' units and for any type with no enabled analyzer.
+            # Scope note: this answers "did anything claim this UNIT", which is
+            # descriptor truth — if no analyzer claims the unit's type, nothing ran.
+            # It deliberately does NOT try to answer "was the content INSIDE an
+            # archive inspected". Inferring that from descriptors was tried and
+            # reverted: analyzers that declare 'archive' (NpmScan, PickleOpcodeScan)
+            # decline silently when the archive holds nothing they handle, while
+            # analyzers that genuinely do read a staging dir (PythonRules on a wheel
+            # or notebook) declare only 'python'. The descriptor cannot distinguish
+            # the two, so the check fired on every clean wheel and stayed silent on a
+            # ZIP of shell scripts. Answering it honestly needs analyzers to report
+            # what they actually inspected, or extracted files dispatched as real
+            # units — see the archive-coverage issue.
             if (-not @($selected | Where-Object { $_.UnitTypes -notcontains 'any' })) {
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'parser' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `

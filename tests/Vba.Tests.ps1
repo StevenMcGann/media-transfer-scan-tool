@@ -163,4 +163,60 @@ Describe 'Engine — no silent coverage gaps' {
     It 'does not flag a type an analyzer does cover' {
         CountWhere $GapResult 'clean.bas' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
     }
+    It 'does not warn about wheels and notebooks, whose staging dir IS analyzed' {
+        # Regression guard. An earlier attempt inferred archive-content coverage from
+        # analyzer descriptors and put "content NOT inspected" on every clean wheel
+        # and notebook — while PythonRules was reading that exact staging directory.
+        # A false coverage warning on the tool's most common units is worse than the
+        # gap it was chasing. The honest answer needs analyzers to report what they
+        # inspected; until then this must stay silent here.
+        $out = Join-Path $env:TEMP "mts-stage-$(Get-Random)"
+        try {
+            foreach ($corpus in @('python', 'notebook')) {
+                $res = Invoke-Scan -Path (Join-Path $PSScriptRoot "fixtures/corpus/$corpus") `
+                    -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $out -Mode offline
+                @($res.Units | ForEach-Object { $_.Findings } |
+                    Where-Object { $_.TestID -eq 'MTS-NO-ANALYZER' }).Count |
+                    Should -Be 0 -Because "$corpus units are analyzed via their staging dir"
+            }
+        } finally { Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Language-neutral wrappers (.hta/.wsf) are not assumed to be VB' {
+    <#
+        Regression: .hta and .wsf host JScript as readily as VBScript. Routing them
+        to VbaRules by extension meant a JScript dropper matched no VB rule, came
+        back clean, AND suppressed the engine's MTS-NO-ANALYZER notice — silent and
+        falsely reassuring.
+    #>
+    BeforeAll {
+        $script:WrapDir = Join-Path $env:TEMP "mts-wrap-$(Get-Random)"
+        New-Item -ItemType Directory -Path $script:WrapDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:WrapDir 'jscript.wsf') -Value @'
+<job><script language="JScript">
+new ActiveXObject("WScript.Shell").Run("cmd.exe /c whoami", 0, false);
+</script></job>
+'@
+        Set-Content -LiteralPath (Join-Path $script:WrapDir 'vbscript.wsf') -Value @'
+<job><script language="VBScript">
+Dim sh
+Set sh = CreateObject("WScript.Shell")
+sh.Run "cmd.exe /c whoami", 0, False
+</script></job>
+'@
+        $script:WrapResult = Invoke-Scan -Path $script:WrapDir -Profile core `
+            -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline
+    }
+    AfterAll { Remove-Item $script:WrapDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reports a JScript wrapper as not analyzed instead of silently clean' {
+        CountWhere $WrapResult 'jscript.wsf' { $_.TestID -eq 'VBA-NON-VB-SCRIPT' } | Should -BeGreaterThan 0
+    }
+    It 'does not flag a genuine VBScript wrapper' {
+        CountWhere $WrapResult 'vbscript.wsf' { $_.TestID -eq 'VBA-NON-VB-SCRIPT' } | Should -Be 0
+    }
+    It 'still applies the VB rules to a genuine VBScript wrapper' {
+        CountWhere $WrapResult 'vbscript.wsf' { $_.TestID -eq 'VBA-WSCRIPT-SHELL' } | Should -BeGreaterThan 0
+    }
 }

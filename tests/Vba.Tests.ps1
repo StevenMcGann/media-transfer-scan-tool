@@ -164,3 +164,91 @@ Describe 'Engine — no silent coverage gaps' {
         CountWhere $GapResult 'clean.bas' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
     }
 }
+
+Describe 'Language-neutral wrappers (.hta/.wsf) are not assumed to be VB' {
+    <#
+        Regression: .hta and .wsf host JScript as readily as VBScript. Routing them
+        to VbaRules by extension meant a JScript dropper matched no VB rule, came
+        back clean, AND suppressed the engine's MTS-NO-ANALYZER notice — silent and
+        falsely reassuring.
+    #>
+    BeforeAll {
+        $script:WrapDir = Join-Path $env:TEMP "mts-wrap-$(Get-Random)"
+        New-Item -ItemType Directory -Path $script:WrapDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:WrapDir 'jscript.wsf') -Value @'
+<job><script language="JScript">
+new ActiveXObject("WScript.Shell").Run("cmd.exe /c whoami", 0, false);
+</script></job>
+'@
+        Set-Content -LiteralPath (Join-Path $script:WrapDir 'vbscript.wsf') -Value @'
+<job><script language="VBScript">
+Dim sh
+Set sh = CreateObject("WScript.Shell")
+sh.Run "cmd.exe /c whoami", 0, False
+</script></job>
+'@
+        $script:WrapResult = Invoke-Scan -Path $script:WrapDir -Profile core `
+            -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline
+    }
+    AfterAll { Remove-Item $script:WrapDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reports a JScript wrapper as not analyzed instead of silently clean' {
+        CountWhere $WrapResult 'jscript.wsf' { $_.TestID -eq 'VBA-NON-VB-SCRIPT' } | Should -BeGreaterThan 0
+    }
+    It 'does not flag a genuine VBScript wrapper' {
+        CountWhere $WrapResult 'vbscript.wsf' { $_.TestID -eq 'VBA-NON-VB-SCRIPT' } | Should -Be 0
+    }
+    It 'still applies the VB rules to a genuine VBScript wrapper' {
+        CountWhere $WrapResult 'vbscript.wsf' { $_.TestID -eq 'VBA-WSCRIPT-SHELL' } | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Archive contents nothing inspects are reported' {
+    <#
+        Regression: NpmScan and PickleOpcodeScan both declare 'archive', which
+        suppressed the coverage-gap notice for ANY archive — but each returns
+        immediately when the archive holds no package.json / no model files. A ZIP
+        of shell scripts came out hashed, unscanned, and unremarked.
+    #>
+    BeforeAll {
+        $script:ArcDir = Join-Path $env:TEMP "mts-arc-$(Get-Random)"
+        New-Item -ItemType Directory -Path $script:ArcDir -Force | Out-Null
+
+        $stage = Join-Path $script:ArcDir '_stage'
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $stage 'payload.ps1') -Value 'Write-Output "hi"'
+        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $script:ArcDir 'scripts.zip') -Force
+        Remove-Item $stage -Recurse -Force
+
+        $docs = Join-Path $script:ArcDir '_docs'
+        New-Item -ItemType Directory -Path $docs -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $docs 'README.txt') -Value 'just notes'
+        Compress-Archive -Path (Join-Path $docs '*') -DestinationPath (Join-Path $script:ArcDir 'docs_only.zip') -Force
+        Remove-Item $docs -Recurse -Force
+
+        $npm = Join-Path $script:ArcDir '_npm'
+        New-Item -ItemType Directory -Path $npm -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $npm 'package.json') -Value '{"name":"x","version":"1.0.0"}'
+        Compress-Archive -Path (Join-Path $npm '*') -DestinationPath (Join-Path $script:ArcDir 'npm_pkg.zip') -Force
+        Remove-Item $npm -Recurse -Force
+
+        $script:ArcResult = Invoke-Scan -Path $script:ArcDir -Profile core `
+            -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline
+    }
+    AfterAll { Remove-Item $script:ArcDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'flags a PowerShell script inside a generic archive as uninspected' {
+        CountWhere $ArcResult 'scripts.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -BeGreaterThan 0
+    }
+    It 'names the uninspected type in the finding' {
+        @((UnitOf $ArcResult 'scripts.zip').Findings |
+            Where-Object { $_.TestID -eq 'MTS-NO-ANALYZER' -and $_.Issue -match 'powershell' }).Count |
+            Should -BeGreaterThan 0
+    }
+    It 'does not flag an archive holding only non-analyzable files' {
+        CountWhere $ArcResult 'docs_only.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
+    }
+    It 'does not flag an archive whose content IS covered inside archives' {
+        CountWhere $ArcResult 'npm_pkg.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
+    }
+}

@@ -62,6 +62,27 @@
                 -Issue "VB source could not be read: $_" -TestID 'MTS-VBA-ERR')
         }
 
+        # .hta and .wsf are language-NEUTRAL wrappers: they host JScript just as
+        # readily as VBScript. Routing them to this analyzer by extension alone
+        # would mean a JScript dropper — `new ActiveXObject("WScript.Shell").Run(...)`,
+        # which matches none of the VB rules below — is claimed by VbaRules, found
+        # clean, and suppressed from the engine's MTS-NO-ANALYZER notice. Silent, and
+        # falsely reassuring. Say so instead.
+        if ($ext -in @('.hta', '.wsf')) {
+            $declaresNonVb = $text -match '(?i)language\s*=\s*["'']?\s*(jscript|javascript|ecmascript)'
+            $hasVbMarker   = $text -match '(?i)(language\s*=\s*["'']?\s*vbscript|\bCreateObject\s*\(|\bWScript\.\w|(?m)^\s*(Public\s+|Private\s+)?Sub\s+\w+|(?m)^\s*Dim\s+\w+)'
+            if ($declaresNonVb -or -not $hasVbMarker) {
+                $lang = if ($declaresNonVb) { 'JScript/JavaScript' } else { 'a non-VB or undetermined' }
+                $findings.Add((New-Finding -Tool 'VbaRules' -Category 'parser' -Severity 'MEDIUM' `
+                    -Confidence 'HIGH' -UnitType 'vba' -File $Unit.RelativePath `
+                    -Issue ("Script wrapper hosts $lang content, which the VB rules do NOT analyze — the embedded script was not inspected.") `
+                    -TestID 'VBA-NON-VB-SCRIPT' `
+                    -Recommendation ('.hta/.wsf can host any scripting engine. Absence of VB findings here is ' +
+                                     'absence of coverage: review the embedded script by hand, and treat an ' +
+                                     'executable wrapper in a transfer as suspicious on its own.')))
+            }
+        }
+
         # Single-pattern rules. Category must come from the frozen contract enum
         # (docs/contract.md) — 'macro', 'risky-code', 'parser'; no new categories.
         $patterns = @(

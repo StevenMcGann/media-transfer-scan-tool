@@ -62,6 +62,23 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
   producible from `.bat`/`.cmd`; the omission was a documentation bug, not a change.
 
 ### Fixed
+- **Two holes in the new coverage-gap reporting**, caught in review of #28 and fixed
+  before release.
+  - **`.hta`/`.wsf` are language-neutral wrappers**, not inherently VB. Routing them
+    to `VbaRules` by extension meant a JScript dropper
+    (`new ActiveXObject("WScript.Shell").Run(...)`) matched no VB rule, reported clean,
+    *and* suppressed `MTS-NO-ANALYZER` because a VB analyzer had claimed the unit —
+    silent and falsely reassuring. Such a wrapper now reports `VBA-NON-VB-SCRIPT`
+    (MEDIUM) saying the embedded script was not inspected. Genuine VBScript wrappers
+    are unaffected.
+  - **Archives whose analyzers decline them.** `NpmScan` and `PickleOpcodeScan` both
+    declare `archive`, which suppressed the gap notice for *every* archive — yet each
+    returns immediately without a `package.json` / model file. A ZIP containing an
+    `IEX` downloader and a `curl | bash` script came out hashed, unscanned and
+    unremarked. Extracted content is now judged on its own types: a type counts as
+    covered only when an enabled analyzer claims both it and `archive`, and the gap
+    finding names what was missed. Archives holding only non-analyzable files stay
+    quiet.
 - **Flaky deep-tier tests.** `BanditSecrets` and `Notebook` tests failed
   intermittently — a different one each run, each passing in isolation. The cause
   was not a race or PyPI: Smart App Control was blocking `bandit.exe` per-binary by

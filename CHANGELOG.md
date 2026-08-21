@@ -8,6 +8,8 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-21
+
 ### Added
 - **VB-family support — standalone VBA and VBScript** ([#25](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/25)).
   Embedded Office macros were already covered by `OleVbaScan`, but a VB module or

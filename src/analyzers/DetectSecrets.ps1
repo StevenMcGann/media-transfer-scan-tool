@@ -65,6 +65,9 @@
             # never pollutes the JSON we persist.
             $r = Invoke-BoundedProcess -FilePath $dsExe -Arguments @('scan', '--all-files', '--no-verify', $scanArg) `
                 -TimeoutSeconds $Context.TimeoutSeconds -WorkingDirectory $pushDir
+            if (-not $r.Started) {
+                return @(New-ToolBlockedFinding -Tool 'DetectSecrets' -UnitType $Unit.Type -File $Unit.RelativePath -Reason $r.StartError)
+            }
             if ($r.TimedOut) {
                 Write-Log -Level WARN -Message "DetectSecrets: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
                 return @(New-TimeoutFinding -Tool 'DetectSecrets' -UnitType $Unit.Type -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)

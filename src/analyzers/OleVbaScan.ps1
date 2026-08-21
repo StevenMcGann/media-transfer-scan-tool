@@ -45,6 +45,9 @@
         $findings = [System.Collections.Generic.List[object]]::new()
         try {
             $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $Unit.Path, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if (-not $r.Started) {
+                return @(New-ToolBlockedFinding -Tool 'OleVbaScan' -UnitType 'office' -File $Unit.RelativePath -Reason $r.StartError)
+            }
             if ($r.TimedOut) {
                 Write-Log -Level WARN -Message "OleVbaScan: helper timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
                 return @(New-TimeoutFinding -Tool 'OleVbaScan' -UnitType 'office' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)

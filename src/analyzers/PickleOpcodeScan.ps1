@@ -59,6 +59,10 @@
             $tmpJson = Join-Path $env:TEMP "mts_pickle_$([IO.Path]::GetRandomFileName()).json"
             try {
                 $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $binPath, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+                if (-not $r.Started) {
+                    $findings.Add((New-ToolBlockedFinding -Tool 'PickleOpcodeScan' -UnitType 'model' -File $rel -Reason $r.StartError))
+                    continue
+                }
                 if ($r.TimedOut) {
                     Write-Log -Level WARN -Message "PickleOpcodeScan: helper timed out ($($Context.TimeoutSeconds)s) for $rel."
                     $findings.Add((New-TimeoutFinding -Tool 'PickleOpcodeScan' -UnitType 'model' -File $rel -TimeoutSeconds $Context.TimeoutSeconds))

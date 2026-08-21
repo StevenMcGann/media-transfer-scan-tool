@@ -7,6 +7,7 @@
 BeforeAll {
     $script:Root    = Split-Path $PSScriptRoot -Parent
     . (Join-Path $Root 'src/Invoke-MediaTransferScan.ps1')
+    . (Join-Path $PSScriptRoot 'TestTools.ps1')
     $script:Quiet   = $true
     $script:NbDir   = Join-Path $PSScriptRoot 'fixtures/corpus/notebook'
     $script:Out     = Join-Path $env:TEMP "mts-nb-test-$(Get-Random)"
@@ -89,9 +90,12 @@ Describe 'Engine — notebook code scanned via projection' -Tag 'Online' {
             Venv  = $venv
             Tools = @{ 'bandit' = [PSCustomObject]@{ Name='bandit'; Available=$true; ScriptsDir=$venv.Scripts; Version='x' } }
         }
+        # Installed != runnable on an Application Control host — see tests/TestTools.ps1.
+        $script:BanditProbe = Test-ExternalToolRunnable -ExePath (Join-Path $venv.Scripts 'bandit.exe')
     }
 
     It 'Bandit flags eval() inside a notebook code cell under -Profile full' {
+        Assert-DeepToolOrSkip -Tool 'bandit' -Probe $script:BanditProbe
         $result = Invoke-Scan -Path $script:NbDir -Profile full `
             -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $script:Out `
             -ProvisionResult $script:Prov

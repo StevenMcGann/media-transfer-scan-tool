@@ -37,6 +37,18 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     rules over module source extracted from a container is a follow-up.
 
 ### Changed
+- **A blocked external tool is now reported, not silent: `MTS-TOOL-BLOCKED` (HIGH).**
+  On a host enforcing Application Control / Smart App Control, Windows refuses to
+  start the unsigned pip console shims the scanner provisions (`bandit.exe`,
+  `detect-secrets.exe`, `shellcheck.exe`, …). Previously `Invoke-BoundedProcess`
+  threw, each analyzer caught it into a **LOW** `MTS-*-ERR`, and the practical
+  result was a report that read as "this tool found nothing" when the tool never
+  ran. `Invoke-BoundedProcess` now returns `Started`/`StartError` instead of
+  throwing, and analyzers emit a HIGH finding saying the unit was **NOT** analyzed
+  — the same treatment `MTS-ANALYZER-TIMEOUT` already got, for the same reason.
+  `PythonRules` is unchanged: it already degrades to its regex fallback.
+  See [docs/test-environment.md](docs/test-environment.md) for how to detect and
+  clear the policy.
 - **No silent coverage gaps: `MTS-NO-ANALYZER` (INFO).** A unit that no enabled
   analyzer claims — `unsupported` files, and `batch` units, which have never had an
   analyzer — now carries an explicit INFO finding saying it was hashed and listed but
@@ -48,6 +60,14 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
   producible from `.bat`/`.cmd`; the omission was a documentation bug, not a change.
 
 ### Fixed
+- **Flaky deep-tier tests.** `BanditSecrets` and `Notebook` tests failed
+  intermittently — a different one each run, each passing in isolation. The cause
+  was not a race or PyPI: Smart App Control was blocking `bandit.exe` per-binary by
+  reputation, so the analyzer produced no findings and the assertion failed with no
+  diagnostic. `tests/TestTools.ps1` now probes whether each deep-tier binary can
+  actually be executed and skips loudly with the reason when it cannot, so a host
+  policy is never mistaken for a code regression. `MTS_REQUIRE_DEEP_TOOLS=1` makes
+  an un-runnable tool a hard failure for CI and release validation.
 - **UNC scan roots no longer crash the scan** ([#27](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/27)).
   `Resolve-Path ... .Path` returns a provider-qualified string for a network path
   (`Microsoft.PowerShell.Core\FileSystem::\\server\share\...`). That string is longer

@@ -8,6 +8,7 @@
 BeforeAll {
     $script:Root     = Split-Path $PSScriptRoot -Parent
     . (Join-Path $Root 'src/Invoke-MediaTransferScan.ps1')
+    . (Join-Path $PSScriptRoot 'TestTools.ps1')
     $script:Quiet    = $true
     $script:ShellDir = Join-Path $PSScriptRoot 'fixtures/corpus/shell'
     $script:Out      = Join-Path $env:TEMP "mts-shell-out-$(Get-Random)"
@@ -74,6 +75,9 @@ Describe 'ShellCheck — binary analysis' -Tag 'Online' {
             $venv = Initialize-ScannerVenv -PythonCmd $py -VenvDir $venvPath
             Update-PipBootstrap -PythonExe $venv.Python
             Install-PipPackage -PythonExe $venv.Python -Package 'shellcheck-py' -MinVersion '0.9.0' | Out-Null
+            # Installed != runnable — see tests/TestTools.ps1.
+            Assert-DeepToolOrSkip -Tool 'shellcheck' -Probe (
+                Test-ExternalToolRunnable -ExePath (Join-Path $venv.Scripts 'shellcheck.exe'))
             $prov = [PSCustomObject]@{
                 Venv  = $venv
                 Tools = @{ 'shellcheck-py' = [PSCustomObject]@{
@@ -99,6 +103,9 @@ Describe 'ShellCheck — binary analysis' -Tag 'Online' {
             $venv = Initialize-ScannerVenv -PythonCmd $py -VenvDir $venvPath
             Update-PipBootstrap -PythonExe $venv.Python
             Install-PipPackage -PythonExe $venv.Python -Package 'shellcheck-py' -MinVersion '0.9.0' | Out-Null
+            # Installed != runnable — see tests/TestTools.ps1.
+            Assert-DeepToolOrSkip -Tool 'shellcheck' -Probe (
+                Test-ExternalToolRunnable -ExePath (Join-Path $venv.Scripts 'shellcheck.exe'))
             $prov = [PSCustomObject]@{
                 Venv  = $venv
                 Tools = @{ 'shellcheck-py' = [PSCustomObject]@{

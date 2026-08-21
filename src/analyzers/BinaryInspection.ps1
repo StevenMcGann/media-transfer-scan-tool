@@ -79,6 +79,10 @@
             $tmpJson = Join-Path $env:TEMP "mts_binary_$([IO.Path]::GetRandomFileName()).json"
             try {
                 $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $binPath, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+                if (-not $r.Started) {
+                    $findings.Add((New-ToolBlockedFinding -Tool 'BinaryInspection' -UnitType $Unit.Type -File $relForReport -Reason $r.StartError))
+                    continue
+                }
                 if ($r.TimedOut) {
                     Write-Log -Level WARN -Message "BinaryInspection: helper timed out ($($Context.TimeoutSeconds)s) for $binPath."
                     $findings.Add((New-TimeoutFinding -Tool 'BinaryInspection' -UnitType $Unit.Type -File $relForReport -TimeoutSeconds $Context.TimeoutSeconds))

@@ -14,6 +14,7 @@
 BeforeAll {
     $script:Root    = Split-Path $PSScriptRoot -Parent
     . (Join-Path $Root 'src/Invoke-MediaTransferScan.ps1')
+    . (Join-Path $PSScriptRoot 'TestTools.ps1')
     $script:Quiet   = $true
     $script:Out     = Join-Path $env:TEMP "mts-pipaudit-test-$(Get-Random)"
     $script:VenvDir = Join-Path $env:TEMP "mts-pipaudit-venv-$(Get-Random)"
@@ -97,9 +98,14 @@ Describe 'PipAudit — real venv scan' -Tag 'Online' {
             Version    = (Get-InstalledPipVersion -PythonExe $script:Venv.Python -PackageName 'pip-audit')
             ScriptsDir = $script:Venv.Scripts
         }
+
+        # Installed != runnable: an Application Control policy blocks unsigned pip
+        # console shims per-binary. See tests/TestTools.ps1.
+        $script:AuditProbe = Test-ExternalToolRunnable -ExePath (Join-Path $script:Venv.Scripts 'pip-audit.exe')
     }
 
     It 'returns empty findings for a staging dir with no METADATA' {
+        Assert-DeepToolOrSkip -Tool 'pip-audit' -Probe $script:AuditProbe
         $desc    = & (Join-Path $Root 'src/analyzers/PipAudit.ps1')
         $stage   = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP "mts-pa-empty-$(Get-Random)") -Force).FullName
         $unit    = New-TestUnit -StagingPath $stage
@@ -110,6 +116,7 @@ Describe 'PipAudit — real venv scan' -Tag 'Online' {
     }
 
     It 'finds a CVE and writes an SBOM for a package with a known-vulnerable dep' {
+        Assert-DeepToolOrSkip -Tool 'pip-audit' -Probe $script:AuditProbe
         $desc  = & (Join-Path $Root 'src/analyzers/PipAudit.ps1')
 
         # Synthetic METADATA declaring a known-vulnerable version of Pillow

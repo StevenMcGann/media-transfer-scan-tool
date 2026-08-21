@@ -51,7 +51,15 @@ function Invoke-BoundedProcess {
     $exitCode = $null
     $stdout   = ''
     $stderr   = ''
+    $started  = $true
+    $startErr = ''
     try {
+        # Start() can fail outright — the file is missing, or an Application
+        # Control / WDAC / Smart App Control policy blocks it (pip-generated
+        # console shims are unsigned and carry no reputation, so an enforcing
+        # host blocks them). Report that as a structured result instead of
+        # throwing: to the caller it is a coverage gap, not a crash, and it must
+        # never be mistaken for "the tool ran and found nothing".
         [void]$proc.Start()
         # Begin draining both pipes immediately on the thread pool — prevents a
         # deadlock where the child blocks writing to a full pipe while we wait.
@@ -69,16 +77,48 @@ function Invoke-BoundedProcess {
             if ($outTask.IsCompleted) { $stdout = $outTask.Result }   # best-effort partial
             if ($errTask.IsCompleted) { $stderr = $errTask.Result }
         }
+    } catch {
+        $started  = $false
+        $startErr = "$_"
+        Write-Log -Level WARN -Message "Could not start '$FilePath': $startErr"
     } finally {
         $proc.Dispose()
     }
 
     return [PSCustomObject]@{
-        TimedOut = $timedOut
-        ExitCode = $exitCode
-        StdOut   = $stdout
-        StdErr   = $stderr
+        TimedOut     = $timedOut
+        ExitCode     = $exitCode
+        StdOut       = $stdout
+        StdErr       = $stderr
+        Started      = $started
+        StartError   = $startErr
     }
+}
+
+function New-ToolBlockedFinding {
+    <#
+        Standard finding emitted when an analyzer's external tool could not be
+        started at all — missing binary, or blocked by an Application Control /
+        WDAC / Smart App Control policy.
+
+        HIGH, for the same reason New-TimeoutFinding is HIGH: the unit was NOT
+        analyzed. The dangerous failure mode is silence — an operator reading
+        "Bandit: no findings" when Bandit never ran. This says so out loud.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Tool,
+        [string]$UnitType = '',
+        [string]$File = '',
+        [Parameter(Mandatory)][string]$Reason
+    )
+    New-Finding -Tool $Tool -Category 'parser' -Severity 'HIGH' -Confidence 'HIGH' `
+        -UnitType $UnitType -File $File `
+        -Issue "$Tool could not be started, so this unit was NOT analyzed by it: $Reason" `
+        -TestID 'MTS-TOOL-BLOCKED' `
+        -Recommendation ('Absence of findings from this tool is absence of coverage. ' +
+                         'On a host enforcing Application Control / Smart App Control, unsigned ' +
+                         'tool binaries are blocked — see docs/test-environment.md — so re-run on a ' +
+                         'host where the analyzer can execute before trusting a clean result.')
 }
 
 function New-TimeoutFinding {

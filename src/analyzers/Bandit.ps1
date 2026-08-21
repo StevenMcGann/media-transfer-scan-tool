@@ -49,6 +49,9 @@
         try {
             # -ll : report MEDIUM and HIGH severity only (cuts low-value noise)
             $r = Invoke-BoundedProcess -FilePath $banditExe -Arguments @('-r', $target, '-ll', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if (-not $r.Started) {
+                return @(New-ToolBlockedFinding -Tool 'Bandit' -UnitType 'python' -File $Unit.RelativePath -Reason $r.StartError)
+            }
             if ($r.TimedOut) {
                 Write-Log -Level WARN -Message "Bandit: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
                 return @(New-TimeoutFinding -Tool 'Bandit' -UnitType 'python' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)

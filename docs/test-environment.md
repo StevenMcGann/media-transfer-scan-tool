@@ -76,6 +76,45 @@ attributable scanner report on the isolated host, pick one:
 Whichever you choose: the isolated VM should be a host where malware alerts are
 **expected and understood**, not auto-escalated to a SOC as live incidents.
 
+### Application Control / Smart App Control blocks the scanner's own tools
+
+Distinct from AV, and easy to misread. On a host enforcing **Smart App Control**
+(default on many clean Windows 11 installs) or a WDAC/AppLocker policy, Windows
+refuses to *start* unsigned binaries with no established reputation. The pip
+console shims the scanner provisions — `bandit.exe`, `detect-secrets.exe`,
+`shellcheck.exe`, `pip-audit.exe` — are exactly that, whether they come from a
+live `pip install` or from the offline bundle's vendored venv:
+
+```
+An error occurred trying to start process '...\Scripts\bandit.exe'.
+An Application Control policy has blocked this file.
+```
+
+Check the host with:
+
+```powershell
+Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name VerifiedAndReputablePolicyState
+```
+
+`0` = off, `1` = enforcing, `2` = evaluation.
+
+**Why it matters:** the decision is a per-binary reputation lookup, so it is not
+all-or-nothing — one tool in a venv can be blocked while its neighbour runs, and
+the same tool can be blocked on one run and allowed on the next. That makes it
+look like intermittent flakiness rather than a policy.
+
+The scanner reports this rather than hiding it: a tool that cannot be started
+produces **`MTS-TOOL-BLOCKED` (HIGH)**, stating that the unit was *not* analyzed.
+Treat that as lost coverage, never as a clean result. To fix it properly, run the
+scanner on a host where the policy permits the tool binaries (an isolated review
+VM with Smart App Control off), or sign the vendored venv's binaries.
+
+The Pester suite applies the same rule: `tests/TestTools.ps1` probes each
+deep-tier binary before asserting on it and **skips loudly with the reason** when
+the host cannot run it, so a policy block is never mistaken for a code
+regression. Set `MTS_REQUIRE_DEEP_TOOLS=1` to turn that skip into a hard failure
+on hosts and CI runners where the tools are expected to run.
+
 ---
 
 ## Dev host — what it needs

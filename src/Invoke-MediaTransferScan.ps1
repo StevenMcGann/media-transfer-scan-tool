@@ -67,7 +67,7 @@ function Invoke-Main {
         return $script:ExitBadInput
     }
 
-    $scanRoot   = (Resolve-Path -LiteralPath $Path).Path
+    $scanRoot   = (Resolve-Path -LiteralPath $Path).ProviderPath
     $reportsDir = Join-Path $scanRoot '.reports'
     Initialize-Log -LogDir (Join-Path $here 'logs') | Out-Null
 

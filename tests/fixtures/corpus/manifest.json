@@ -167,6 +167,31 @@
     "model/model.pt": {
       "expectFinding": "PICKLE-REDUCE"
     },
+    "vba/clean.bas": {
+      "expectRiskyCode": false
+    },
+    "vba/autoexec.bas": {
+      "expectFinding": "VBA-AUTOEXEC-PAYLOAD"
+    },
+    "vba/downloader.bas": {
+      "expectFinding": "VBA-DOWNLOAD-EXEC"
+    },
+    "vba/shellcode.bas": {
+      "expectFinding": "VBA-SHELLCODE-API"
+    },
+    "vba/obfuscated.cls": {
+      "expectFinding": "VBA-OBFUSCATION-CHR"
+    },
+    "vba/launcher.vbs": {
+      "expectFinding": "VBA-POWERSHELL-ENC"
+    },
+    "vba/encoded.vbe": {
+      "expectFinding": "VBA-ENCODED-SOURCE"
+    },
+    "disguised/macro.txt": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "vba"
+    },
     "archive/clean.zip": {
       "expectHazard": false
     },

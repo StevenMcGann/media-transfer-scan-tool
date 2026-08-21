@@ -55,7 +55,11 @@
                     # other analyzers and avoids 2>&1 corrupting the JSON stream.
                     # Exit 0 = clean; exit 1 = findings; exit >1 = error.
                     $r = Invoke-BoundedProcess -FilePath $scExe -Arguments @('-f', 'json1', $target) -TimeoutSeconds $Context.TimeoutSeconds
-                    if ($r.TimedOut) {
+                    if (-not $r.Started) {
+                        $findings.Add((New-ToolBlockedFinding -Tool 'ShellCheck' -UnitType 'shell' -File $Unit.RelativePath -Reason $r.StartError))
+                        $exit = 0   # nothing to parse; the always-on custom-rule layer still runs
+                        Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
+                    } elseif ($r.TimedOut) {
                         Write-Log -Level WARN -Message "ShellCheck: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
                         $findings.Add((New-TimeoutFinding -Tool 'ShellCheck' -UnitType 'shell' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds))
                         $exit = 0   # nothing to parse; fall through to the always-on custom-rule layer

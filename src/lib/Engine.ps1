@@ -63,7 +63,7 @@ function Invoke-Scan {
     )
 
     $startTime    = Get-Date
-    $scanRoot     = (Resolve-Path -LiteralPath $Path).Path
+    $scanRoot     = (Resolve-Path -LiteralPath $Path).ProviderPath
     $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
     $stagingRoot  = Join-Path $env:TEMP "mts-staging-$stamp-$(Get-Random)"
 
@@ -133,7 +133,22 @@ function Invoke-Scan {
             Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"
 
             # ── Dispatch to analyzers ─────────────────────────────────────────
-            foreach ($analyzer in (Select-AnalyzersForUnit -Enabled $sel.Enabled -Unit $unit)) {
+            $selected = @(Select-AnalyzersForUnit -Enabled $sel.Enabled -Unit $unit)
+
+            # No silent coverage gaps: if nothing but the type-agnostic analyzers
+            # (FileHash and friends, UnitTypes = 'any') claimed this unit, the file
+            # was hashed and listed but never actually understood. Say so, at INFO,
+            # rather than letting it read as "reviewed and clean". Fires for
+            # 'unsupported' units and for any type with no enabled analyzer.
+            if (-not @($selected | Where-Object { $_.UnitTypes -notcontains 'any' })) {
+                $findings.Add((New-Finding -Tool 'Engine' -Category 'parser' -Severity 'INFO' `
+                    -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
+                    -Issue ("No analyzer covers unit type '{0}' — file was hashed and listed but not inspected." -f $unit.Type) `
+                    -TestID 'MTS-NO-ANALYZER' `
+                    -Recommendation 'Absence of findings here is absence of coverage, not evidence the file is safe.'))
+            }
+
+            foreach ($analyzer in $selected) {
                 try {
                     # Return, don't throw (PLAN §3.2 rule 2)
                     $out = & $analyzer.Invoke $unit $context

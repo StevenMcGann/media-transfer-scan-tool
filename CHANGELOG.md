@@ -8,6 +8,82 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **VB-family support — standalone VBA and VBScript** ([#25](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/25)).
+  Embedded Office macros were already covered by `OleVbaScan`, but a VB module or
+  script sitting loose in a submission classified as `unsupported` and was never
+  analyzed: a `.bas` containing `Auto_Open` + `URLDownloadToFile` + `Shell` produced
+  a SHA-256 line and nothing else. The same was true of `.vbs`/`.hta`, which matter
+  more — a `.vbs` executes on double-click, an exported module does not.
+  - **New `vba` unit type** covering `.bas .cls .frm .vba` and `.vbs .vbe .wsf .hta`.
+    Adding a `UnitType` value is explicitly non-breaking under
+    [docs/contract.md](docs/contract.md) §1.
+  - **New `VbaRules` analyzer** (core, default-on): auto-exec entry points, shell and
+    process launch, download primitives, native `Declare … Lib` imports, shellcode
+    APIs (`VirtualAlloc`/`RtlMoveMemory`, CRITICAL), registry persistence, hidden or
+    encoded PowerShell, and obfuscation (`Chr()` chains, `StrReverse`, `CallByName`).
+    Combinations that only make sense in a dropper — download+execute, auto-exec+payload
+    — escalate to CRITICAL, following the `PythonRules` precedent.
+  - **Pure PowerShell**: no Python helper and no pip package, so unlike the Office path
+    (which degrades to `OFFICE-OLEVBA-UNAVAIL` without oletools) this works air-gapped
+    with zero provisioning.
+  - **Disguise detection extended to VB**: a VBA module saved as `notes.txt` is now
+    detected by content signature and raises `MTS-DISGUISE-002`, then gets the full
+    rule pass. The signatures are deliberately VB-exclusive (`Sub`, never `Function`)
+    so they cannot steal units from the JavaScript, batch, or PowerShell paths.
+  - `.vbe` (Script Encoder output) reports `VBA-ENCODED-SOURCE` rather than a clean
+    result — it is obfuscated by design and cannot be read statically.
+  - Embedded Office macros are unchanged and stay with `OleVbaScan`. Running these
+    rules over module source extracted from a container is a follow-up.
+
+### Changed
+- **A blocked external tool is now reported, not silent: `MTS-TOOL-BLOCKED` (HIGH).**
+  On a host enforcing Application Control / Smart App Control, Windows refuses to
+  start the unsigned pip console shims the scanner provisions (`bandit.exe`,
+  `detect-secrets.exe`, `shellcheck.exe`, …). Previously `Invoke-BoundedProcess`
+  threw, each analyzer caught it into a **LOW** `MTS-*-ERR`, and the practical
+  result was a report that read as "this tool found nothing" when the tool never
+  ran. `Invoke-BoundedProcess` now returns `Started`/`StartError` instead of
+  throwing, and analyzers emit a HIGH finding saying the unit was **NOT** analyzed
+  — the same treatment `MTS-ANALYZER-TIMEOUT` already got, for the same reason.
+  `PythonRules` is unchanged: it already degrades to its regex fallback.
+  See [docs/test-environment.md](docs/test-environment.md) for how to detect and
+  clear the policy.
+- **No silent coverage gaps: `MTS-NO-ANALYZER` (INFO).** A unit that no enabled
+  analyzer claims — `unsupported` files, and `batch` units, which have never had an
+  analyzer — now carries an explicit INFO finding saying it was hashed and listed but
+  not inspected. Previously such a file produced only a hash line, which reads in a
+  report as "reviewed, clean" when it means "never looked at."
+  **Consumer impact:** `TotalFindings` rises on submissions containing ordinary
+  unanalyzed files. Severity is INFO, so overall risk and exit codes are unaffected.
+- `docs/contract.md` now documents `batch` in the `Type` enum. It was always
+  producible from `.bat`/`.cmd`; the omission was a documentation bug, not a change.
+
+### Fixed
+- **Flaky deep-tier tests.** `BanditSecrets` and `Notebook` tests failed
+  intermittently — a different one each run, each passing in isolation. The cause
+  was not a race or PyPI: Smart App Control was blocking `bandit.exe` per-binary by
+  reputation, so the analyzer produced no findings and the assertion failed with no
+  diagnostic. `tests/TestTools.ps1` now probes whether each deep-tier binary can
+  actually be executed and skips loudly with the reason when it cannot, so a host
+  policy is never mistaken for a code regression. `MTS_REQUIRE_DEEP_TOOLS=1` makes
+  an un-runnable tool a hard failure for CI and release validation.
+- **UNC scan roots no longer crash the scan** ([#27](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/27)).
+  `Resolve-Path ... .Path` returns a provider-qualified string for a network path
+  (`Microsoft.PowerShell.Core\FileSystem::\\server\share\...`). That string is longer
+  than the plain `FullName` of the files under it, so the length-based `Substring`
+  that derived each unit's relative path threw
+  `startIndex cannot be larger than length of string` and the scan aborted with exit
+  code 2. Both resolution sites (`Invoke-MediaTransferScan.ps1`, `Invoke-Scan` in
+  `lib/Engine.ps1`) now use `.ProviderPath`, and `New-Unit` computes the relative path
+  with `[System.IO.Path]::GetRelativePath` instead of string-length arithmetic.
+  `bundle/build-bundle.ps1` had the same `.Path` hazard for a UNC output dir and was
+  fixed alongside. Covered by `tests/PathResolution.Tests.ps1`: UNC cases run against
+  the local admin share and announce themselves loudly when it is unreachable
+  (`MTS_REQUIRE_UNC_TESTS=1` turns that skip into a failure), plus an
+  environment-independent source guard that fails if `Resolve-Path ... .Path` is
+  reintroduced anywhere under `src/` or `bundle/`.
+
 ## [0.9.0] - 2026-06-06
 
 ### Added

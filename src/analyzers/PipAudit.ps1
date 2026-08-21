@@ -92,6 +92,9 @@
             # --no-deps --disable-pip: audit only what the package declares, not
             # the scanner's own environment. Pattern carried from v1.6.1.
             $r = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            if (-not $r.Started) {
+                return @(New-ToolBlockedFinding -Tool 'PipAudit' -UnitType 'python' -File $Unit.RelativePath -Reason $r.StartError)
+            }
             if ($r.TimedOut) {
                 Write-Log -Level WARN -Message "PipAudit: timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath)."
                 return @(New-TimeoutFinding -Tool 'PipAudit' -UnitType 'python' -File $Unit.RelativePath -TimeoutSeconds $Context.TimeoutSeconds)
@@ -139,7 +142,10 @@
 
             try {
                 $rs = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'cyclonedx-json', '-o', $tmpSbom) -TimeoutSeconds $Context.TimeoutSeconds
-                if ($rs.TimedOut) {
+                if (-not $rs.Started) {
+                    Write-Log -Level WARN -Message "PipAudit: SBOM generation could not start for $($Unit.RelativePath) - skipped: $($rs.StartError)"
+                    Remove-Item -LiteralPath $tmpSbom -Force -ErrorAction SilentlyContinue
+                } elseif ($rs.TimedOut) {
                     Write-Log -Level WARN -Message "PipAudit: SBOM generation timed out ($($Context.TimeoutSeconds)s) for $($Unit.RelativePath) - skipped."
                     Remove-Item -LiteralPath $tmpSbom -Force -ErrorAction SilentlyContinue
                 } else {

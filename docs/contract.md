@@ -35,7 +35,7 @@ Written to `<scan-root>\.reports\summary_<timestamp>.json`. Top-level object:
 | Field | Type | Notes |
 |---|---|---|
 | `Name` | string | File name. |
-| `Type` | string | Classified type: `python,npm,powershell,shell,office,pdf,model,disguised,archive,native-binary,unsupported`. |
+| `Type` | string | Classified type: `python,npm,powershell,shell,batch,vba,office,pdf,model,disguised,archive,native-binary,unsupported`. |
 | `Path` | string | Path relative to the scan root. |
 | `Findings` | object[] | See below. |
 

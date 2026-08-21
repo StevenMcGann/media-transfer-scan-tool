@@ -8,6 +8,7 @@
 BeforeAll {
     $script:Root    = Split-Path $PSScriptRoot -Parent
     . (Join-Path $Root 'src/Invoke-MediaTransferScan.ps1')
+    . (Join-Path $PSScriptRoot 'TestTools.ps1')
     $script:Quiet   = $true
     $script:PySrc   = Join-Path $PSScriptRoot 'fixtures/corpus/pysource'
     $script:Out     = Join-Path $env:TEMP "mts-bs-test-$(Get-Random)"
@@ -52,9 +53,18 @@ Describe 'Bandit / DetectSecrets — real scan' -Tag 'Online' {
                 'detect-secrets' = [PSCustomObject]@{ Name='detect-secrets'; Available=$true; ScriptsDir=$venv.Scripts; Version='x' }
             }
         }
+
+        # Installed is not the same as runnable: Application Control / Smart App
+        # Control blocks unsigned, no-reputation console shims, and the decision is
+        # per-binary, so bandit.exe can be blocked while detect-secrets.exe runs.
+        # Probe each one so a blocked tool skips loudly instead of failing as a
+        # phantom regression. See tests/TestTools.ps1.
+        $script:BanditProbe  = Test-ExternalToolRunnable -ExePath (Join-Path $venv.Scripts 'bandit.exe')
+        $script:SecretsProbe = Test-ExternalToolRunnable -ExePath (Join-Path $venv.Scripts 'detect-secrets.exe')
     }
 
     It 'Bandit flags risky.py (eval / subprocess shell) under -Profile full' {
+        Assert-DeepToolOrSkip -Tool 'bandit' -Probe $script:BanditProbe
         $result = Invoke-Scan -Path $script:PySrc -Profile full `
             -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $script:Out `
             -ProvisionResult $script:Prov
@@ -64,6 +74,7 @@ Describe 'Bandit / DetectSecrets — real scan' -Tag 'Online' {
     }
 
     It 'Bandit produces no risky-code findings for clean.py' {
+        Assert-DeepToolOrSkip -Tool 'bandit' -Probe $script:BanditProbe
         $result = Invoke-Scan -Path $script:PySrc -Profile full `
             -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $script:Out `
             -ProvisionResult $script:Prov
@@ -73,6 +84,7 @@ Describe 'Bandit / DetectSecrets — real scan' -Tag 'Online' {
     }
 
     It 'DetectSecrets flags secrets.py' {
+        Assert-DeepToolOrSkip -Tool 'detect-secrets' -Probe $script:SecretsProbe
         $result = Invoke-Scan -Path $script:PySrc -Profile full `
             -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $script:Out `
             -ProvisionResult $script:Prov

@@ -140,43 +140,24 @@ function Invoke-Scan {
             # was hashed and listed but never actually understood. Say so, at INFO,
             # rather than letting it read as "reviewed and clean". Fires for
             # 'unsupported' units and for any type with no enabled analyzer.
-            $typeClaimed = @($selected | Where-Object { $_.UnitTypes -notcontains 'any' })
-
-            # Claiming a type in a descriptor is not the same as inspecting the
-            # content. For an `archive` unit both NpmScan and PickleOpcodeScan claim
-            # 'archive', which would suppress the gap notice below — but NpmScan
-            # returns immediately without a package.json and PickleOpcodeScan without
-            # model files, so a ZIP full of shell scripts came out hashed, unscanned
-            # and unremarked. Judge extracted content on its own types: one is covered
-            # only when an enabled analyzer claims BOTH that type and 'archive'.
-            # 'unsupported' is excluded — a readme inside a zip is not a coverage gap
-            # worth a line, whereas an unscanned .ps1 is.
-            $uncoveredInside = @()
-            if ($unit.StagingPath -and (Test-Path -LiteralPath $unit.StagingPath -PathType Container)) {
-                $insideTypes = @(Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                    ForEach-Object { $t = Get-DeclaredType -File $_; if ($t) { $t } } |
-                    Sort-Object -Unique)
-                foreach ($t in $insideTypes) {
-                    if (-not @($sel.Enabled | Where-Object {
-                            $_.UnitTypes -contains $t -and $_.UnitTypes -contains 'archive' })) {
-                        $uncoveredInside += $t
-                    }
-                }
-            }
-
-            if (-not $typeClaimed) {
+            # Scope note: this answers "did anything claim this UNIT", which is
+            # descriptor truth — if no analyzer claims the unit's type, nothing ran.
+            # It deliberately does NOT try to answer "was the content INSIDE an
+            # archive inspected". Inferring that from descriptors was tried and
+            # reverted: analyzers that declare 'archive' (NpmScan, PickleOpcodeScan)
+            # decline silently when the archive holds nothing they handle, while
+            # analyzers that genuinely do read a staging dir (PythonRules on a wheel
+            # or notebook) declare only 'python'. The descriptor cannot distinguish
+            # the two, so the check fired on every clean wheel and stayed silent on a
+            # ZIP of shell scripts. Answering it honestly needs analyzers to report
+            # what they actually inspected, or extracted files dispatched as real
+            # units — see the archive-coverage issue.
+            if (-not @($selected | Where-Object { $_.UnitTypes -notcontains 'any' })) {
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'parser' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
                     -Issue ("No analyzer covers unit type '{0}' — file was hashed and listed but not inspected." -f $unit.Type) `
                     -TestID 'MTS-NO-ANALYZER' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence the file is safe.'))
-            }
-            elseif ($uncoveredInside.Count -gt 0) {
-                $findings.Add((New-Finding -Tool 'Engine' -Category 'parser' -Severity 'INFO' `
-                    -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
-                    -Issue ("Extracted content of type(s) '{0}' was NOT inspected — no enabled analyzer covers those types inside an archive." -f ($uncoveredInside -join ', ')) `
-                    -TestID 'MTS-NO-ANALYZER' `
-                    -Recommendation 'The archive itself was hazard-checked, but this content was not analyzed. Extract to a folder and re-scan it directly before trusting a clean result.'))
             }
 
             foreach ($analyzer in $selected) {

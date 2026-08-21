@@ -163,6 +163,24 @@ Describe 'Engine — no silent coverage gaps' {
     It 'does not flag a type an analyzer does cover' {
         CountWhere $GapResult 'clean.bas' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
     }
+    It 'does not warn about wheels and notebooks, whose staging dir IS analyzed' {
+        # Regression guard. An earlier attempt inferred archive-content coverage from
+        # analyzer descriptors and put "content NOT inspected" on every clean wheel
+        # and notebook — while PythonRules was reading that exact staging directory.
+        # A false coverage warning on the tool's most common units is worse than the
+        # gap it was chasing. The honest answer needs analyzers to report what they
+        # inspected; until then this must stay silent here.
+        $out = Join-Path $env:TEMP "mts-stage-$(Get-Random)"
+        try {
+            foreach ($corpus in @('python', 'notebook')) {
+                $res = Invoke-Scan -Path (Join-Path $PSScriptRoot "fixtures/corpus/$corpus") `
+                    -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $out -Mode offline
+                @($res.Units | ForEach-Object { $_.Findings } |
+                    Where-Object { $_.TestID -eq 'MTS-NO-ANALYZER' }).Count |
+                    Should -Be 0 -Because "$corpus units are analyzed via their staging dir"
+            }
+        } finally { Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 Describe 'Language-neutral wrappers (.hta/.wsf) are not assumed to be VB' {
@@ -200,55 +218,5 @@ sh.Run "cmd.exe /c whoami", 0, False
     }
     It 'still applies the VB rules to a genuine VBScript wrapper' {
         CountWhere $WrapResult 'vbscript.wsf' { $_.TestID -eq 'VBA-WSCRIPT-SHELL' } | Should -BeGreaterThan 0
-    }
-}
-
-Describe 'Archive contents nothing inspects are reported' {
-    <#
-        Regression: NpmScan and PickleOpcodeScan both declare 'archive', which
-        suppressed the coverage-gap notice for ANY archive — but each returns
-        immediately when the archive holds no package.json / no model files. A ZIP
-        of shell scripts came out hashed, unscanned, and unremarked.
-    #>
-    BeforeAll {
-        $script:ArcDir = Join-Path $env:TEMP "mts-arc-$(Get-Random)"
-        New-Item -ItemType Directory -Path $script:ArcDir -Force | Out-Null
-
-        $stage = Join-Path $script:ArcDir '_stage'
-        New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $stage 'payload.ps1') -Value 'Write-Output "hi"'
-        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $script:ArcDir 'scripts.zip') -Force
-        Remove-Item $stage -Recurse -Force
-
-        $docs = Join-Path $script:ArcDir '_docs'
-        New-Item -ItemType Directory -Path $docs -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $docs 'README.txt') -Value 'just notes'
-        Compress-Archive -Path (Join-Path $docs '*') -DestinationPath (Join-Path $script:ArcDir 'docs_only.zip') -Force
-        Remove-Item $docs -Recurse -Force
-
-        $npm = Join-Path $script:ArcDir '_npm'
-        New-Item -ItemType Directory -Path $npm -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $npm 'package.json') -Value '{"name":"x","version":"1.0.0"}'
-        Compress-Archive -Path (Join-Path $npm '*') -DestinationPath (Join-Path $script:ArcDir 'npm_pkg.zip') -Force
-        Remove-Item $npm -Recurse -Force
-
-        $script:ArcResult = Invoke-Scan -Path $script:ArcDir -Profile core `
-            -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline
-    }
-    AfterAll { Remove-Item $script:ArcDir -Recurse -Force -ErrorAction SilentlyContinue }
-
-    It 'flags a PowerShell script inside a generic archive as uninspected' {
-        CountWhere $ArcResult 'scripts.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -BeGreaterThan 0
-    }
-    It 'names the uninspected type in the finding' {
-        @((UnitOf $ArcResult 'scripts.zip').Findings |
-            Where-Object { $_.TestID -eq 'MTS-NO-ANALYZER' -and $_.Issue -match 'powershell' }).Count |
-            Should -BeGreaterThan 0
-    }
-    It 'does not flag an archive holding only non-analyzable files' {
-        CountWhere $ArcResult 'docs_only.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
-    }
-    It 'does not flag an archive whose content IS covered inside archives' {
-        CountWhere $ArcResult 'npm_pkg.zip' { $_.TestID -eq 'MTS-NO-ANALYZER' } | Should -Be 0
     }
 }

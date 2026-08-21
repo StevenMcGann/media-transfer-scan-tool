@@ -78,7 +78,10 @@ function Get-SealedFileHashes {
     # (not [IO.Path]::GetFullPath) so this honours the PowerShell location the rest
     # of the build used; GetFullPath would resolve against the process cwd, which
     # Set-Location/Push-Location does not update.
-    $BundleDir = (Resolve-Path -LiteralPath $BundleDir).Path.TrimEnd('\', '/')
+    # .ProviderPath, not .Path: on a UNC output dir .Path carries the
+    # 'Microsoft.PowerShell.Core\FileSystem::' provider prefix, which would again
+    # skew the Substring length below.
+    $BundleDir = (Resolve-Path -LiteralPath $BundleDir).ProviderPath.TrimEnd('\', '/')
     $hashes  = [ordered]@{}
     $targets = New-Object System.Collections.Generic.List[string]
     $srcDir  = Join-Path $BundleDir 'src'

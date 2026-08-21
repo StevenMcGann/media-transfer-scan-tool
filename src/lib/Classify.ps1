@@ -216,7 +216,9 @@ function New-Unit {
 
     $confidence = if ($det) { $det.Confidence } else { 'LOW' }
 
-    $rel = $File.FullName.Substring($ScanRoot.TrimEnd('\').Length).TrimStart('\')
+    # GetRelativePath, not string arithmetic: tolerant of trailing separators and
+    # of UNC roots (\\server\share\...), where length-based Substring is fragile.
+    $rel = [System.IO.Path]::GetRelativePath($ScanRoot, $File.FullName)
     $ext = $File.Extension.ToLowerInvariant()
 
     $unit = [PSCustomObject]@{

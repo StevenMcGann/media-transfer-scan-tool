@@ -8,6 +8,23 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Fixed
+- **UNC scan roots no longer crash the scan** ([#27](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/27)).
+  `Resolve-Path ... .Path` returns a provider-qualified string for a network path
+  (`Microsoft.PowerShell.Core\FileSystem::\\server\share\...`). That string is longer
+  than the plain `FullName` of the files under it, so the length-based `Substring`
+  that derived each unit's relative path threw
+  `startIndex cannot be larger than length of string` and the scan aborted with exit
+  code 2. Both resolution sites (`Invoke-MediaTransferScan.ps1`, `Invoke-Scan` in
+  `lib/Engine.ps1`) now use `.ProviderPath`, and `New-Unit` computes the relative path
+  with `[System.IO.Path]::GetRelativePath` instead of string-length arithmetic.
+  `bundle/build-bundle.ps1` had the same `.Path` hazard for a UNC output dir and was
+  fixed alongside. Covered by `tests/PathResolution.Tests.ps1`: UNC cases run against
+  the local admin share and announce themselves loudly when it is unreachable
+  (`MTS_REQUIRE_UNC_TESTS=1` turns that skip into a failure), plus an
+  environment-independent source guard that fails if `Resolve-Path ... .Path` is
+  reintroduced anywhere under `src/` or `bundle/`.
+
 ## [0.9.0] - 2026-06-06
 
 ### Added

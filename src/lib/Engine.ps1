@@ -63,7 +63,7 @@ function Invoke-Scan {
     )
 
     $startTime    = Get-Date
-    $scanRoot     = (Resolve-Path -LiteralPath $Path).Path
+    $scanRoot     = (Resolve-Path -LiteralPath $Path).ProviderPath
     $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
     $stagingRoot  = Join-Path $env:TEMP "mts-staging-$stamp-$(Get-Random)"
 

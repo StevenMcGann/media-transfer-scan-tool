@@ -8,6 +8,45 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **VB-family support — standalone VBA and VBScript** ([#25](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/25)).
+  Embedded Office macros were already covered by `OleVbaScan`, but a VB module or
+  script sitting loose in a submission classified as `unsupported` and was never
+  analyzed: a `.bas` containing `Auto_Open` + `URLDownloadToFile` + `Shell` produced
+  a SHA-256 line and nothing else. The same was true of `.vbs`/`.hta`, which matter
+  more — a `.vbs` executes on double-click, an exported module does not.
+  - **New `vba` unit type** covering `.bas .cls .frm .vba` and `.vbs .vbe .wsf .hta`.
+    Adding a `UnitType` value is explicitly non-breaking under
+    [docs/contract.md](docs/contract.md) §1.
+  - **New `VbaRules` analyzer** (core, default-on): auto-exec entry points, shell and
+    process launch, download primitives, native `Declare … Lib` imports, shellcode
+    APIs (`VirtualAlloc`/`RtlMoveMemory`, CRITICAL), registry persistence, hidden or
+    encoded PowerShell, and obfuscation (`Chr()` chains, `StrReverse`, `CallByName`).
+    Combinations that only make sense in a dropper — download+execute, auto-exec+payload
+    — escalate to CRITICAL, following the `PythonRules` precedent.
+  - **Pure PowerShell**: no Python helper and no pip package, so unlike the Office path
+    (which degrades to `OFFICE-OLEVBA-UNAVAIL` without oletools) this works air-gapped
+    with zero provisioning.
+  - **Disguise detection extended to VB**: a VBA module saved as `notes.txt` is now
+    detected by content signature and raises `MTS-DISGUISE-002`, then gets the full
+    rule pass. The signatures are deliberately VB-exclusive (`Sub`, never `Function`)
+    so they cannot steal units from the JavaScript, batch, or PowerShell paths.
+  - `.vbe` (Script Encoder output) reports `VBA-ENCODED-SOURCE` rather than a clean
+    result — it is obfuscated by design and cannot be read statically.
+  - Embedded Office macros are unchanged and stay with `OleVbaScan`. Running these
+    rules over module source extracted from a container is a follow-up.
+
+### Changed
+- **No silent coverage gaps: `MTS-NO-ANALYZER` (INFO).** A unit that no enabled
+  analyzer claims — `unsupported` files, and `batch` units, which have never had an
+  analyzer — now carries an explicit INFO finding saying it was hashed and listed but
+  not inspected. Previously such a file produced only a hash line, which reads in a
+  report as "reviewed, clean" when it means "never looked at."
+  **Consumer impact:** `TotalFindings` rises on submissions containing ordinary
+  unanalyzed files. Severity is INFO, so overall risk and exit codes are unaffected.
+- `docs/contract.md` now documents `batch` in the `Type` enum. It was always
+  producible from `.bat`/`.cmd`; the omission was a documentation bug, not a change.
+
 ### Fixed
 - **UNC scan roots no longer crash the scan** ([#27](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/27)).
   `Resolve-Path ... .Path` returns a provider-qualified string for a network path

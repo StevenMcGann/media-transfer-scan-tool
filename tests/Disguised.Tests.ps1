@@ -64,13 +64,15 @@ Describe 'Get-ContentSignature — unit behavior' {
 }
 
 Describe 'Engine — disguised scripts routed and flagged end to end' {
-    It 'flags all four disguised scripts and clears the prose control under core' {
+    It 'flags all five disguised scripts and clears the prose control under core' {
         $out = Join-Path $env:TEMP "mts-dis-out-$(Get-Random)"
         $result = Invoke-Scan -Path $script:Dis -Profile core `
             -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $out -Mode offline
         $disguised = @($result.Units | ForEach-Object { $_.Findings } |
                        Where-Object { $_.Category -eq 'disguised-file' })
-        $disguised.Count | Should -Be 4
+        # readme.txt (PS), output.log (shell), data.dat (python), notes2.txt (batch),
+        # macro.txt (VBA, issue #25). memo.txt is the prose control and must not fire.
+        $disguised.Count | Should -Be 5
         ($result.Units | Where-Object { $_.Name -eq 'memo.txt' }).Type | Should -Be 'unsupported'
         Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
     }

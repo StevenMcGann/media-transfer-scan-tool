@@ -30,6 +30,13 @@ $script:ExtTypeMap = @{
     '.joblib' = 'model'; '.safetensors' = 'model'; '.gguf' = 'model'
     '.zip' = 'archive'; '.tgz' = 'archive'; '.tar' = 'archive'; '.gz' = 'archive'
     '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'; '.ts' = 'npm'
+    # VB family (issue #25). Exported VBA modules (.bas/.cls/.frm/.vba) are inert
+    # until imported; VBScript (.vbs/.vbe) and its wrappers (.wsf/.hta) execute on
+    # double-click. Same language, same rule set — one unit type covers both.
+    # NOTE: .cls and .frm are not exclusively VB (LaTeX class files also use .cls).
+    # A misfiled one classifies as 'vba' and simply produces no findings.
+    '.bas' = 'vba'; '.cls' = 'vba'; '.frm' = 'vba'; '.vba' = 'vba'
+    '.vbs' = 'vba'; '.vbe' = 'vba'; '.wsf' = 'vba'; '.hta' = 'vba'
 }
 
 # Specific filenames that determine type regardless of extension (.json is generic,
@@ -45,7 +52,7 @@ $script:KnownZipContainerTypes = @('python', 'office', 'npm', 'model')
 
 # Types that represent executable scripts — disguising one of these under an
 # innocent extension is the high-value evasion this module exists to catch.
-$script:ScriptTypes = @('python', 'powershell', 'shell', 'batch', 'npm')
+$script:ScriptTypes = @('python', 'powershell', 'shell', 'batch', 'npm', 'vba')
 
 # Content-signature patterns (signal #3). Distinct-match counts per language;
 # the highest count >= 2 wins. Patterns are chosen to be specific enough that
@@ -94,6 +101,26 @@ $script:ContentSignatures = [ordered]@{
         '(?im)^\s*call\s+\S',
         '(?im)^\s*if\s+exist\b',
         '%\w+%'
+    )
+    # VB family — VBA modules and VBScript (issue #25). Patterns are deliberately
+    # VB-exclusive to avoid stealing units from the other languages:
+    #   - 'Sub' (never 'Function') as the procedure opener: 'function foo(' would
+    #     otherwise match JavaScript, which has no signature block of its own and
+    #     would then be reclassified and flagged as disguised.
+    #   - 'Set x = New|CreateObject|obj.' requires the VB spacing; batch's
+    #     'set VAR=value' (no spaces, no RHS keyword) must not match.
+    vba = @(
+        '(?im)^\s*Attribute\s+VB_Name\s*=',
+        '(?im)^\s*Option\s+Explicit\s*$',
+        '(?im)^\s*End\s+(Sub|Function|Property|With|Type)\s*$',
+        '(?im)^\s*(Public\s+|Private\s+|Friend\s+)?Sub\s+\w+\s*\(',
+        '(?im)^\s*Dim\s+\w+\s+As\s+\w',
+        '(?im)^\s*Set\s+\w+\s*=\s*(New\s|CreateObject\s*\(|\w+\.)',
+        '(?i)\bCreateObject\s*\(\s*["'']',
+        '(?i)\bWScript\.(Shell|Echo|Sleep|Quit|Arguments|CreateObject)\b',
+        '(?i)\b(vbCrLf|vbNormalFocus|vbHide|vbModal|vbNewLine)\b',
+        '(?im)^\s*(Public\s+|Private\s+)?Declare\s+(PtrSafe\s+)?(Sub|Function)\s+\w+\s+Lib\b',
+        '(?i)<script\s+language\s*=\s*["'']?vbscript'
     )
 }
 

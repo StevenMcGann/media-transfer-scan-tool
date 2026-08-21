@@ -80,6 +80,13 @@ Three files are written per scan (same timestamp):
 The **"NOT checked"** line lists disabled analyzers — if you need that coverage,
 re-run with `-Profile full` or `-EnableAnalyzers <name>`.
 
+**`MTS-NO-ANALYZER` (INFO)** marks a file that was hashed and listed but never
+actually inspected, because no enabled analyzer covers its type — ordinary
+documents and data files, mostly. It is there so the report never lets an
+uninspected file read as a reviewed-and-clean one: **absence of findings on such
+a file is absence of coverage, not evidence it is safe.** Judge those by what
+they are, not by their empty finding list.
+
 ## 4. Exit codes (for scripted use)
 `0` clean · `10` findings present · `2` error · `3` bad input · `4` no PowerShell 7 runtime.
 

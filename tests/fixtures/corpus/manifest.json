@@ -161,6 +161,9 @@
     "python_requirements/unpinned/requirements.txt": {
       "expectFinding": "OSV-PYPI-UNPINNED"
     },
+    "python_requirements/hash_pinned/requirements.txt": {
+      "expectOsvOnline": false
+    },
     "python_requirements/vulnerable/requirements.txt": {
       "expectOsvOnline": true
     },

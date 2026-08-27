@@ -6,4 +6,6 @@ requests
 weird==1.0,!=1.0.1
 # option line — not a dependency, must be skipped entirely
 -r other.txt
+# editable/VCS install — no exact version, must still be reported (not silently dropped)
+-e git+https://example.test/repo.git#egg=editable-pkg
 

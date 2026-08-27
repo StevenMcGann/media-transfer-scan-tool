@@ -48,13 +48,58 @@
         function Get-PinnedPyPIDeps {
             param($Unit, [System.Collections.Generic.List[object]]$Findings)
             $pinned = [System.Collections.Generic.List[object]]::new()
+
+            # Reassemble backslash line-continuations into one logical line first —
+            # pip-compile/pip-tools hash-pinned output splits an exact pin and its
+            # --hash=... options across multiple physical lines:
+            #   package==1.2.3 \
+            #       --hash=sha256:aaaa \
+            #       --hash=sha256:bbbb
+            # Parsing physical lines individually would see "package==1.2.3 \" (a
+            # trailing backslash breaks the exact-pin match) and orphaned --hash
+            # lines, misreporting an actual exact pin as unpinned.
+            $logicalLines = [System.Collections.Generic.List[string]]::new()
+            $carry = ''
             foreach ($rawLine in (Get-Content -LiteralPath $Unit.Path -ErrorAction SilentlyContinue)) {
+                $joined = if ($carry) { "$carry $($rawLine.Trim())" } else { $rawLine }
+                if ($joined.TrimEnd().EndsWith('\')) {
+                    $carry = $joined.TrimEnd().TrimEnd('\').TrimEnd()
+                } else {
+                    $logicalLines.Add($joined)
+                    $carry = ''
+                }
+            }
+            if ($carry) { $logicalLines.Add($carry) }
+
+            foreach ($rawLine in $logicalLines) {
                 $line = $rawLine.Trim()
-                if (-not $line -or $line.StartsWith('#') -or $line.StartsWith('-')) { continue }   # blank/comment/option-or-include
+                if (-not $line -or $line.StartsWith('#')) { continue }
+
+                # Editable/VCS install ('-e spec' / '--editable spec') has no exact
+                # version to pin — report it as unqueryable rather than silently
+                # dropping it. A requirements.txt of ONLY editable installs must
+                # still surface a coverage note, not read as "nothing to flag".
+                if ($line -match '^(?:-e\s+|--editable(?:=|\s+))(.+)$') {
+                    $spec = $Matches[1].Trim()
+                    $editableName = if ($spec -match '#egg=([A-Za-z0-9][A-Za-z0-9._-]*)') { $Matches[1] } else { $spec }
+                    $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
+                        -UnitType 'python-requirements' -File $Unit.RelativePath `
+                        -Issue "Dependency '$editableName' is an editable/VCS install ('$line') — unpinned, OSV skipped." `
+                        -TestID 'OSV-PYPI-UNPINNED' `
+                        -Recommendation 'Editable/VCS installs have no exact version to check against OSV — review the source manually.'))
+                    continue
+                }
+                # Any other '-' prefixed line is an option/include directive, not a
+                # dependency (-r other.txt, --index-url, -i, --extra-index-url, ...).
+                if ($line.StartsWith('-')) { continue }
 
                 $line = ($line -split ';', 2)[0]              # strip environment marker
                 $line = ($line -split '\s+#', 2)[0].Trim()    # strip inline comment
                 if (-not $line) { continue }
+
+                # Strip pip's per-requirement options (--hash=..., --config-settings=...,
+                # etc.) so a hash-pinned line is still recognized as an exact pin.
+                $line = ([regex]::Replace($line, '\s+--\S+', '')).Trim()
 
                 $nameMatch = [regex]::Match($line, '^([A-Za-z0-9][A-Za-z0-9._-]*)')
                 $depName = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { $line }

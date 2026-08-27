@@ -150,6 +150,57 @@ function Get-OsvSeverityBand {
     return 'HIGH'
 }
 
+function Test-OsvPackageMatches {
+    <#
+        Does one OSV 'affected[].package' record identify the SAME package we
+        queried? An advisory can list several affected packages (cross-language
+        GHSA records, monorepo-style entries); without this check a fix-version
+        hint can be pulled from an unrelated package. PyPI compares PEP 503-
+        normalized names (OSV's own PyPI matching rule); other ecosystems compare
+        case-insensitively. A record with no name/ecosystem at all is treated as
+        matching (fail open — better to keep a possibly-relevant hint than to
+        silently drop it because the advisory's shape is unusually sparse).
+    #>
+    param($AffectedPackageName, $AffectedEcosystem, [string]$DepName, [string]$DepEcosystem)
+    if ($AffectedEcosystem -and $AffectedEcosystem -ne $DepEcosystem) { return $false }
+    if (-not $AffectedPackageName) { return $true }
+    if ($DepEcosystem -eq 'PyPI') {
+        return (Get-Pep503NormalizedName -Name $AffectedPackageName) -eq (Get-Pep503NormalizedName -Name $DepName)
+    }
+    return $AffectedPackageName.Equals($DepName, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-OsvFixNotNewerThan {
+    <#
+        Best-effort, ecosystem-agnostic version compare: is $FixVersion at or
+        below $CurrentVersion, meaning it would be a nonsensical/irrelevant
+        "upgrade" hint (an advisory can carry multiple affected ranges — e.g. a
+        1.x branch fixed in 1.5.3 and a 2.x branch fixed in 2.3.1 — and the
+        wrong branch's fix must not be offered as the remediation for our
+        version)? Compares dot/dash/plus/underscore-separated segments
+        numerically where both sides are digits, else as case-insensitive
+        strings. Returns $false (keep the fix) whenever a segment pair isn't
+        confidently comparable — this must never hide a real fix because a
+        pre-release suffix or exotic version scheme couldn't be parsed; the
+        cost of an occasional over-inclusive hint is far lower than the cost of
+        silently dropping a valid one (PLAN §3.2 "return, don't throw" spirit).
+    #>
+    param([Parameter(Mandatory)][string]$FixVersion, [Parameter(Mandatory)][string]$CurrentVersion)
+    $fTok = @($FixVersion     -split '[.\-+_]' | Where-Object { $_ -ne '' })
+    $cTok = @($CurrentVersion -split '[.\-+_]' | Where-Object { $_ -ne '' })
+    $n = [Math]::Min($fTok.Count, $cTok.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($fTok[$i] -match '^\d+$' -and $cTok[$i] -match '^\d+$') {
+            $fn = [int64]$fTok[$i]; $cn = [int64]$cTok[$i]
+            if ($fn -ne $cn) { return ($fn -lt $cn) }
+        } elseif ($fTok[$i] -ne $cTok[$i]) {
+            return $false   # not confidently comparable at this segment — fail open
+        }
+    }
+    if ($fTok.Count -ne $cTok.Count) { return ($fTok.Count -lt $cTok.Count) }
+    return $false   # equal versions — not "not newer", but nothing to exclude either
+}
+
 function Invoke-OsvQueryBatch {
     <#
         POST one batch of package/version queries to /v1/querybatch. Returns
@@ -270,10 +321,16 @@ function Get-OsvDependencyFindings {
 
                 $fixed = [System.Collections.Generic.List[string]]::new()
                 foreach ($aff in @(Get-OsvJsonProp $detail 'affected')) {
+                    $affPkg  = Get-OsvJsonProp $aff 'package'
+                    $affName = Get-OsvJsonProp $affPkg 'name'
+                    $affEco  = Get-OsvJsonProp $affPkg 'ecosystem'
+                    if (-not (Test-OsvPackageMatches $affName $affEco $dep.Name $dep.Ecosystem)) { continue }
                     foreach ($rng in @(Get-OsvJsonProp $aff 'ranges')) {
                         foreach ($ev in @(Get-OsvJsonProp $rng 'events')) {
                             $fixedVer = Get-OsvJsonProp $ev 'fixed'
-                            if ($fixedVer) { $fixed.Add([string]$fixedVer) }
+                            if ($fixedVer -and -not (Test-OsvFixNotNewerThan -FixVersion $fixedVer -CurrentVersion $dep.Version)) {
+                                $fixed.Add([string]$fixedVer)
+                            }
                         }
                     }
                 }

@@ -47,7 +47,7 @@ os.makedirs(SHELL_DIR, exist_ok=True)
 os.makedirs(PS_DIR, exist_ok=True)
 for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
-for sub in ('clean', 'unpinned', 'vulnerable'):
+for sub in ('clean', 'unpinned', 'vulnerable', 'hash_pinned'):
     os.makedirs(os.path.join(PYREQ_DIR, sub), exist_ok=True)
 for sub in ('clean', 'vulnerable'):
     os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
@@ -611,7 +611,18 @@ write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
     "weird==1.0,!=1.0.1\n"
     "# option line — not a dependency, must be skipped entirely\n"
     "-r other.txt\n"
+    "# editable/VCS install — no exact version, must still be reported (not silently dropped)\n"
+    "-e git+https://example.test/repo.git#egg=editable-pkg\n"
     "\n")
+
+# Hash-pinned (pip-compile/pip-tools style): a real exact pin whose --hash
+# options are appended on continuation lines. Must still be recognized as
+# pinned — offline-safe assertion: the offline coverage-gap note fires only
+# when at least one dependency was actually parsed as pinned.
+write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
+    "certifi==2024.2.2 \\\n"
+    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000a \\\n"
+    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b\n")
 
 # Vulnerable: exact-pinned to a version with well-known published advisories
 # (CVE-2023-44271 and others exist for Pillow < 10.0.1) — for the Online layer.
@@ -845,6 +856,7 @@ manifest = {
         "npm/locked/package-lock.json":{"expectOsvOnline": True},
         "python_requirements/clean/requirements.txt":      {"expectOsvOnline": False},
         "python_requirements/unpinned/requirements.txt":   {"expectFinding": "OSV-PYPI-UNPINNED"},
+        "python_requirements/hash_pinned/requirements.txt":{"expectOsvOnline": False},
         "python_requirements/vulnerable/requirements.txt": {"expectOsvOnline": True},
         "nuget/clean/Contoso.Fixture.Clean.1.0.0.nupkg":    {"expectOsvOnline": False},
         "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg":    {"expectOsvOnline": True},

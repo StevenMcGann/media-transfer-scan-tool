@@ -74,6 +74,32 @@ Describe 'Osv.ps1 — pure helpers (no network)' {
         $detail = [PSCustomObject]@{ id = 'X-1' }
         { Get-OsvSeverityBand -VulnDetail $detail } | Should -Not -Throw
     }
+
+    It 'matches an affected-package record by PEP 503-normalized name for PyPI' {
+        Test-OsvPackageMatches 'Foo_Bar' 'PyPI' 'foo-bar' 'PyPI' | Should -BeTrue
+        Test-OsvPackageMatches 'Other-Pkg' 'PyPI' 'foo-bar' 'PyPI' | Should -BeFalse
+    }
+
+    It 'rejects an affected-package record from a different ecosystem' {
+        Test-OsvPackageMatches 'lodash' 'npm' 'lodash' 'PyPI' | Should -BeFalse
+    }
+
+    It 'fails open (matches) when the affected record carries no package name' {
+        Test-OsvPackageMatches $null $null 'lodash' 'npm' | Should -BeTrue
+    }
+
+    It 'excludes a fix version below the current version (irrelevant branch)' {
+        Test-OsvFixNotNewerThan -FixVersion '1.5.3' -CurrentVersion '3.0.0' | Should -BeTrue
+    }
+
+    It 'keeps a fix version above the current version' {
+        Test-OsvFixNotNewerThan -FixVersion '10.0.1' -CurrentVersion '9.5.0' | Should -BeFalse
+        Test-OsvFixNotNewerThan -FixVersion '12.3.0' -CurrentVersion '9.5.0' | Should -BeFalse
+    }
+
+    It 'fails open (keeps the fix) when the version scheme is not confidently comparable' {
+        Test-OsvFixNotNewerThan -FixVersion '1.0.0-rc1' -CurrentVersion '1.0.0-beta' | Should -BeFalse
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +107,7 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'
         $unpinned = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' })
-        $unpinned.Count | Should -Be 3   # flask>=2.0, requests (bare), weird==1.0,!=1.0.1
+        $unpinned.Count | Should -Be 4   # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, editable-pkg
         ($unpinned.Issue -join ' ') | Should -Match 'flask'
         ($unpinned.Issue -join ' ') | Should -Match 'requests'
         ($unpinned.Issue -join ' ') | Should -Match 'weird'
@@ -89,9 +115,24 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
         @(AllFindings $r | Where-Object { $_.Issue -match 'other\.txt' }).Count | Should -Be 0
     }
 
+    It 'reports an editable/VCS install as unpinned rather than silently dropping it' {
+        $r = ScanDir 'python_requirements/unpinned'
+        $editable = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'editable-pkg' })
+        $editable.Count | Should -Be 1
+        $editable[0].Issue | Should -Match 'editable/VCS'
+    }
+
     It 'notes CVE audit skipped (offline) for an exact-pinned manifest' {
         $r = ScanDir 'python_requirements/vulnerable' -Mode offline
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-OFFLINE' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'recognizes a pip-compile hash-pinned exact pin split across continuation lines' {
+        $r = ScanDir 'python_requirements/hash_pinned' -Mode offline
+        # The offline note only fires when at least one dependency parsed as pinned —
+        # its presence proves the hash-pinned line was NOT misread as unpinned.
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-OFFLINE' }).Count | Should -BeGreaterThan 0
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' }).Count | Should -Be 0
     }
 
     It 'classifies requirements.txt as python-requirements, not python' {

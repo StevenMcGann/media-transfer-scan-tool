@@ -197,7 +197,21 @@ function Test-OsvFixNotNewerThan {
             return $false   # not confidently comparable at this segment — fail open
         }
     }
-    if ($fTok.Count -ne $cTok.Count) { return ($fTok.Count -lt $cTok.Count) }
+    if ($fTok.Count -ne $cTok.Count) {
+        # All shared segments are equal, so the longer version's EXTRA tokens decide.
+        # Those extras mean opposite things depending on their shape:
+        #   '1.2'   vs '1.2.3'        → extra '3' is numeric: a deeper release, so
+        #                               the shorter version really is the older one.
+        #   '2.0.0' vs '2.0.0-beta.1' → extra 'beta' is a PRE-RELEASE suffix, so the
+        #                               shorter version is the newer, STABLE one.
+        # Treating fewer-tokens as "older" unconditionally discarded the stable 2.0.0
+        # fix for a 2.0.0-beta.1 current version — dropping a real remediation, which
+        # is exactly what this function's fail-open contract forbids.
+        $longer     = if ($fTok.Count -gt $cTok.Count) { $fTok } else { $cTok }
+        $firstExtra = $longer[$n]
+        if ($firstExtra -notmatch '^\d+$') { return $false }   # pre-release suffix — fail open
+        return ($fTok.Count -lt $cTok.Count)
+    }
     return $false   # equal versions — not "not newer", but nothing to exclude either
 }
 

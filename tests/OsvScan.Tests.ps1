@@ -100,6 +100,19 @@ Describe 'Osv.ps1 — pure helpers (no network)' {
     It 'fails open (keeps the fix) when the version scheme is not confidently comparable' {
         Test-OsvFixNotNewerThan -FixVersion '1.0.0-rc1' -CurrentVersion '1.0.0-beta' | Should -BeFalse
     }
+
+    It 'keeps a stable fix that supersedes a pre-release current version' {
+        # 2.0.0 IS newer than 2.0.0-beta.1 — the extra tokens on the current side are
+        # a pre-release suffix, not a deeper release, so the fix must not be dropped.
+        Test-OsvFixNotNewerThan -FixVersion '2.0.0' -CurrentVersion '2.0.0-beta.1' | Should -BeFalse
+        Test-OsvFixNotNewerThan -FixVersion '1.4.0' -CurrentVersion '1.4.0-rc.2'   | Should -BeFalse
+    }
+
+    It 'still excludes a shallower fix when the extra tokens are a deeper numeric release' {
+        # 1.2 really is older than 1.2.3 — this must keep working after the
+        # pre-release carve-out above.
+        Test-OsvFixNotNewerThan -FixVersion '1.2' -CurrentVersion '1.2.3' | Should -BeTrue
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,7 +157,8 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'
         $unpinned = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' })
-        $unpinned.Count | Should -Be 5   # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, wildcard-pkg==1.2.*, editable-pkg
+        # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, wildcard-pkg==1.2.*, badeq-pkg====1.0, editable-pkg
+        $unpinned.Count | Should -Be 6
         ($unpinned.Issue -join ' ') | Should -Match 'flask'
         ($unpinned.Issue -join ' ') | Should -Match 'requests'
         ($unpinned.Issue -join ' ') | Should -Match 'weird'
@@ -193,6 +207,19 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' }).Count | Should -Be 0
     }
 
+    It "treats PEP 440 '===' arbitrary equality as an exact pin" {
+        # 'packaging===24.0' lives in the hash_pinned fixture; matching only '=='
+        # would capture '=24.0' and query a version that cannot exist — no OSV hit,
+        # no unpinned note, so a vulnerable dependency would read as clean.
+        $r = ScanDir 'python_requirements/hash_pinned' -Mode offline
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'packaging' }).Count | Should -Be 0
+    }
+
+    It 'reports a malformed 4-equals specifier as unpinned rather than querying a bogus version' {
+        $r = ScanDir 'python_requirements/unpinned'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'badeq-pkg' }).Count | Should -Be 1
+    }
+
     It 'classifies requirements.txt as python-requirements, not python' {
         $r = ScanDir 'python_requirements/clean'
         ($r.Units | Where-Object { $_.Name -eq 'requirements.txt' }).Type | Should -Be 'python-requirements'
@@ -236,6 +263,21 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
     It 'notes CVE audit skipped (offline) for the package identity' {
         $r = ScanDir 'nuget/vulnerable'
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'does not let a same-named package inherit another .nupkg''s manifest' {
+        # collide/a and collide/b share a FILENAME; only 'a' ships a .nuspec.
+        # With a shared staging dir, 'b' picked up 'a's manifest and was audited
+        # under the wrong identity instead of reporting its coverage gap.
+        $r = ScanDir 'nuget/collide'
+        $b = $r.Units | Where-Object { $_.Path -match '^b[\\/]' }
+        $b | Should -Not -BeNullOrEmpty
+        @($b.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-NO-NUSPEC' }).Count | Should -Be 1
+        # 'b' has no identity to audit, so it must NOT produce an offline audit note.
+        @($b.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+        # 'a' is unaffected and still resolves its own manifest.
+        $a = $r.Units | Where-Object { $_.Path -match '^a[\\/]' }
+        @($a.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
     }
 }
 

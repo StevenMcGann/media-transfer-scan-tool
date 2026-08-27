@@ -173,6 +173,12 @@
     "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg": {
       "expectOsvOnline": true
     },
+    "nuget/collide/a/Same.1.0.0.nupkg": {
+      "expectOsvOnline": false
+    },
+    "nuget/collide/b/Same.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-NO-NUSPEC"
+    },
     "model/safe.pkl": {
       "expectDeserialization": false
     },

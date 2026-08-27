@@ -49,7 +49,7 @@ for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 for sub in ('clean', 'unpinned', 'vulnerable', 'hash_pinned'):
     os.makedirs(os.path.join(PYREQ_DIR, sub), exist_ok=True)
-for sub in ('clean', 'vulnerable'):
+for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b'):
     os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -193,6 +193,16 @@ def make_wheel(pkg: str, version: str, internal: dict) -> bytes:
         meta = f"Metadata-Version: 2.1\nName: {pkg}\nVersion: {version}\n"
         zi = zipfile.ZipInfo(f"{pkg}-{version}.dist-info/METADATA", date_time=FIXED_ZIP_DT)
         z.writestr(zi, meta)
+    return buf.getvalue()
+
+
+def make_nupkg_without_nuspec() -> bytes:
+    """Build a .nupkg carrying NO .nuspec — must report a coverage gap, and must
+    never inherit a same-named package's manifest from a shared staging dir."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo('readme.txt', date_time=FIXED_ZIP_DT)
+        z.writestr(zi, 'This package deliberately ships no .nuspec.\n')
     return buf.getvalue()
 
 
@@ -611,6 +621,8 @@ write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
     "weird==1.0,!=1.0.1\n"
     "# PEP 440 compatible-release wildcard — a range, not one exact version\n"
     "wildcard-pkg==1.2.*\n"
+    "# malformed 4-equals — must fall through to unpinned, not capture '=1.0'\n"
+    "badeq-pkg====1.0\n"
     "# pure option line — not a dependency, must be skipped entirely\n"
     "--index-url https://example.test/simple\n"
     "# -r/--requirement include — must be reported as an unaudited coverage gap,\n"
@@ -632,7 +644,10 @@ write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
     "idna==3.6 --hash sha256:000000000000000000000000000000000000000000000000000000000000000c\n"
     "# short-form -C/--config-settings with a space-separated value\n"
     "chardet==5.2.0 -C KEY=VALUE\n"
-    "urllib3==2.2.1 --config-settings KEY=VALUE\n")
+    "urllib3==2.2.1 --config-settings KEY=VALUE\n"
+    "# PEP 440 '===' arbitrary equality — also an exact pin; the version must be\n"
+    "# captured as '24.0', NOT as '=24.0' (which would query a bogus version)\n"
+    "packaging===24.0\n")
 
 # Vulnerable: exact-pinned to a version with well-known published advisories
 # (CVE-2023-44271 and others exist for Pillow < 10.0.1) — for the Online layer.
@@ -651,6 +666,16 @@ write(os.path.join(NUGET_DIR, 'clean', 'Contoso.Fixture.Clean.1.0.0.nupkg'),
 # DoS via unbounded nesting depth, fixed in 13.0.1) — for the Online layer.
 write(os.path.join(NUGET_DIR, 'vulnerable', 'Newtonsoft.Json.12.0.1.nupkg'),
       make_nupkg('Newtonsoft.Json', '12.0.1'))
+
+# Same-basename collision: two .nupkg files sharing a FILENAME in different
+# directories. The first carries a .nuspec, the second carries none. If both
+# extract into one staging dir, the second inherits the first's manifest and is
+# audited under the WRONG identity instead of reporting its coverage gap.
+# On untrusted input that collision is attacker-arrangeable.
+write(os.path.join(NUGET_DIR, 'collide', 'a', 'Same.1.0.0.nupkg'),
+      make_nupkg('Contoso.Fixture.Collide', '1.0.0'))
+write(os.path.join(NUGET_DIR, 'collide', 'b', 'Same.1.0.0.nupkg'),
+      make_nupkg_without_nuspec())
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model / pickle fixtures (v0.7)
@@ -870,6 +895,8 @@ manifest = {
         "python_requirements/vulnerable/requirements.txt": {"expectOsvOnline": True},
         "nuget/clean/Contoso.Fixture.Clean.1.0.0.nupkg":    {"expectOsvOnline": False},
         "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg":    {"expectOsvOnline": True},
+        "nuget/collide/a/Same.1.0.0.nupkg":                 {"expectOsvOnline": False},
+        "nuget/collide/b/Same.1.0.0.nupkg":                 {"expectFinding": "OSV-NUGET-NO-NUSPEC"},
         "model/safe.pkl":          {"expectDeserialization": False},
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},

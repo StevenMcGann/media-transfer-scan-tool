@@ -6,6 +6,8 @@ requests
 weird==1.0,!=1.0.1
 # PEP 440 compatible-release wildcard — a range, not one exact version
 wildcard-pkg==1.2.*
+# malformed 4-equals — must fall through to unpinned, not capture '=1.0'
+badeq-pkg====1.0
 # pure option line — not a dependency, must be skipped entirely
 --index-url https://example.test/simple
 # -r/--requirement include — must be reported as an unaudited coverage gap,

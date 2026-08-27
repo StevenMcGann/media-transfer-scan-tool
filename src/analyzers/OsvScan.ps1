@@ -132,11 +132,17 @@
                 $noExtras = ([regex]::Replace($line, '\[[^\]]*\]', '')).Trim()
                 $specs = @($noExtras -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-                # A trailing '.*' on the version ('foo==1.2.*', PEP 440's compatible-
-                # release wildcard) is a RANGE, not one exact version — querying OSV
-                # with the literal string "1.2.*" would just never match, silently
-                # suppressing the unpinned note instead of raising it.
-                if ($specs.Count -eq 1 -and $specs[0] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s*==\s*(\S+)$' -and $Matches[1] -notmatch '\*') {
+                # '===?' accepts BOTH '==' and PEP 440's '===' arbitrary equality —
+                # both pin exactly one version. Matching only '==' would consume two
+                # of the three characters in 'foo===1.2.3' and capture the version as
+                # '=1.2.3', then query OSV for that nonexistent version: no match, no
+                # unpinned note, and a vulnerable dependency reads as clean.
+                # '[^=\s]' on the first version character keeps that failure mode from
+                # simply moving to a malformed 'foo====1.2.3' (which now falls through
+                # to the unpinned branch — visible, rather than silently wrong).
+                # A trailing '.*' ('foo==1.2.*', compatible-release wildcard) is a
+                # RANGE, not one exact version, and is likewise reported as unpinned.
+                if ($specs.Count -eq 1 -and $specs[0] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s*===?\s*([^=\s]\S*)$' -and $Matches[1] -notmatch '\*') {
                     $ver = $Matches[1]
                     $pinned.Add(@{
                         Name      = Get-Pep503NormalizedName -Name $depName
@@ -161,8 +167,13 @@
             if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
                       (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return $null }
 
-            $nuspec = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter '*.nuspec' -ErrorAction SilentlyContinue) |
-                Select-Object -First 1
+            # A .nupkg's manifest lives at the package ROOT, so look there only.
+            # A recursive search would happily pick up a .nuspec shipped inside the
+            # package as content/test data — or, before the staging dirs were made
+            # unique (Engine.ps1), a leftover one from a same-named package — and
+            # audit this unit under someone else's identity.
+            $nuspec = @(Get-ChildItem -LiteralPath $Unit.StagingPath -File -Filter '*.nuspec' -ErrorAction SilentlyContinue |
+                Sort-Object Name) | Select-Object -First 1
             if (-not $nuspec) {
                 $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
                     -UnitType 'nuget' -File $Unit.RelativePath `

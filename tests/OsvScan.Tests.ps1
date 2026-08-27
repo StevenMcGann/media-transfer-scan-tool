@@ -170,8 +170,9 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'
         $unpinned = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' })
-        # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, wildcard-pkg==1.2.*, badeq-pkg====1.0, editable-pkg
-        $unpinned.Count | Should -Be 6
+        # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, wildcard-pkg==1.2.*, badeq-pkg====1.0,
+        # editable-pkg (-e spec), local-attached-pkg (-e ATTACHED, no delimiter)
+        $unpinned.Count | Should -Be 7
         ($unpinned.Issue -join ' ') | Should -Match 'flask'
         ($unpinned.Issue -join ' ') | Should -Match 'requests'
         ($unpinned.Issue -join ' ') | Should -Match 'weird'
@@ -195,8 +196,18 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports a -r/--requirement include as an explicit unaudited coverage gap' {
         $r = ScanDir 'python_requirements/unpinned'
         $include = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-INCLUDE-UNAUDITED' })
-        $include.Count | Should -Be 1
-        $include[0].Issue | Should -Match 'other\.txt'
+        $include.Count | Should -Be 2
+        ($include.Issue -join ' ') | Should -Match 'other\.txt'
+    }
+
+    It 'catches -r/-e ATTACHED with no delimiter (-rfile.txt, -e./pkg), a real pip syntax' {
+        # Verified against a real `pip install --dry-run` that pip accepts both the
+        # spaced and no-delimiter short-option forms; missing the attached form let
+        # an include-only or editable-only manifest read as clean.
+        $r = ScanDir 'python_requirements/unpinned'
+        $findings = AllFindings $r
+        @($findings | Where-Object { $_.TestID -eq 'OSV-PYPI-INCLUDE-UNAUDITED' -and $_.Issue -match 'other-attached\.txt' }).Count | Should -Be 1
+        @($findings | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'local-attached-pkg' }).Count | Should -Be 1
     }
 
     It 'notes CVE audit skipped (offline) for an exact-pinned manifest' {

@@ -7,5 +7,5 @@ idna==3.6 --hash sha256:00000000000000000000000000000000000000000000000000000000
 chardet==5.2.0 -C KEY=VALUE
 urllib3==2.2.1 --config-settings KEY=VALUE
 # PEP 440 '===' arbitrary equality — also an exact pin; the version must be
-# captured as '5.0.1', NOT as '=5.0.1' (which would query a bogus version)
+# captured as '24.0', NOT as '=24.0' (which would query a bogus version)
 packaging===24.0

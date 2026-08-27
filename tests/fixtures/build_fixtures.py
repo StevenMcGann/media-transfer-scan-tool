@@ -628,8 +628,13 @@ write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
     "# -r/--requirement include — must be reported as an unaudited coverage gap,\n"
     "# not silently skipped (an include-only manifest must not read as \"clean\")\n"
     "-r other.txt\n"
+    "# -r ATTACHED with no delimiter -- pip accepts this (verified against a real\n"
+    "# pip install --dry-run); must be caught the same as the spaced form above\n"
+    "-rother-attached.txt\n"
     "# editable/VCS install — no exact version, must still be reported (not silently dropped)\n"
     "-e git+https://example.test/repo.git#egg=editable-pkg\n"
+    "# -e ATTACHED with no delimiter -- also real pip syntax, verified likewise\n"
+    "-e./local-attached-pkg\n"
     "\n")
 
 # Hash-pinned (pip-compile/pip-tools style): a real exact pin whose --hash

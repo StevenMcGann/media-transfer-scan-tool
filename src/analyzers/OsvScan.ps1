@@ -79,7 +79,10 @@
                 # version to pin — report it as unqueryable rather than silently
                 # dropping it. A requirements.txt of ONLY editable installs must
                 # still surface a coverage note, not read as "nothing to flag".
-                if ($line -match '^(?:-e\s+|--editable(?:=|\s+))(.+)$') {
+                # pip accepts the short option ATTACHED with no delimiter
+                # ('-e./localpkg', verified against a real pip install --dry-run) —
+                # '-e\s*' covers both '-e spec' and '-espec'.
+                if ($line -match '^(?:-e\s*|--editable(?:=|\s+))(.+)$') {
                     $spec = $Matches[1].Trim()
                     $editableName = if ($spec -match '#egg=([A-Za-z0-9][A-Za-z0-9._-]*)') { $Matches[1] } else { $spec }
                     $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
@@ -95,8 +98,11 @@
                 # unit — silently skipping this line would let an include-only
                 # manifest read as "audited, clean" when nothing in it was actually
                 # checked. Report the gap explicitly instead of following it (the
-                # target may not even be part of this submission).
-                if ($line -match '^(?:-r\s+|--requirement(?:=|\s+))(.+)$') {
+                # target may not even be part of this submission). pip accepts the
+                # short option ATTACHED with no delimiter ('-rprod.txt', verified
+                # against a real pip install --dry-run), unlike the long option
+                # (which needs '=' or a space) — '-r\s*' covers both '-r x' and '-rx'.
+                if ($line -match '^(?:-r\s*|--requirement(?:=|\s+))(.+)$') {
                     $target = $Matches[1].Trim()
                     $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'HIGH' `
                         -UnitType 'python-requirements' -File $Unit.RelativePath `

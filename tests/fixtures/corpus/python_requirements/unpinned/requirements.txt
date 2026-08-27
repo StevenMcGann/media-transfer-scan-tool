@@ -13,6 +13,11 @@ badeq-pkg====1.0
 # -r/--requirement include — must be reported as an unaudited coverage gap,
 # not silently skipped (an include-only manifest must not read as "clean")
 -r other.txt
+# -r ATTACHED with no delimiter -- pip accepts this (verified against a real
+# pip install --dry-run); must be caught the same as the spaced form above
+-rother-attached.txt
 # editable/VCS install — no exact version, must still be reported (not silently dropped)
 -e git+https://example.test/repo.git#egg=editable-pkg
+# -e ATTACHED with no delimiter -- also real pip syntax, verified likewise
+-e./local-attached-pkg
 

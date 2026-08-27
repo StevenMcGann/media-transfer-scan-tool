@@ -107,12 +107,12 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'
         $unpinned = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' })
-        $unpinned.Count | Should -Be 4   # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, editable-pkg
+        $unpinned.Count | Should -Be 5   # flask>=2.0, requests (bare), weird==1.0,!=1.0.1, wildcard-pkg==1.2.*, editable-pkg
         ($unpinned.Issue -join ' ') | Should -Match 'flask'
         ($unpinned.Issue -join ' ') | Should -Match 'requests'
         ($unpinned.Issue -join ' ') | Should -Match 'weird'
-        # '-r other.txt' is an include directive, not a dependency — must not appear at all.
-        @(AllFindings $r | Where-Object { $_.Issue -match 'other\.txt' }).Count | Should -Be 0
+        # A pure option line (--index-url) is not a dependency — must not appear at all.
+        @(AllFindings $r | Where-Object { $_.Issue -match 'index-url' }).Count | Should -Be 0
     }
 
     It 'reports an editable/VCS install as unpinned rather than silently dropping it' {
@@ -120,6 +120,19 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
         $editable = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'editable-pkg' })
         $editable.Count | Should -Be 1
         $editable[0].Issue | Should -Match 'editable/VCS'
+    }
+
+    It 'rejects a PEP 440 wildcard equality (==1.2.*) as unpinned rather than querying it literally' {
+        $r = ScanDir 'python_requirements/unpinned'
+        $wildcard = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' -and $_.Issue -match 'wildcard-pkg' })
+        $wildcard.Count | Should -Be 1
+    }
+
+    It 'reports a -r/--requirement include as an explicit unaudited coverage gap' {
+        $r = ScanDir 'python_requirements/unpinned'
+        $include = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-INCLUDE-UNAUDITED' })
+        $include.Count | Should -Be 1
+        $include[0].Issue | Should -Match 'other\.txt'
     }
 
     It 'notes CVE audit skipped (offline) for an exact-pinned manifest' {

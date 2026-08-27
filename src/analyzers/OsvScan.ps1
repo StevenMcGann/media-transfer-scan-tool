@@ -89,8 +89,24 @@
                         -Recommendation 'Editable/VCS installs have no exact version to check against OSV — review the source manually.'))
                     continue
                 }
-                # Any other '-' prefixed line is an option/include directive, not a
-                # dependency (-r other.txt, --index-url, -i, --extra-index-url, ...).
+                # '-r'/'--requirement' delegates to another manifest. The classifier
+                # only recognizes the literal filename 'requirements.txt' (see
+                # Classify.ps1), so the included file is never discovered as its own
+                # unit — silently skipping this line would let an include-only
+                # manifest read as "audited, clean" when nothing in it was actually
+                # checked. Report the gap explicitly instead of following it (the
+                # target may not even be part of this submission).
+                if ($line -match '^(?:-r\s+|--requirement(?:=|\s+))(.+)$') {
+                    $target = $Matches[1].Trim()
+                    $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'HIGH' `
+                        -UnitType 'python-requirements' -File $Unit.RelativePath `
+                        -Issue "Includes '$target' via -r/--requirement — that file is not automatically discovered or audited." `
+                        -TestID 'OSV-PYPI-INCLUDE-UNAUDITED' `
+                        -Recommendation "Scan '$target' directly (as its own requirements.txt) to audit the dependencies it declares."))
+                    continue
+                }
+                # Any other '-' prefixed line is an option, not a dependency
+                # (--index-url, -i, --extra-index-url, --pre, --constraint, ...).
                 if ($line.StartsWith('-')) { continue }
 
                 $line = ($line -split ';', 2)[0]              # strip environment marker
@@ -109,7 +125,11 @@
                 $noExtras = ([regex]::Replace($line, '\[[^\]]*\]', '')).Trim()
                 $specs = @($noExtras -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-                if ($specs.Count -eq 1 -and $specs[0] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s*==\s*(\S+)$') {
+                # A trailing '.*' on the version ('foo==1.2.*', PEP 440's compatible-
+                # release wildcard) is a RANGE, not one exact version — querying OSV
+                # with the literal string "1.2.*" would just never match, silently
+                # suppressing the unpinned note instead of raising it.
+                if ($specs.Count -eq 1 -and $specs[0] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s*==\s*(\S+)$' -and $Matches[1] -notmatch '\*') {
                     $ver = $Matches[1]
                     $pinned.Add(@{
                         Name      = Get-Pep503NormalizedName -Name $depName

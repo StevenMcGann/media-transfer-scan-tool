@@ -4,7 +4,12 @@ flask>=2.0
 requests
 # compound specifier (comma-joined)
 weird==1.0,!=1.0.1
-# option line — not a dependency, must be skipped entirely
+# PEP 440 compatible-release wildcard — a range, not one exact version
+wildcard-pkg==1.2.*
+# pure option line — not a dependency, must be skipped entirely
+--index-url https://example.test/simple
+# -r/--requirement include — must be reported as an unaudited coverage gap,
+# not silently skipped (an include-only manifest must not read as "clean")
 -r other.txt
 # editable/VCS install — no exact version, must still be reported (not silently dropped)
 -e git+https://example.test/repo.git#egg=editable-pkg

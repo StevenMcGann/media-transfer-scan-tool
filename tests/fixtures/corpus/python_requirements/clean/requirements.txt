@@ -1,0 +1,2 @@
+# clean, exact-pinned deps
+certifi==2024.2.2

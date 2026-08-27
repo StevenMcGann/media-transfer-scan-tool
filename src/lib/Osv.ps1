@@ -1,0 +1,293 @@
+#Requires -Version 7.4
+<#
+    Osv.ps1 - shared client for the OSV.dev dependency-vulnerability API
+    (issue #32). Used by OsvScan.ps1 (PyPI/npm/NuGet) so severity scoring,
+    advisory-detail lookup, and coverage-gap wording stay consistent across
+    every ecosystem it covers now and any added later.
+
+    Flow: POST /v1/querybatch to find which (name, version) pairs have known
+    vulnerabilities, then GET /v1/vulns/{id} once per DISTINCT id found across
+    the whole batch (not once per dependency) to pull summary/severity/fixed
+    versions for a first-class finding. Best-effort: a network failure at
+    either stage degrades to one coverage-gap finding, never a silent empty
+    result and never a thrown exception (PLAN §3.2 "return, don't throw").
+#>
+
+Set-StrictMode -Version Latest
+
+$script:OsvApiBase = 'https://api.osv.dev/v1'
+
+function Get-Pep503NormalizedName {
+    <#
+        PEP 503 name normalization: lowercase, runs of -_. collapsed to a
+        single '-'. OSV's PyPI ecosystem matches on the normalized name.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    return ([regex]::Replace($Name.Trim(), '[-_.]+', '-')).ToLowerInvariant()
+}
+
+function Get-CvssV3BaseScore {
+    <#
+        Compute the CVSS v3.0/3.1 Base Score from a vector string (FIRST.org
+        formula). Returns [double] or $null if the vector is missing a
+        required metric / isn't a v3 vector. CVSS v4 vectors return $null
+        (different, non-additive formula) — callers fall back to another
+        severity signal.
+    #>
+    param([Parameter(Mandatory)][string]$Vector)
+
+    if ($Vector -notmatch '^CVSS:3\.[01]/') { return $null }
+
+    $metrics = @{}
+    foreach ($pair in ($Vector -split '/')) {
+        $kv = $pair -split ':', 2
+        if ($kv.Count -eq 2) { $metrics[$kv[0]] = $kv[1] }
+    }
+    foreach ($req in @('AV', 'AC', 'PR', 'UI', 'S', 'C', 'I', 'A')) {
+        if (-not $metrics.ContainsKey($req)) { return $null }
+    }
+
+    $avMap  = @{ N = 0.85; A = 0.62; L = 0.55; P = 0.2 }
+    $acMap  = @{ L = 0.77; H = 0.44 }
+    $uiMap  = @{ N = 0.85; R = 0.62 }
+    $ciaMap = @{ H = 0.56; L = 0.22; N = 0 }
+    $scopeChanged = ($metrics['S'] -eq 'C')
+    $prMap = if ($scopeChanged) { @{ N = 0.85; L = 0.68; H = 0.5 } } else { @{ N = 0.85; L = 0.62; H = 0.27 } }
+
+    foreach ($check in @(
+        @{ Map = $avMap;  Key = 'AV' }, @{ Map = $acMap;  Key = 'AC' }, @{ Map = $prMap; Key = 'PR' },
+        @{ Map = $uiMap;  Key = 'UI' }, @{ Map = $ciaMap; Key = 'C' },  @{ Map = $ciaMap; Key = 'I' },
+        @{ Map = $ciaMap; Key = 'A' }
+    )) {
+        if (-not $check.Map.ContainsKey($metrics[$check.Key])) { return $null }
+    }
+
+    $av = $avMap[$metrics['AV']]; $ac = $acMap[$metrics['AC']]; $pr = $prMap[$metrics['PR']]; $ui = $uiMap[$metrics['UI']]
+    $c  = $ciaMap[$metrics['C']]; $i  = $ciaMap[$metrics['I']]; $a  = $ciaMap[$metrics['A']]
+
+    $iscBase = 1 - ((1 - $c) * (1 - $i) * (1 - $a))
+    if ($iscBase -le 0) { return 0.0 }
+
+    $isc = if ($scopeChanged) {
+        7.52 * ($iscBase - 0.029) - 3.25 * [Math]::Pow(($iscBase - 0.02), 15)
+    } else {
+        6.42 * $iscBase
+    }
+    if ($isc -le 0) { return 0.0 }
+
+    $exploitability = 8.22 * $av * $ac * $pr * $ui
+    $raw = if ($scopeChanged) { 1.08 * ($isc + $exploitability) } else { $isc + $exploitability }
+    $raw = [Math]::Min($raw, 10.0)
+
+    # CVSS "Roundup" (spec Appendix A) — round UP to the nearest 0.1 via integer
+    # math so IEEE-754 float error never rounds a .x5 the wrong way.
+    $intInput = [Math]::Round($raw * 100000)
+    if ($intInput % 10000 -eq 0) {
+        return $intInput / 100000.0
+    } else {
+        return ([Math]::Floor($intInput / 10000) + 1) / 10.0
+    }
+}
+
+function Get-OsvJsonProp {
+    <#
+        Safe optional-property read for a ConvertFrom-Json/Invoke-RestMethod
+        object: returns $null for a property that is absent (not just $null)
+        rather than throwing under Set-StrictMode -Version Latest. OSV's JSON
+        omits keys entirely rather than emitting null/empty ('{}' for "no
+        vulns", no 'summary' key on some minimal PYSEC records, etc.).
+    #>
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name }
+    return $null
+}
+
+function Get-OsvSeverityBand {
+    <#
+        Best available severity signal for one OSV vuln-detail record, in
+        preference order: (1) an explicit database_specific.severity string
+        (GHSA records carry this), (2) a computed CVSS v3 base score, (3) a
+        keyword heuristic over the summary/details text (mirrors PipAudit's
+        existing fallback for records with no structured severity at all).
+        Never returns a value lower than the caller should trust — an
+        unscored, unkeyworded record defaults to HIGH rather than silently
+        downgrading a known vulnerability.
+    #>
+    param([Parameter(Mandatory)]$VulnDetail)
+
+    $dbSpecific = Get-OsvJsonProp $VulnDetail 'database_specific'
+    $dbSeverity = Get-OsvJsonProp $dbSpecific 'severity'
+    if ($dbSeverity) {
+        switch -Regex ($dbSeverity) {
+            '(?i)^critical$'          { return 'CRITICAL' }
+            '(?i)^high$'               { return 'HIGH' }
+            '(?i)^(moderate|medium)$'  { return 'MEDIUM' }
+            '(?i)^low$'                { return 'LOW' }
+        }
+    }
+
+    $severities = Get-OsvJsonProp $VulnDetail 'severity'
+    if ($severities) {
+        foreach ($s in @($severities)) {
+            $type  = Get-OsvJsonProp $s 'type'
+            $score = Get-OsvJsonProp $s 'score'
+            if ($type -eq 'CVSS_V3' -and $score) {
+                $base = Get-CvssV3BaseScore -Vector $score
+                if ($null -ne $base) {
+                    if     ($base -ge 9.0) { return 'CRITICAL' }
+                    elseif ($base -ge 7.0) { return 'HIGH' }
+                    elseif ($base -ge 4.0) { return 'MEDIUM' }
+                    else                   { return 'LOW' }
+                }
+            }
+        }
+    }
+
+    $text = "$(Get-OsvJsonProp $VulnDetail 'summary') $(Get-OsvJsonProp $VulnDetail 'details')"
+    if ($text -match '(?i)critical|remote code execution|\brce\b')  { return 'CRITICAL' }
+    if ($text -match '(?i)privilege escalation')                     { return 'HIGH' }
+    if ($text -match '(?i)\b(moderate|medium)\b')                    { return 'MEDIUM' }
+    return 'HIGH'
+}
+
+function Invoke-OsvQueryBatch {
+    <#
+        POST one batch of package/version queries to /v1/querybatch. Returns
+        the raw .results array (each entry has only .vulns[].id/.modified —
+        no advisory detail; that's a separate GET per id). Throws on network
+        failure; callers decide how to surface that as a finding.
+    #>
+    param([Parameter(Mandatory)][object[]]$Queries, [int]$TimeoutSec = 30)
+    $body = @{ queries = $Queries } | ConvertTo-Json -Depth 6
+    $resp = Invoke-RestMethod -Uri "$script:OsvApiBase/querybatch" -Method Post `
+        -Body $body -ContentType 'application/json' -TimeoutSec $TimeoutSec
+    return @($resp.results)
+}
+
+function Get-OsvVulnDetails {
+    <#
+        GET the full advisory record for one OSV/CVE/GHSA/PYSEC id.
+        Throws on network failure; callers decide how to surface that.
+    #>
+    param([Parameter(Mandatory)][string]$Id, [int]$TimeoutSec = 30)
+    return Invoke-RestMethod -Uri "$script:OsvApiBase/vulns/$Id" -Method Get -TimeoutSec $TimeoutSec
+}
+
+function New-OsvOfflineFinding {
+    <# Shared wording for "a lock file/manifest is present but Mode=offline". #>
+    param(
+        [Parameter(Mandatory)][string]$Tool,
+        [Parameter(Mandatory)][string]$UnitType,
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string]$TestId
+    )
+    New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'HIGH' `
+        -UnitType $UnitType -File $File `
+        -Issue 'Dependency CVE audit skipped (offline) — a dependency manifest is present but OSV needs network.' `
+        -TestID $TestId `
+        -Recommendation 'Re-run online, or check declared dependencies against OSV.dev manually before admitting.'
+}
+
+function Get-OsvDependencyFindings {
+    <#
+        The shared audit: batch-query OSV for @{Name; Version; Ecosystem; FileLabel}
+        dependencies, resolve every distinct vuln id to full advisory detail, and
+        emit one 'vuln-dependency' finding per (dependency, vuln) pair. Chunks the
+        batch at 100 queries/request (well under OSV's documented 1000 limit) —
+        every chunk is queried, none are silently dropped for size.
+
+        Non-throwing: a querybatch failure emits ONE coverage-gap finding and
+        returns; a per-id detail-fetch failure still emits a finding for that
+        vuln (id + dependency), just without summary/severity/fix detail, so a
+        transient GET failure on one advisory never drops the whole result.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Tool,
+        [Parameter(Mandatory)][string]$UnitType,
+        [Parameter(Mandatory)][object[]]$Dependencies,   # @{ Name; Version; Ecosystem; FileLabel }
+        [int]$TimeoutSec = 30,
+        [string]$ErrorTestId = 'OSV-QUERY-ERR'
+    )
+    $out = [System.Collections.Generic.List[object]]::new()
+    if ($Dependencies.Count -eq 0) { return $out.ToArray() }
+
+    $batchSize = 100
+    $hits = [System.Collections.Generic.List[object]]::new()
+
+    for ($i = 0; $i -lt $Dependencies.Count; $i += $batchSize) {
+        $end   = [Math]::Min($i + $batchSize, $Dependencies.Count) - 1
+        $chunk = $Dependencies[$i..$end]
+        $queries = @($chunk | ForEach-Object {
+            @{ package = @{ name = $_.Name; ecosystem = $_.Ecosystem }; version = $_.Version } })
+
+        try {
+            # @() wrap is REQUIRED: a function's `return` of an empty array collapses
+            # to $null at the caller when it's the sole pipeline output — plain
+            # assignment does not guard against it (see OsvScan.ps1 for the full note).
+            $chunkResults = @(Invoke-OsvQueryBatch -Queries $queries -TimeoutSec $TimeoutSec)
+        } catch {
+            $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                -UnitType $UnitType -File $chunk[0].FileLabel `
+                -Issue "OSV dependency audit could not reach api.osv.dev: $_" -TestID $ErrorTestId `
+                -Recommendation 'Re-run online, or check declared dependencies against OSV.dev manually before admitting.'))
+            return $out.ToArray()
+        }
+
+        for ($j = 0; $j -lt $chunkResults.Count; $j++) {
+            # A no-vuln result is '{}' — no 'vulns' property at all (Set-StrictMode
+            # throws on a bare .vulns access), not an empty array.
+            $entry = $chunkResults[$j]
+            $vulns = if ($entry.PSObject.Properties['vulns']) { $entry.vulns } else { $null }
+            if ($vulns) {
+                $hits.Add(@{ Dep = $chunk[$j]; VulnIds = @($vulns | ForEach-Object { $_.id }) })
+            }
+        }
+    }
+    if ($hits.Count -eq 0) { return $out.ToArray() }
+
+    # One detail fetch per DISTINCT id across the whole batch, not per dependency.
+    $uniqueIds = @($hits | ForEach-Object { $_.VulnIds } | Select-Object -Unique)
+    $detailCache = @{}
+    foreach ($id in $uniqueIds) {
+        try { $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec $TimeoutSec }
+        catch {
+            Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"
+            $detailCache[$id] = $null
+        }
+    }
+
+    foreach ($hit in $hits) {
+        $dep = $hit.Dep
+        foreach ($id in $hit.VulnIds) {
+            $detail = $detailCache[$id]
+            if ($detail) {
+                $sev = Get-OsvSeverityBand -VulnDetail $detail
+                $summaryProp = Get-OsvJsonProp $detail 'summary'
+                $detailsProp = Get-OsvJsonProp $detail 'details'
+                $summary = if ($summaryProp) { $summaryProp }
+                           elseif ($detailsProp) { ($detailsProp -split "`r?`n" | Select-Object -First 1) }
+                           else { 'known vulnerability' }
+
+                $fixed = [System.Collections.Generic.List[string]]::new()
+                foreach ($aff in @(Get-OsvJsonProp $detail 'affected')) {
+                    foreach ($rng in @(Get-OsvJsonProp $aff 'ranges')) {
+                        foreach ($ev in @(Get-OsvJsonProp $rng 'events')) {
+                            $fixedVer = Get-OsvJsonProp $ev 'fixed'
+                            if ($fixedVer) { $fixed.Add([string]$fixedVer) }
+                        }
+                    }
+                }
+                $fixHint = if ($fixed.Count -gt 0) { " Fix: upgrade to $((@($fixed | Select-Object -Unique)) -join ' or ')." } else { '' }
+                $issue = "${id}: ${summary}${fixHint}"
+                $rec   = "Review and update '$($dep.Name)' to a patched version.$fixHint"
+            } else {
+                $sev   = 'HIGH'
+                $issue = "${id}: known vulnerability (advisory detail lookup failed — see log for the id)."
+                $rec   = "Review '$($dep.Name) $($dep.Version)' against $id manually at https://osv.dev/vulnerability/$id."
+            }
+            $out.Add((New-Finding -Tool $Tool -Category 'vuln-dependency' -Severity $sev -Confidence 'HIGH' `
+                -UnitType $UnitType -File $dep.FileLabel -Issue $issue -TestID $id -Recommendation $rec))
+        }
+    }
+    return $out.ToArray()
+}

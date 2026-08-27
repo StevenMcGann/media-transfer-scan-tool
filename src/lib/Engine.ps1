@@ -5,7 +5,7 @@
 #>
 
 # Archive extensions that need extraction before scanning.
-$script:ArchiveExtensions = @('.whl', '.egg', '.zip', '.tgz', '.tar.gz')
+$script:ArchiveExtensions = @('.whl', '.egg', '.zip', '.tgz', '.tar.gz', '.nupkg')
 
 function New-AnalyzerContext {
     param(
@@ -41,7 +41,7 @@ function Test-IsArchiveUnit {
     $name = $Unit.Name.ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
     $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
-    return $ext -in @('.whl', '.egg', '.zip')
+    return $ext -in @('.whl', '.egg', '.zip', '.nupkg')
 }
 
 function Invoke-Scan {

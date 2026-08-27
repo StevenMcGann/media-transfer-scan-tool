@@ -2,16 +2,17 @@
 <#
     NpmScan analyzer — static analysis of npm packages and JavaScript (PLAN §4 v0.6).
 
-    Pure PowerShell, NO Node.js required for the core analysis:
+    Pure PowerShell, NO Node.js required:
       1. package.json lifecycle scripts — preinstall/install/postinstall run
          arbitrary commands on `npm install` (the #1 npm supply-chain vector).
          Flagged HIGH; their command strings are inspected for risky tooling.
          prepare/prepublish = MEDIUM; a `bin` field is noted (PATH shims).
       2. JavaScript risky patterns — eval(), child_process / exec / spawn,
          Function() constructor, and obfuscation (hex-escape / long base64 blobs).
-      3. Dependency CVE audit (online best-effort, no tool install): when a
-         package-lock.json with exact versions is present, query the OSV.dev REST
-         API for known vulnerabilities. Offline / no lockfile → coverage-gap note.
+
+    Dependency CVE audit against OSV.dev now lives in OsvScan.ps1 (issue #32),
+    which owns package-lock.json for all ecosystems and fetches full advisory
+    detail (severity/references/fixed versions), not just IDs.
 
     Runs on `npm` units (loose package.json / *.js) and `archive` units (extracted
     .tgz tarballs — only acts if a package.json is present in the staging tree).
@@ -19,80 +20,20 @@
 #>
 @{
     Name           = 'NpmScan'
-    Version        = '0.1.0'
+    Version        = '0.2.0'
     UnitTypes      = @('npm', 'archive')
-    RequiredTools  = @()           # core is dependency-free; OSV uses the REST API
-    Offline        = $true         # core works offline; OSV layer needs network
+    RequiredTools  = @()
+    Offline        = $true
     Tier           = 'core'
     DefaultEnabled = $true
     Invoke         = {
         param($Unit, $Context)
-
-        # OSV dependency audit (online): parse a package-lock.json, batch-query the
-        # OSV.dev REST API for known vulns. Best-effort — network failure degrades
-        # to a coverage-gap note, never throws.
-        function Invoke-OsvAudit {
-            param([string]$LockPath, [string]$Rel)
-            $out = [System.Collections.Generic.List[object]]::new()
-            try {
-                # -AsHashtable is REQUIRED: npm lockfile v2/v3 has a root package keyed
-                # by "" (empty string), which ConvertFrom-Json rejects without it.
-                $lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json -AsHashtable
-            } catch {
-                return $out
-            }
-            $deps = [System.Collections.Generic.List[object]]::new()
-            if ($lock.ContainsKey('packages') -and $lock.packages) {
-                foreach ($key in $lock.packages.Keys) {
-                    if ([string]::IsNullOrEmpty($key)) { continue }       # "" = root project
-                    $entry = $lock.packages[$key]
-                    $ver = $entry.version
-                    if (-not $ver) { continue }
-                    $nm = if ($entry.ContainsKey('name') -and $entry.name) { $entry.name }
-                          else { ($key -replace '.*node_modules/', '') }
-                    $deps.Add(@{ name = $nm; version = $ver })
-                }
-            } elseif ($lock.ContainsKey('dependencies') -and $lock.dependencies) {
-                foreach ($name in $lock.dependencies.Keys) {
-                    $v = $lock.dependencies[$name].version
-                    if ($v) { $deps.Add(@{ name = $name; version = $v }) }
-                }
-            }
-            if ($deps.Count -eq 0) { return $out }
-
-            $queries = @($deps | Select-Object -First 100 | ForEach-Object {
-                @{ package = @{ name = $_.name; ecosystem = 'npm' }; version = $_.version } })
-            try {
-                $body = @{ queries = $queries } | ConvertTo-Json -Depth 6
-                $resp = Invoke-RestMethod -Uri 'https://api.osv.dev/v1/querybatch' -Method Post `
-                    -Body $body -ContentType 'application/json' -TimeoutSec 30
-            } catch {
-                $out.Add((New-Finding -Tool 'NpmScan' -Category 'parser' -Severity 'INFO' `
-                    -Confidence 'LOW' -UnitType 'npm' -File $Rel `
-                    -Issue "OSV dependency audit could not reach api.osv.dev: $_" -TestID 'NPM-OSV-ERR'))
-                return $out
-            }
-            for ($i = 0; $i -lt $resp.results.Count; $i++) {
-                $vulns = $resp.results[$i].vulns
-                if ($vulns) {
-                    $dep = $queries[$i].package.name
-                    $ver = $queries[$i].version
-                    $ids = (@($vulns | ForEach-Object { $_.id }) | Select-Object -First 8) -join ', '
-                    $out.Add((New-Finding -Tool 'NpmScan' -Category 'vuln-dependency' -Severity 'HIGH' `
-                        -Confidence 'HIGH' -UnitType 'npm' -File "dependency: $dep@$ver" `
-                        -Issue "Known vulnerabilities (OSV): $ids" -TestID ($vulns[0].id) `
-                        -Recommendation "Update '$dep' to a patched version."))
-                }
-            }
-            return $out
-        }
 
         $findings = [System.Collections.Generic.List[object]]::new()
         $jsExts   = @('.js', '.mjs', '.cjs', '.ts')
 
         # ── Resolve targets by unit shape ────────────────────────────────────
         $pkgJsonFiles = [System.Collections.Generic.List[string]]::new()
-        $lockFiles    = [System.Collections.Generic.List[string]]::new()
         $jsFiles      = [System.Collections.Generic.List[string]]::new()
 
         if ($Unit.Type -eq 'archive') {
@@ -101,8 +42,6 @@
             $pj = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'package.json' -ErrorAction SilentlyContinue)
             if ($pj.Count -eq 0) { return @() }   # not an npm package — leave for other analyzers
             $pj | ForEach-Object { $pkgJsonFiles.Add($_.FullName) }
-            Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'package-lock.json' -ErrorAction SilentlyContinue |
-                ForEach-Object { $lockFiles.Add($_.FullName) }
             # Cap JS scan; npm-packed tarballs don't ship node_modules.
             @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.Extension.ToLowerInvariant() -in $jsExts -and $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
@@ -112,9 +51,8 @@
             # Loose npm unit
             $name = $Unit.Name.ToLowerInvariant()
             if ($name -eq 'package.json')           { $pkgJsonFiles.Add($Unit.Path) }
-            elseif ($name -eq 'package-lock.json')  { $lockFiles.Add($Unit.Path) }
             elseif ([IO.Path]::GetExtension($name) -in $jsExts) { $jsFiles.Add($Unit.Path) }
-            else { return @() }
+            else { return @() }   # e.g. a loose package-lock.json — OsvScan owns that
         }
 
         $relOf = {
@@ -184,20 +122,6 @@
                     $findings.Add((New-Finding -Tool 'NpmScan' -Category 'risky-code' `
                         -Severity $rule.Sev -Confidence 'MEDIUM' -UnitType 'npm' -File $rel `
                         -Line $lineNum -Issue $rule.Msg -TestID $rule.TID))
-                }
-            }
-        }
-
-        # ── Layer 3: OSV dependency audit (online best-effort) ───────────────
-        if ($lockFiles.Count -gt 0) {
-            if ($Context.Mode -eq 'offline') {
-                $findings.Add((New-Finding -Tool 'NpmScan' -Category 'parser' -Severity 'INFO' `
-                    -Confidence 'HIGH' -UnitType 'npm' -File (& $relOf $lockFiles[0]) `
-                    -Issue 'Dependency CVE audit skipped (offline) — a lockfile is present but OSV needs network.' `
-                    -TestID 'NPM-OSV-OFFLINE'))
-            } else {
-                foreach ($lock in $lockFiles) {
-                    foreach ($f in (Invoke-OsvAudit -LockPath $lock -Rel (& $relOf $lock))) { $findings.Add($f) }
                 }
             }
         }

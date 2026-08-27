@@ -1,0 +1,9 @@
+# range specifier
+flask>=2.0
+# no specifier at all
+requests
+# compound specifier (comma-joined)
+weird==1.0,!=1.0.1
+# option line — not a dependency, must be skipped entirely
+-r other.txt
+

@@ -49,7 +49,7 @@ for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 for sub in ('clean', 'unpinned', 'vulnerable', 'hash_pinned'):
     os.makedirs(os.path.join(PYREQ_DIR, sub), exist_ok=True)
-for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b'):
+for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous'):
     os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -193,6 +193,28 @@ def make_wheel(pkg: str, version: str, internal: dict) -> bytes:
         meta = f"Metadata-Version: 2.1\nName: {pkg}\nVersion: {version}\n"
         zi = zipfile.ZipInfo(f"{pkg}-{version}.dist-info/METADATA", date_time=FIXED_ZIP_DT)
         z.writestr(zi, meta)
+    return buf.getvalue()
+
+
+def make_nupkg_ambiguous(first_id, first_ver, second_id, second_ver) -> bytes:
+    """Build a .nupkg with TWO root .nuspec files -- a real NuGet client refuses
+    to load this (PackageArchiveReader.GetNuspecFile() requires exactly one), so
+    the scanner must not silently pick one and audit the wrong identity."""
+    def nuspec_xml(pkg_id, version):
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+            '  <metadata>\n'
+            f'    <id>{pkg_id}</id>\n'
+            f'    <version>{version}</version>\n'
+            '    <authors>fixture</authors>\n'
+            '  </metadata>\n'
+            '</package>\n'
+        )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo(f'{first_id}.nuspec', date_time=FIXED_ZIP_DT), nuspec_xml(first_id, first_ver))
+        z.writestr(zipfile.ZipInfo(f'{second_id}.nuspec', date_time=FIXED_ZIP_DT), nuspec_xml(second_id, second_ver))
     return buf.getvalue()
 
 
@@ -682,6 +704,12 @@ write(os.path.join(NUGET_DIR, 'collide', 'a', 'Same.1.0.0.nupkg'),
 write(os.path.join(NUGET_DIR, 'collide', 'b', 'Same.1.0.0.nupkg'),
       make_nupkg_without_nuspec())
 
+# Ambiguous identity: two root .nuspec files. Alphabetically first is a benign
+# decoy; the second is the real, vulnerable identity a real NuGet client would
+# refuse to guess between. The scanner must report the ambiguity, not pick 'A...'.
+write(os.path.join(NUGET_DIR, 'ambiguous', 'Confused.1.0.0.nupkg'),
+      make_nupkg_ambiguous('AAA.Decoy.Package', '1.0.0', 'Newtonsoft.Json', '12.0.1'))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model / pickle fixtures (v0.7)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -902,6 +930,7 @@ manifest = {
         "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg":    {"expectOsvOnline": True},
         "nuget/collide/a/Same.1.0.0.nupkg":                 {"expectOsvOnline": False},
         "nuget/collide/b/Same.1.0.0.nupkg":                 {"expectFinding": "OSV-NUGET-NO-NUSPEC"},
+        "nuget/ambiguous/Confused.1.0.0.nupkg":              {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
         "model/safe.pkl":          {"expectDeserialization": False},
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},

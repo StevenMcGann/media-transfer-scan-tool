@@ -178,8 +178,24 @@
             # package as content/test data — or, before the staging dirs were made
             # unique (Engine.ps1), a leftover one from a same-named package — and
             # audit this unit under someone else's identity.
-            $nuspec = @(Get-ChildItem -LiteralPath $Unit.StagingPath -File -Filter '*.nuspec' -ErrorAction SilentlyContinue |
-                Sort-Object Name) | Select-Object -First 1
+            $rootNuspecs = @(Get-ChildItem -LiteralPath $Unit.StagingPath -File -Filter '*.nuspec' -ErrorAction SilentlyContinue)
+            if ($rootNuspecs.Count -gt 1) {
+                # The real NuGet client (NuGet.Packaging's PackageArchiveReader) refuses
+                # to load a package with more than one root .nuspec rather than guessing
+                # -- and for good reason: silently picking one (e.g. alphabetically) lets a
+                # crafted package put a benign decoy identity first while its second
+                # manifest carries the package's real, possibly-vulnerable identity, which
+                # then never gets queried. Reproduced: a decoy 'Totally.Fine.Package' sorted
+                # first hid a genuine 'Newtonsoft.Json 12.0.1' manifest entirely.
+                $names = ($rootNuspecs | ForEach-Object { $_.Name }) -join ', '
+                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
+                    -UnitType 'nuget' -File $Unit.RelativePath `
+                    -Issue "Package has $($rootNuspecs.Count) root .nuspec files ($names) -- ambiguous identity, cannot identify the package for an OSV lookup." `
+                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
+                    -Recommendation 'A valid .nupkg has exactly one root .nuspec. Treat this package as suspect and inspect it manually.'))
+                return $null
+            }
+            $nuspec = $rootNuspecs | Select-Object -First 1
             if (-not $nuspec) {
                 $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
                     -UnitType 'nuget' -File $Unit.RelativePath `

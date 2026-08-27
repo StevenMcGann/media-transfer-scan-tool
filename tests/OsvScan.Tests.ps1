@@ -303,6 +303,21 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         $a = $r.Units | Where-Object { $_.Path -match '^a[\\/]' }
         @($a.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
     }
+
+    It 'rejects a package with an ambiguous (multi root-.nuspec) identity rather than guessing' {
+        # A real NuGet client (PackageArchiveReader.GetNuspecFile()) refuses to load a
+        # package with more than one root .nuspec. Silently picking one (e.g.
+        # alphabetically) lets a crafted package hide its real, vulnerable identity
+        # behind a benign decoy that sorts first -- reproduced with a decoy
+        # 'AAA.Decoy.Package' hiding a genuine 'Newtonsoft.Json 12.0.1' manifest.
+        $r = ScanDir 'nuget/ambiguous'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match 'AAA.Decoy.Package'
+        $ambiguous[0].Issue | Should -Match 'Newtonsoft.Json'
+        # Must not silently audit either identity as if only one manifest existed.
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
 }
 
 Describe 'OsvScan — NuGet (.nupkg), live' -Tag 'Online' {

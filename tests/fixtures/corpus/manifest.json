@@ -179,6 +179,9 @@
     "nuget/collide/b/Same.1.0.0.nupkg": {
       "expectFinding": "OSV-NUGET-NO-NUSPEC"
     },
+    "nuget/ambiguous/Confused.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
+    },
     "model/safe.pkl": {
       "expectDeserialization": false
     },

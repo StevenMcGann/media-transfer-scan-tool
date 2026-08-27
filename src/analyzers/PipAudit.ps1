@@ -119,14 +119,19 @@
                             $fixHint = " Fix: upgrade to $($vuln.fix_versions -join ' or ')."
                         }
 
+                        # File carries the audited unit's path (docs/contract.md §1:
+                        # "File (relative...)"), not a "dependency: name version"
+                        # descriptor — that stays in Issue instead. This also keeps
+                        # dependencies traceable to their own package when Requires-Dist
+                        # is read from more than one wheel/archive in a single scan.
                         $findings.Add((New-Finding `
                             -Tool       'PipAudit' `
                             -Category   'vuln-dependency' `
                             -Severity   $sev `
                             -Confidence 'HIGH' `
                             -UnitType   'python' `
-                            -File       "dependency: $($dep.name) $($dep.version)" `
-                            -Issue      "$($vuln.id): $($vuln.description)$fixHint" `
+                            -File       $Unit.RelativePath `
+                            -Issue      "Dependency '$($dep.name) $($dep.version)': $($vuln.id): $($vuln.description)$fixHint" `
                             -TestID     $vuln.id `
                             -Recommendation "Review and update '$($dep.name)' to a patched version.$fixHint"))
                     }

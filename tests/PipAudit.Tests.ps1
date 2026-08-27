@@ -146,6 +146,11 @@ Requires-Dist: Pillow==9.5.0
         $cveFindings[0].TestID | Should -Match '^(CVE|PYSEC|GHSA)-'
         $cveFindings[0].Issue  | Should -Not -BeNullOrEmpty
 
+        # File carries the audited unit's path (docs/contract.md §1), not a
+        # "dependency: name version" descriptor — that lives in Issue instead.
+        $cveFindings[0].File  | Should -Be 'vuln_pkg-1.0-py3-none-any.whl'
+        $cveFindings[0].Issue | Should -Match 'Pillow 9\.5\.0'
+
         # Should have an SBOM INFO finding
         $sbomFinding = $findings | Where-Object { $_.TestID -eq 'MTS-SBOM-001' }
         $sbomFinding | Should -Not -BeNullOrEmpty

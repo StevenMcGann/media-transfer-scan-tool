@@ -154,7 +154,8 @@
                         Name      = Get-Pep503NormalizedName -Name $depName
                         Version   = $ver
                         Ecosystem = 'PyPI'
-                        FileLabel = "dependency: $depName $ver"
+                        ManifestFile = $Unit.RelativePath
+                        DepLabel     = "$depName $ver"
                     })
                 } else {
                     $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
@@ -224,7 +225,7 @@
                     -TestID 'OSV-NUGET-NO-NUSPEC'))
                 return $null
             }
-            return @{ Name = $id; Version = $ver; Ecosystem = 'NuGet'; FileLabel = "dependency: $id $ver" }
+            return @{ Name = $id; Version = $ver; Ecosystem = 'NuGet'; ManifestFile = $Unit.RelativePath; DepLabel = "$id $ver" }
         }
 
         # ── npm: package-lock.json (v1 `dependencies` / v2-v3 `packages`) ──
@@ -247,12 +248,12 @@
                     $ver = $entry.version
                     if (-not $ver) { continue }
                     $nm = if ($entry.ContainsKey('name') -and $entry.name) { $entry.name } else { ($key -replace '.*node_modules/', '') }
-                    $deps.Add(@{ Name = $nm; Version = $ver; Ecosystem = 'npm'; FileLabel = "dependency: $nm@$ver" })
+                    $deps.Add(@{ Name = $nm; Version = $ver; Ecosystem = 'npm'; ManifestFile = $Rel; DepLabel = "$nm@$ver" })
                 }
             } elseif ($lock.ContainsKey('dependencies') -and $lock.dependencies) {
                 foreach ($name in $lock.dependencies.Keys) {
                     $v = $lock.dependencies[$name].version
-                    if ($v) { $deps.Add(@{ Name = $name; Version = $v; Ecosystem = 'npm'; FileLabel = "dependency: $name@$v" }) }
+                    if ($v) { $deps.Add(@{ Name = $name; Version = $v; Ecosystem = 'npm'; ManifestFile = $Rel; DepLabel = "$name@$v" }) }
                 }
             }
             return $deps.ToArray()

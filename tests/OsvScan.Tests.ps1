@@ -150,7 +150,7 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         }
 
         $deps = 1..150 | ForEach-Object {
-            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; FileLabel = "dependency: pkg$_ 1.0.0" }
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
         }
         $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps)
 
@@ -158,10 +158,39 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
         $vulns.Count      | Should -Be 1
         $vulns[0].TestID  | Should -Be 'GHSA-test-0001'
+        # ...File carries the MANIFEST path (docs/contract.md §1), not the dependency
+        # identity -- that moved into Issue so multiple manifests stay traceable.
+        $vulns[0].File    | Should -Be 'requirements.txt'
+        $vulns[0].Issue   | Should -Match 'pkg1 1\.0\.0'
         # ...and the unqueried chunk is still reported as a coverage gap.
         $gaps = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' })
         $gaps.Count       | Should -Be 1
         $gaps[0].Issue    | Should -Match '50 of 150'
+        $gaps[0].File     | Should -Be 'requirements.txt'
+    }
+
+    It 'bounds retries after repeated consecutive failures instead of retrying every chunk' {
+        # 500 deps => 5 chunks. api.osv.dev is persistently down (every call throws).
+        # A 10,000-entry lockfile retrying every 100-item chunk at a 30s timeout could
+        # otherwise hold an online scan for ~50 minutes producing nothing but gap notes.
+        $script:callCount2 = 0
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith { $script:callCount2++; throw 'persistent outage' }
+
+        $deps = 1..500 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps -MaxConsecutiveFailures 2)
+
+        # Only 2 chunks were actually attempted, not all 5.
+        $script:callCount2 | Should -Be 2
+        # The 2 attempted chunks each got their own gap finding, plus ONE aggregate
+        # finding for the remaining 300 untried dependencies -- not one per chunk.
+        $gaps = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' })
+        $gaps.Count | Should -Be 3
+        $stopped = @($gaps | Where-Object { $_.Issue -match 'stopped after' })
+        $stopped.Count       | Should -Be 1
+        $stopped[0].Issue    | Should -Match '300 more dependencies'
+        $stopped[0].File     | Should -Be 'requirements.txt'
     }
 }
 

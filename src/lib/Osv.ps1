@@ -264,29 +264,47 @@ function New-OsvOfflineFinding {
 
 function Get-OsvDependencyFindings {
     <#
-        The shared audit: batch-query OSV for @{Name; Version; Ecosystem; FileLabel}
-        dependencies, resolve every distinct vuln id to full advisory detail, and
-        emit one 'vuln-dependency' finding per (dependency, vuln) pair. Chunks the
-        batch at 100 queries/request (well under OSV's documented 1000 limit) —
-        every chunk is queried, none are silently dropped for size.
+        The shared audit: batch-query OSV for @{Name; Version; Ecosystem;
+        ManifestFile; DepLabel} dependencies, resolve every distinct vuln id to
+        full advisory detail, and emit one 'vuln-dependency' finding per
+        (dependency, vuln) pair. Chunks the batch at 100 queries/request (well
+        under OSV's documented 1000 limit) — every chunk is attempted, none are
+        silently dropped for size.
 
-        Non-throwing: a querybatch failure emits ONE coverage-gap finding and
-        returns; a per-id detail-fetch failure still emits a finding for that
-        vuln (id + dependency), just without summary/severity/fix detail, so a
-        transient GET failure on one advisory never drops the whole result.
+        Finding.File carries the dependency's MANIFEST path (docs/contract.md
+        §1: "File (relative...)"), per-dependency rather than a single value for
+        the whole call — dependencies merged from several lock files inside one
+        archive unit each keep their own source manifest traceable. The
+        dependency's own name/version moves into Issue/Recommendation instead.
+
+        Non-throwing: a querybatch failure emits a coverage-gap finding for that
+        chunk and moves on; a per-id detail-fetch failure still emits a finding
+        for that vuln (id + dependency), just without summary/severity/fix
+        detail, so a transient GET failure on one advisory never drops the
+        whole result. Bounded: after $MaxConsecutiveFailures chunks fail in a
+        row (api.osv.dev is down, not just one flaky request), remaining chunks
+        are NOT attempted — every request is only bounded by $TimeoutSec, but
+        manifest size is attacker/submission-controlled and the engine applies
+        no analyzer-level timeout here, so an unbounded retry loop could hold an
+        online scan for $TimeoutSec times the chunk count. The untried
+        dependencies are still reported, grouped by manifest, as one gap finding
+        each rather than silently dropped.
     #>
     param(
         [Parameter(Mandatory)][string]$Tool,
         [Parameter(Mandatory)][string]$UnitType,
-        [Parameter(Mandatory)][object[]]$Dependencies,   # @{ Name; Version; Ecosystem; FileLabel }
+        [Parameter(Mandatory)][object[]]$Dependencies,   # @{ Name; Version; Ecosystem; ManifestFile; DepLabel }
         [int]$TimeoutSec = 30,
-        [string]$ErrorTestId = 'OSV-QUERY-ERR'
+        [string]$ErrorTestId = 'OSV-QUERY-ERR',
+        [int]$MaxConsecutiveFailures = 2
     )
     $out = [System.Collections.Generic.List[object]]::new()
     if ($Dependencies.Count -eq 0) { return $out.ToArray() }
 
     $batchSize = 100
     $hits = [System.Collections.Generic.List[object]]::new()
+    $consecutiveFailures = 0
+    $stoppedAtIndex = -1
 
     for ($i = 0; $i -lt $Dependencies.Count; $i += $batchSize) {
         $end   = [Math]::Min($i + $batchSize, $Dependencies.Count) - 1
@@ -299,7 +317,9 @@ function Get-OsvDependencyFindings {
             # to $null at the caller when it's the sole pipeline output — plain
             # assignment does not guard against it (see OsvScan.ps1 for the full note).
             $chunkResults = @(Invoke-OsvQueryBatch -Queries $queries -TimeoutSec $TimeoutSec)
+            $consecutiveFailures = 0
         } catch {
+            $consecutiveFailures++
             # Report the unqueried chunk, but DO NOT abandon hits already confirmed
             # by earlier chunks — returning here would turn "OSV confirmed 3
             # vulnerable packages, then the 2nd request failed" into a lone INFO
@@ -307,11 +327,20 @@ function Get-OsvDependencyFindings {
             # dependencies and let the accumulated hits below still be reported.
             $unqueried = @($chunk | ForEach-Object { $_.Name }) -join ', '
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
-                -UnitType $UnitType -File $chunk[0].FileLabel `
+                -UnitType $UnitType -File $chunk[0].ManifestFile `
                 -Issue ("OSV dependency audit could not reach api.osv.dev for {0} of {1} dependencies ({2}): {3}" -f `
                     $chunk.Count, $Dependencies.Count, $unqueried, $_) `
                 -TestID $ErrorTestId `
                 -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))
+
+            if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
+                # api.osv.dev is down, not just one flaky request — stop spending
+                # $TimeoutSec per remaining chunk on a manifest that can be
+                # arbitrarily large. $end is the last index already SEEN (this
+                # failed chunk); everything after it was never attempted.
+                $stoppedAtIndex = $end + 1
+                break
+            }
             continue
         }
 
@@ -325,6 +354,21 @@ function Get-OsvDependencyFindings {
             }
         }
     }
+
+    if ($stoppedAtIndex -ge 0 -and $stoppedAtIndex -lt $Dependencies.Count) {
+        $untried = $Dependencies[$stoppedAtIndex..($Dependencies.Count - 1)]
+        foreach ($grp in ($untried | Group-Object ManifestFile)) {
+            $names = @($grp.Group | ForEach-Object { $_.Name }) | Select-Object -First 10
+            $more  = if ($grp.Count -gt $names.Count) { " and $($grp.Count - $names.Count) more" } else { '' }
+            $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                -UnitType $UnitType -File $grp.Name `
+                -Issue ("OSV dependency audit stopped after {0} consecutive transport failures -- {1} more dependencies in this manifest were never queried ({2}{3})." -f `
+                    $MaxConsecutiveFailures, $grp.Count, ($names -join ', '), $more) `
+                -TestID $ErrorTestId `
+                -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))
+        }
+    }
+
     if ($hits.Count -eq 0) { return $out.ToArray() }
 
     # One detail fetch per DISTINCT id across the whole batch, not per dependency.
@@ -366,15 +410,15 @@ function Get-OsvDependencyFindings {
                     }
                 }
                 $fixHint = if ($fixed.Count -gt 0) { " Fix: upgrade to $((@($fixed | Select-Object -Unique)) -join ' or ')." } else { '' }
-                $issue = "${id}: ${summary}${fixHint}"
+                $issue = "Dependency '$($dep.DepLabel)': ${id}: ${summary}${fixHint}"
                 $rec   = "Review and update '$($dep.Name)' to a patched version.$fixHint"
             } else {
                 $sev   = 'HIGH'
-                $issue = "${id}: known vulnerability (advisory detail lookup failed — see log for the id)."
+                $issue = "Dependency '$($dep.DepLabel)': ${id}: known vulnerability (advisory detail lookup failed — see log for the id)."
                 $rec   = "Review '$($dep.Name) $($dep.Version)' against $id manually at https://osv.dev/vulnerability/$id."
             }
             $out.Add((New-Finding -Tool $Tool -Category 'vuln-dependency' -Severity $sev -Confidence 'HIGH' `
-                -UnitType $UnitType -File $dep.FileLabel -Issue $issue -TestID $id -Recommendation $rec))
+                -UnitType $UnitType -File $dep.ManifestFile -Issue $issue -TestID $id -Recommendation $rec))
         }
     }
     return $out.ToArray()

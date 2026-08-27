@@ -46,6 +46,19 @@ Describe 'Osv.ps1 — pure helpers (no network)' {
         Get-CvssV3BaseScore -Vector 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H' | Should -Be 10.0
     }
 
+    It 'applies the v3.1 (not v3.0) scope-changed impact formula for a CVSS:3.1 vector' {
+        # FIRST.org changed the scope-changed impact formula between v3.0 and
+        # v3.1 (0.9731 scaling + exponent 13 vs. exponent 15) to fix a curve
+        # discontinuity. This vector crosses the HIGH/MEDIUM boundary depending
+        # on which formula is used: 7.0 under v3.0's, 6.9 under v3.1's — the
+        # correct published score for a CVSS:3.1 vector.
+        Get-CvssV3BaseScore -Vector 'CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:L' | Should -Be 6.9
+    }
+
+    It 'still applies the v3.0 scope-changed impact formula for a CVSS:3.0 vector' {
+        Get-CvssV3BaseScore -Vector 'CVSS:3.0/AV:P/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:L' | Should -Be 7.0
+    }
+
     It 'returns $null for a non-v3 vector or one missing a required metric' {
         Get-CvssV3BaseScore -Vector 'CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N' | Should -BeNullOrEmpty
         Get-CvssV3BaseScore -Vector 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N' | Should -BeNullOrEmpty   # missing A

@@ -36,7 +36,8 @@ function Get-CvssV3BaseScore {
     #>
     param([Parameter(Mandatory)][string]$Vector)
 
-    if ($Vector -notmatch '^CVSS:3\.[01]/') { return $null }
+    if ($Vector -notmatch '^CVSS:3\.(?<minor>[01])/') { return $null }
+    $isV31 = ($Matches['minor'] -eq '1')
 
     $metrics = @{}
     foreach ($pair in ($Vector -split '/')) {
@@ -68,7 +69,15 @@ function Get-CvssV3BaseScore {
     $iscBase = 1 - ((1 - $c) * (1 - $i) * (1 - $a))
     if ($iscBase -le 0) { return 0.0 }
 
-    $isc = if ($scopeChanged) {
+    # CVSS v3.1 changed the scope-changed impact formula from v3.0 (a documented
+    # fix for a discontinuity in the v3.0 curve -- FIRST.org "Changes since
+    # CVSS v3.0"): the 0.9731 scaling factor and exponent 13 replace v3.0's
+    # unscaled term and exponent 15. Using the wrong one for a v3.1 vector can
+    # cross a severity-band boundary (verified: AV:P/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:L
+    # scores 7.0/HIGH under the v3.0 formula but 6.9/MEDIUM under v3.1's).
+    $isc = if ($scopeChanged -and $isV31) {
+        7.52 * ($iscBase - 0.029) - 3.25 * [Math]::Pow(($iscBase * 0.9731 - 0.02), 13)
+    } elseif ($scopeChanged) {
         7.52 * ($iscBase - 0.029) - 3.25 * [Math]::Pow(($iscBase - 0.02), 15)
     } else {
         6.42 * $iscBase

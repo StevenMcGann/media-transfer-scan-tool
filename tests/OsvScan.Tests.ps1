@@ -103,6 +103,43 @@ Describe 'Osv.ps1 — pure helpers (no network)' {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
+    It 'keeps vulnerabilities confirmed by earlier chunks when a later chunk fails' {
+        # 150 deps => two chunks (batch size 100). Chunk 1 succeeds and confirms a
+        # vuln on the first dep; chunk 2 throws. The confirmed vuln MUST still be
+        # reported — dropping it for the failed chunk is a security false negative.
+        $script:callCount = 0
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            $script:callCount++
+            if ($script:callCount -eq 1) {
+                # First dep vulnerable; the other 99 return the bare '{}' no-vuln shape.
+                return @(@([PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = 'GHSA-test-0001' }) }) +
+                         (1..99 | ForEach-Object { [PSCustomObject]@{} }))
+            }
+            throw 'simulated network failure on chunk 2'
+        }
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            [PSCustomObject]@{ id = 'GHSA-test-0001'; summary = 'test advisory'
+                               database_specific = [PSCustomObject]@{ severity = 'HIGH' } }
+        }
+
+        $deps = 1..150 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; FileLabel = "dependency: pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps)
+
+        # The confirmed vulnerability survived the later failure...
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count      | Should -Be 1
+        $vulns[0].TestID  | Should -Be 'GHSA-test-0001'
+        # ...and the unqueried chunk is still reported as a coverage gap.
+        $gaps = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' })
+        $gaps.Count       | Should -Be 1
+        $gaps[0].Issue    | Should -Match '50 of 150'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'
@@ -145,6 +182,14 @@ Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
         # The offline note only fires when at least one dependency parsed as pinned —
         # its presence proves the hash-pinned line was NOT misread as unpinned.
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-OFFLINE' }).Count | Should -BeGreaterThan 0
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' }).Count | Should -Be 0
+    }
+
+    It 'recognizes exact pins carrying SPACE-separated option values (--hash x, -C KEY=VALUE)' {
+        # Every line in the fixture is a real exact pin followed by an option in a
+        # different form (=-joined, space-separated, short -C). If option VALUES
+        # leaked into the specifier, those lines would be misreported as unpinned.
+        $r = ScanDir 'python_requirements/hash_pinned' -Mode offline
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-PYPI-UNPINNED' }).Count | Should -Be 0
     }
 

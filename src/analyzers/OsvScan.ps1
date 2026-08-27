@@ -113,9 +113,16 @@
                 $line = ($line -split '\s+#', 2)[0].Trim()    # strip inline comment
                 if (-not $line) { continue }
 
-                # Strip pip's per-requirement options (--hash=..., --config-settings=...,
-                # etc.) so a hash-pinned line is still recognized as an exact pin.
-                $line = ([regex]::Replace($line, '\s+--\S+', '')).Trim()
+                # Truncate at the first per-requirement option so a hash-pinned or
+                # config-settings line is still recognized as an exact pin. Cutting
+                # at the option START (rather than deleting option tokens) is what
+                # makes the SPACE-separated forms work — '--hash sha256:...' and
+                # '-C KEY=VALUE' leave their VALUE behind if you only remove the
+                # flag name, and the leftover value then breaks the pin match.
+                # A requirement spec never contains whitespace followed by a
+                # '-'/'--' + letter, so everything from there on is options.
+                $optStart = [regex]::Match($line, '\s+-{1,2}[A-Za-z]')
+                if ($optStart.Success) { $line = $line.Substring(0, $optStart.Index).Trim() }
 
                 $nameMatch = [regex]::Match($line, '^([A-Za-z0-9][A-Za-z0-9._-]*)')
                 $depName = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { $line }

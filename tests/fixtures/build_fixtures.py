@@ -627,7 +627,12 @@ write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
 write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
     "certifi==2024.2.2 \\\n"
     "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000a \\\n"
-    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b\n")
+    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b\n"
+    "# space-separated option value must not be mistaken for part of the specifier\n"
+    "idna==3.6 --hash sha256:000000000000000000000000000000000000000000000000000000000000000c\n"
+    "# short-form -C/--config-settings with a space-separated value\n"
+    "chardet==5.2.0 -C KEY=VALUE\n"
+    "urllib3==2.2.1 --config-settings KEY=VALUE\n")
 
 # Vulnerable: exact-pinned to a version with well-known published advisories
 # (CVE-2023-44271 and others exist for Pillow < 10.0.1) — for the Online layer.

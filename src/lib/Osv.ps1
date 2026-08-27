@@ -277,11 +277,19 @@ function Get-OsvDependencyFindings {
             # assignment does not guard against it (see OsvScan.ps1 for the full note).
             $chunkResults = @(Invoke-OsvQueryBatch -Queries $queries -TimeoutSec $TimeoutSec)
         } catch {
+            # Report the unqueried chunk, but DO NOT abandon hits already confirmed
+            # by earlier chunks — returning here would turn "OSV confirmed 3
+            # vulnerable packages, then the 2nd request failed" into a lone INFO
+            # coverage note, hiding real findings. Skip only this chunk's
+            # dependencies and let the accumulated hits below still be reported.
+            $unqueried = @($chunk | ForEach-Object { $_.Name }) -join ', '
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
                 -UnitType $UnitType -File $chunk[0].FileLabel `
-                -Issue "OSV dependency audit could not reach api.osv.dev: $_" -TestID $ErrorTestId `
-                -Recommendation 'Re-run online, or check declared dependencies against OSV.dev manually before admitting.'))
-            return $out.ToArray()
+                -Issue ("OSV dependency audit could not reach api.osv.dev for {0} of {1} dependencies ({2}): {3}" -f `
+                    $chunk.Count, $Dependencies.Count, $unqueried, $_) `
+                -TestID $ErrorTestId `
+                -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))
+            continue
         }
 
         for ($j = 0; $j -lt $chunkResults.Count; $j++) {

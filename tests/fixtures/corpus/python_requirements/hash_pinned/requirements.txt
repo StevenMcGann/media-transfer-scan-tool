@@ -1,3 +1,8 @@
 certifi==2024.2.2 \
     --hash=sha256:0000000000000000000000000000000000000000000000000000000000000a \
     --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b
+# space-separated option value must not be mistaken for part of the specifier
+idna==3.6 --hash sha256:000000000000000000000000000000000000000000000000000000000000000c
+# short-form -C/--config-settings with a space-separated value
+chardet==5.2.0 -C KEY=VALUE
+urllib3==2.2.1 --config-settings KEY=VALUE

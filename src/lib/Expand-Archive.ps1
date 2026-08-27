@@ -166,7 +166,7 @@ function Expand-SubmissionArchive {
     $name  = (Split-Path $InputFile -Leaf).ToLowerInvariant()
     $ext   = [IO.Path]::GetExtension($InputFile).ToLowerInvariant()
     $isTar = $name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')
-    $isZip = $ext -in @('.whl', '.egg', '.zip')
+    $isZip = $ext -in @('.whl', '.egg', '.zip', '.nupkg')
 
     Write-Log -Level INFO -Message "Extracting: $relPath -> $OutputDir"
 

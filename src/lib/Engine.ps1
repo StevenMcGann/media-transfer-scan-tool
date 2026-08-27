@@ -5,7 +5,7 @@
 #>
 
 # Archive extensions that need extraction before scanning.
-$script:ArchiveExtensions = @('.whl', '.egg', '.zip', '.tgz', '.tar.gz')
+$script:ArchiveExtensions = @('.whl', '.egg', '.zip', '.tgz', '.tar.gz', '.nupkg')
 
 function New-AnalyzerContext {
     param(
@@ -41,7 +41,7 @@ function Test-IsArchiveUnit {
     $name = $Unit.Name.ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
     $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
-    return $ext -in @('.whl', '.egg', '.zip')
+    return $ext -in @('.whl', '.egg', '.zip', '.nupkg')
 }
 
 function Invoke-Scan {
@@ -87,16 +87,27 @@ function Invoke-Scan {
     try {
         New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
 
+        $unitIndex = 0
         foreach ($file in Get-DiscoveredFiles -ScanRoot $scanRoot) {
             $classified = New-Unit -File $file -ScanRoot $scanRoot
             $unit       = $classified.Unit
             $findings   = [System.Collections.Generic.List[object]]::new()
             foreach ($f in $classified.Findings) { $findings.Add($f) }
+            $unitIndex++
 
             # ── Archive extraction ────────────────────────────────────────────
             if (Test-IsArchiveUnit -Unit $unit) {
+                # The per-unit index makes the staging dir unique. Keying it on the
+                # file NAME alone collided whenever two archives in different folders
+                # shared a basename: extraction does not clear the directory first,
+                # so the second archive inherited the first's leftover files and an
+                # analyzer's recursive "find the manifest" lookup could read the
+                # WRONG package's metadata — reporting the second archive under the
+                # first's identity, or as valid when its own manifest is missing.
+                # On untrusted input a same-name collision is attacker-arrangeable,
+                # so this must not depend on submission filenames being distinct.
                 $safeName  = $unit.Name -replace '[^\w\-.]', '_'
-                $stageDir  = Join-Path $stagingRoot "unit_$safeName"
+                $stageDir  = Join-Path $stagingRoot "unit${unitIndex}_$safeName"
                 $fallback  = if ($null -ne $context.Venv) { $context.Venv.Python } else { '' }
 
                 $extraction = Expand-SubmissionArchive `
@@ -118,8 +129,9 @@ function Invoke-Scan {
             # NotebookParser findings (always, core behavior) and points downstream
             # analyzers (Bandit/detect-secrets, deep tier) at the projected .py.
             elseif (Test-IsNotebookUnit -Unit $unit) {
+                # Same-basename collision as the archive path above — index it too.
                 $safeName = $unit.Name -replace '[^\w\-.]', '_'
-                $projDir  = Join-Path $stagingRoot "nb_$safeName"
+                $projDir  = Join-Path $stagingRoot "nb${unitIndex}_$safeName"
                 $proj = Convert-NotebookToPythonSource `
                     -NotebookPath $unit.Path -OutputRoot $projDir `
                     -OutputName "$safeName.py" -RelPath $unit.RelativePath

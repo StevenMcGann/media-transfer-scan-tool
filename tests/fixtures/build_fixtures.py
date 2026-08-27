@@ -30,6 +30,8 @@ OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
 PS_DIR     = os.path.join(CORPUS_DIR, 'powershell')
 NPM_DIR    = os.path.join(CORPUS_DIR, 'npm')
+PYREQ_DIR  = os.path.join(CORPUS_DIR, 'python_requirements')
+NUGET_DIR  = os.path.join(CORPUS_DIR, 'nuget')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
 PYRULES_DIR = os.path.join(CORPUS_DIR, 'python_rules')
@@ -45,6 +47,10 @@ os.makedirs(SHELL_DIR, exist_ok=True)
 os.makedirs(PS_DIR, exist_ok=True)
 for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
+for sub in ('clean', 'unpinned', 'vulnerable', 'hash_pinned'):
+    os.makedirs(os.path.join(PYREQ_DIR, sub), exist_ok=True)
+for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous'):
+    os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(PYRULES_DIR, exist_ok=True)
@@ -187,6 +193,58 @@ def make_wheel(pkg: str, version: str, internal: dict) -> bytes:
         meta = f"Metadata-Version: 2.1\nName: {pkg}\nVersion: {version}\n"
         zi = zipfile.ZipInfo(f"{pkg}-{version}.dist-info/METADATA", date_time=FIXED_ZIP_DT)
         z.writestr(zi, meta)
+    return buf.getvalue()
+
+
+def make_nupkg_ambiguous(first_id, first_ver, second_id, second_ver) -> bytes:
+    """Build a .nupkg with TWO root .nuspec files -- a real NuGet client refuses
+    to load this (PackageArchiveReader.GetNuspecFile() requires exactly one), so
+    the scanner must not silently pick one and audit the wrong identity."""
+    def nuspec_xml(pkg_id, version):
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+            '  <metadata>\n'
+            f'    <id>{pkg_id}</id>\n'
+            f'    <version>{version}</version>\n'
+            '    <authors>fixture</authors>\n'
+            '  </metadata>\n'
+            '</package>\n'
+        )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo(f'{first_id}.nuspec', date_time=FIXED_ZIP_DT), nuspec_xml(first_id, first_ver))
+        z.writestr(zipfile.ZipInfo(f'{second_id}.nuspec', date_time=FIXED_ZIP_DT), nuspec_xml(second_id, second_ver))
+    return buf.getvalue()
+
+
+def make_nupkg_without_nuspec() -> bytes:
+    """Build a .nupkg carrying NO .nuspec — must report a coverage gap, and must
+    never inherit a same-named package's manifest from a shared staging dir."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo('readme.txt', date_time=FIXED_ZIP_DT)
+        z.writestr(zi, 'This package deliberately ships no .nuspec.\n')
+    return buf.getvalue()
+
+
+def make_nupkg(pkg_id: str, version: str) -> bytes:
+    """Build a minimal .nupkg (zip) containing just a top-level .nuspec."""
+    nuspec = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+        '  <metadata>\n'
+        f'    <id>{pkg_id}</id>\n'
+        f'    <version>{version}</version>\n'
+        '    <authors>fixture</authors>\n'
+        '    <description>deterministic test fixture — not a real package</description>\n'
+        '  </metadata>\n'
+        '</package>\n'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo(f'{pkg_id}.nuspec', date_time=FIXED_ZIP_DT)
+        z.writestr(zi, nuspec)
     return buf.getvalue()
 
 
@@ -565,6 +623,94 @@ write_text(os.path.join(NPM_DIR, 'locked', 'package-lock.json'),
                              "node_modules/lodash": {"version": "4.17.4"}}}, indent=2))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# requirements.txt fixtures (OSV/PyPI dependency audit, issue #32)
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean: exact-pinned, not (currently) vulnerable — offline/structural assertions
+# only; never asserted against live OSV results, which can change over time.
+write_text(os.path.join(PYREQ_DIR, 'clean', 'requirements.txt'),
+    "# clean, exact-pinned deps\n"
+    "certifi==2024.2.2\n")
+
+# Unpinned: every line exercises a different "not an exact pin" shape. No
+# network needed — these must all be reported as OSV-PYPI-UNPINNED and never
+# reach the querybatch call.
+write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
+    "# range specifier\n"
+    "flask>=2.0\n"
+    "# no specifier at all\n"
+    "requests\n"
+    "# compound specifier (comma-joined)\n"
+    "weird==1.0,!=1.0.1\n"
+    "# PEP 440 compatible-release wildcard — a range, not one exact version\n"
+    "wildcard-pkg==1.2.*\n"
+    "# malformed 4-equals — must fall through to unpinned, not capture '=1.0'\n"
+    "badeq-pkg====1.0\n"
+    "# pure option line — not a dependency, must be skipped entirely\n"
+    "--index-url https://example.test/simple\n"
+    "# -r/--requirement include — must be reported as an unaudited coverage gap,\n"
+    "# not silently skipped (an include-only manifest must not read as \"clean\")\n"
+    "-r other.txt\n"
+    "# -r ATTACHED with no delimiter -- pip accepts this (verified against a real\n"
+    "# pip install --dry-run); must be caught the same as the spaced form above\n"
+    "-rother-attached.txt\n"
+    "# editable/VCS install — no exact version, must still be reported (not silently dropped)\n"
+    "-e git+https://example.test/repo.git#egg=editable-pkg\n"
+    "# -e ATTACHED with no delimiter -- also real pip syntax, verified likewise\n"
+    "-e./local-attached-pkg\n"
+    "\n")
+
+# Hash-pinned (pip-compile/pip-tools style): a real exact pin whose --hash
+# options are appended on continuation lines. Must still be recognized as
+# pinned — offline-safe assertion: the offline coverage-gap note fires only
+# when at least one dependency was actually parsed as pinned.
+write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
+    "certifi==2024.2.2 \\\n"
+    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000a \\\n"
+    "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b\n"
+    "# space-separated option value must not be mistaken for part of the specifier\n"
+    "idna==3.6 --hash sha256:000000000000000000000000000000000000000000000000000000000000000c\n"
+    "# short-form -C/--config-settings with a space-separated value\n"
+    "chardet==5.2.0 -C KEY=VALUE\n"
+    "urllib3==2.2.1 --config-settings KEY=VALUE\n"
+    "# PEP 440 '===' arbitrary equality — also an exact pin; the version must be\n"
+    "# captured as '24.0', NOT as '=24.0' (which would query a bogus version)\n"
+    "packaging===24.0\n")
+
+# Vulnerable: exact-pinned to a version with well-known published advisories
+# (CVE-2023-44271 and others exist for Pillow < 10.0.1) — for the Online layer.
+write_text(os.path.join(PYREQ_DIR, 'vulnerable', 'requirements.txt'),
+    "Pillow==9.5.0\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# .nupkg fixtures (OSV/NuGet dependency audit, issue #32)
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean: a package id/version that does not exist on OSV — offline/structural
+# assertions only, same rationale as the PyPI 'clean' fixture above.
+write(os.path.join(NUGET_DIR, 'clean', 'Contoso.Fixture.Clean.1.0.0.nupkg'),
+      make_nupkg('Contoso.Fixture.Clean', '1.0.0'))
+
+# Vulnerable: Newtonsoft.Json 12.0.1 has a published advisory (GHSA-5crp-9r3c-p9vr,
+# DoS via unbounded nesting depth, fixed in 13.0.1) — for the Online layer.
+write(os.path.join(NUGET_DIR, 'vulnerable', 'Newtonsoft.Json.12.0.1.nupkg'),
+      make_nupkg('Newtonsoft.Json', '12.0.1'))
+
+# Same-basename collision: two .nupkg files sharing a FILENAME in different
+# directories. The first carries a .nuspec, the second carries none. If both
+# extract into one staging dir, the second inherits the first's manifest and is
+# audited under the WRONG identity instead of reporting its coverage gap.
+# On untrusted input that collision is attacker-arrangeable.
+write(os.path.join(NUGET_DIR, 'collide', 'a', 'Same.1.0.0.nupkg'),
+      make_nupkg('Contoso.Fixture.Collide', '1.0.0'))
+write(os.path.join(NUGET_DIR, 'collide', 'b', 'Same.1.0.0.nupkg'),
+      make_nupkg_without_nuspec())
+
+# Ambiguous identity: two root .nuspec files. Alphabetically first is a benign
+# decoy; the second is the real, vulnerable identity a real NuGet client would
+# refuse to guess between. The scanner must report the ambiguity, not pick 'A...'.
+write(os.path.join(NUGET_DIR, 'ambiguous', 'Confused.1.0.0.nupkg'),
+      make_nupkg_ambiguous('AAA.Decoy.Package', '1.0.0', 'Newtonsoft.Json', '12.0.1'))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Model / pickle fixtures (v0.7)
 # ─────────────────────────────────────────────────────────────────────────────
 import pickle as _pickle
@@ -776,6 +922,15 @@ manifest = {
         "npm/js/clean.js":             {"expectRiskyCode": False},
         "npm/tarball/evil_pkg-1.0.0.tgz": {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
         "npm/locked/package-lock.json":{"expectOsvOnline": True},
+        "python_requirements/clean/requirements.txt":      {"expectOsvOnline": False},
+        "python_requirements/unpinned/requirements.txt":   {"expectFinding": "OSV-PYPI-UNPINNED"},
+        "python_requirements/hash_pinned/requirements.txt":{"expectOsvOnline": False},
+        "python_requirements/vulnerable/requirements.txt": {"expectOsvOnline": True},
+        "nuget/clean/Contoso.Fixture.Clean.1.0.0.nupkg":    {"expectOsvOnline": False},
+        "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg":    {"expectOsvOnline": True},
+        "nuget/collide/a/Same.1.0.0.nupkg":                 {"expectOsvOnline": False},
+        "nuget/collide/b/Same.1.0.0.nupkg":                 {"expectFinding": "OSV-NUGET-NO-NUSPEC"},
+        "nuget/ambiguous/Confused.1.0.0.nupkg":              {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
         "model/safe.pkl":          {"expectDeserialization": False},
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},

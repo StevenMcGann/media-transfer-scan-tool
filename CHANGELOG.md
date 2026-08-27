@@ -8,6 +8,33 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **OSV.dev dependency-vulnerability audit — PyPI, npm, NuGet** ([#32](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/32)).
+  New **`OsvScan`** analyzer (core, default-on — this tool always has network
+  access to the connected/staging host, so the audit runs by default rather
+  than opt-in): batch-queries `POST /v1/querybatch` and resolves every
+  distinct advisory to full detail via `GET /v1/vulns/{id}` (severity,
+  summary, fixed versions), scored with a real CVSS v3.1 base-score
+  calculator plus a `database_specific.severity`/keyword fallback — not a
+  flat severity for every hit.
+  - **New `python-requirements` unit type** for a loose `requirements.txt`
+    (its own type, not `python` — the Python-source analyzers must never
+    parse it as source). Exact `==` pins are PEP 503-normalized and queried;
+    a range, bare name, compound specifier, or VCS/URL requirement is
+    reported as an explicit `OSV-PYPI-UNPINNED` finding rather than silently
+    skipped.
+  - **New `nuget` unit type** for `.nupkg` (routed through the existing
+    hardened ZIP extraction path — zip-slip/bomb guards apply); the package's
+    own id/version is read from its embedded `.nuspec` (namespace-agnostic —
+    the schema URI varies by NuGet client version) and checked against OSV,
+    since the artifact itself *is* the pinned dependency.
+  - **npm** (`package-lock.json`, schema v1/v2/v3) moves from `NpmScan`'s old
+    id-list-only layer into `OsvScan`, gaining the same full-detail scoring.
+  - Shared query/scoring/PEP-503 logic lives in `src/lib/Osv.ps1` so every
+    ecosystem — and any future one — reports the same way.
+  - Adding two `UnitType` values is non-breaking under
+    [docs/contract.md](docs/contract.md) §1.
+
 ## [0.10.0] - 2026-08-21
 
 ### Added

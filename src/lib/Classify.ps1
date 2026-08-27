@@ -30,6 +30,9 @@ $script:ExtTypeMap = @{
     '.joblib' = 'model'; '.safetensors' = 'model'; '.gguf' = 'model'
     '.zip' = 'archive'; '.tgz' = 'archive'; '.tar' = 'archive'; '.gz' = 'archive'
     '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'; '.ts' = 'npm'
+    # NuGet package archive (issue #32 — OSV lookup). ZIP-based; id/version live in
+    # the embedded .nuspec.
+    '.nupkg' = 'nuget'
     # VB family (issue #25). Exported VBA modules (.bas/.cls/.frm/.vba) are inert
     # until imported; VBScript (.vbs/.vbe) and its wrappers (.wsf/.hta) execute on
     # double-click. Same language, same rule set — one unit type covers both.
@@ -44,11 +47,16 @@ $script:ExtTypeMap = @{
 $script:FilenameTypeMap = @{
     'package.json'      = 'npm'
     'package-lock.json' = 'npm'
+    # PyPI dependency manifest (issue #32 — OSV lookup). Its own unit type, NOT
+    # 'python': it's a list of `name==version` lines, not Python source, and
+    # 'python' is claimed by PythonRules/Bandit/DetectSecrets, which would try
+    # (and fail/misfire) to parse it as source. Only OsvScan claims this type.
+    'requirements.txt'  = 'python-requirements'
 }
 
 # ZIP-based formats whose magic bytes (PK) legitimately don't match their declared type.
 # 'model' is here because PyTorch .pt/.pth are ZIP archives containing data.pkl.
-$script:KnownZipContainerTypes = @('python', 'office', 'npm', 'model')
+$script:KnownZipContainerTypes = @('python', 'office', 'npm', 'model', 'nuget')
 
 # Types that represent executable scripts — disguising one of these under an
 # innocent extension is the high-value evasion this module exists to catch.

@@ -155,6 +155,33 @@
     "npm/locked/package-lock.json": {
       "expectOsvOnline": true
     },
+    "python_requirements/clean/requirements.txt": {
+      "expectOsvOnline": false
+    },
+    "python_requirements/unpinned/requirements.txt": {
+      "expectFinding": "OSV-PYPI-UNPINNED"
+    },
+    "python_requirements/hash_pinned/requirements.txt": {
+      "expectOsvOnline": false
+    },
+    "python_requirements/vulnerable/requirements.txt": {
+      "expectOsvOnline": true
+    },
+    "nuget/clean/Contoso.Fixture.Clean.1.0.0.nupkg": {
+      "expectOsvOnline": false
+    },
+    "nuget/vulnerable/Newtonsoft.Json.12.0.1.nupkg": {
+      "expectOsvOnline": true
+    },
+    "nuget/collide/a/Same.1.0.0.nupkg": {
+      "expectOsvOnline": false
+    },
+    "nuget/collide/b/Same.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-NO-NUSPEC"
+    },
+    "nuget/ambiguous/Confused.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
+    },
     "model/safe.pkl": {
       "expectDeserialization": false
     },

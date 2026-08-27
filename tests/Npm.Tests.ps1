@@ -2,7 +2,8 @@
 <#
     Pester 5 tests for the NpmScan analyzer (v0.6).
     Core (lifecycle scripts, JS patterns, tarball) runs offline, no provisioning.
-    The OSV dependency-audit layer is exercised in the Online describe block.
+    The OSV dependency-audit layer moved to OsvScan.ps1 (issue #32) — see
+    tests/OsvScan.Tests.ps1 for the npm/PyPI/NuGet dependency-audit coverage.
 #>
 
 BeforeAll {
@@ -56,22 +57,5 @@ Describe 'npm — JavaScript risky patterns' {
 Describe 'npm — tarball extraction' {
     It 'extracts a .tgz and flags the postinstall hook inside package/package.json' {
         CountAll (ScanDir 'tarball') { $_.TestID -eq 'NPM-LIFECYCLE-SCRIPT' } | Should -BeGreaterThan 0
-    }
-}
-
-Describe 'npm — OSV dependency audit (offline note)' {
-    It 'notes that CVE audit is skipped offline when a lockfile is present' {
-        CountAll (ScanDir 'locked') { $_.TestID -eq 'NPM-OSV-OFFLINE' } | Should -BeGreaterThan 0
-    }
-}
-
-Describe 'npm — OSV dependency audit (live)' -Tag 'Online' {
-    It 'flags a known-vulnerable dependency (lodash 4.17.4) via OSV' {
-        $result = Invoke-Scan -Path (Join-Path $script:NpmDir 'locked') -Profile core `
-            -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode online
-        $vulns = @($result.Units | ForEach-Object { $_.Findings } |
-                   Where-Object { $_.Category -eq 'vuln-dependency' })
-        # OSV should return at least one advisory for lodash 4.17.4.
-        $vulns.Count | Should -BeGreaterThan 0
     }
 }

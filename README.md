@@ -4,7 +4,7 @@
 
 Operator-driven **static** security scanner for media-transfer review: point it at a submission folder of untrusted artifacts and get a durable, per-submission report before anything is admitted to a trusted environment.
 
-> **Status:** **v0.10.0** — all planned file types (Python · disguised scripts · Office/PDF · shell · PowerShell · VBA/VBScript · npm · ML/model) + archive hardening + offline deployment, plus **curated high-signal Python rules** (`PythonRules`, core) and a Defender/AMSI-safe engine. The public contract is **frozen** ([docs/contract.md](docs/contract.md)) and operator/maintainer guides are written; **v1.0.0 tags once validated on real untrusted transfers** on the isolated host. Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
+> **Status:** **v0.11.0** — all planned file types (Python · disguised scripts · Office/PDF · shell · PowerShell · VBA/VBScript · npm · ML/model) + archive hardening + offline deployment, plus **curated high-signal Python rules** (`PythonRules`, core), a Defender/AMSI-safe engine, and an **OSV.dev dependency-vulnerability audit** (`OsvScan`, core, default-on) covering PyPI `requirements.txt`, npm `package-lock.json`, and NuGet `.nupkg`. The public contract is **frozen** ([docs/contract.md](docs/contract.md)) and operator/maintainer guides are written; **v1.0.0 tags once validated on real untrusted transfers** on the isolated host. Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
 
 ## What it is / is not
 
@@ -13,7 +13,7 @@ Operator-driven **static** security scanner for media-transfer review: point it 
 
 ## Coverage (planned)
 
-Python *(v0.1)* · disguised scripts *(v0.2)* · Office + PDF documents *(v0.3)* · shell *(v0.4)* · PowerShell *(v0.5)* · npm *(v0.6)* · ML/model files *(v0.7)* · archive hardening *(v0.8)* → **v1.0.0 full-coverage milestone.**
+Python *(v0.1)* · disguised scripts *(v0.2)* · Office + PDF documents *(v0.3)* · shell *(v0.4)* · PowerShell *(v0.5)* · npm *(v0.6)* · ML/model files *(v0.7)* · archive hardening *(v0.8)* · VBA/VBScript *(v0.10)* · OSV.dev dependency-vulnerability audit *(v0.11)* → **v1.0.0 full-coverage milestone.**
 
 ## Runtime
 

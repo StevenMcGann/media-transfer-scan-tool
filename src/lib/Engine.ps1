@@ -321,6 +321,17 @@ function Invoke-ArchiveMemberDispatch {
     }
 
     $members = @(Get-ChildItem -LiteralPath $ArchiveUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue)
+    # TEMP DEBUG (issue #31 CI investigation — remove before merge): CI's
+    # Windows runner shows a spurious literal "zip\" segment inserted into
+    # member File labels that never reproduces locally. Print the raw
+    # StagingPath and one real extracted FullName to see whether the staging
+    # directory itself, or just the label math, is where the value diverges.
+    if ($members.Count -gt 0) {
+        Write-Host "DEBUG-ARCMEM archiveUnit.Name=$($ArchiveUnit.Name)"
+        Write-Host "DEBUG-ARCMEM archiveUnit.StagingPath=[$($ArchiveUnit.StagingPath)] (Length=$($ArchiveUnit.StagingPath.Length))"
+        Write-Host "DEBUG-ARCMEM members[0].FullName=[$($members[0].FullName)]"
+        Write-Host "DEBUG-ARCMEM members[0].FullName.Substring=[$($members[0].FullName.Substring($ArchiveUnit.StagingPath.Length))]"
+    }
     $uninspected   = [System.Collections.Generic.List[string]]::new()
     $budgetSkipped = 0
 

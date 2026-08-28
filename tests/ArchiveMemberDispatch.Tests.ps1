@@ -17,6 +17,17 @@
 #>
 
 BeforeAll {
+    # Canonicalize $env:TEMP ONCE, for the rest of this file's run: many tests
+    # below build their own staging dir directly from $env:TEMP and pass it to
+    # Expand-SubmissionArchive/Invoke-ArchiveMemberDispatch, whose inner-path
+    # math assumes StagingPath is a literal prefix of Get-ChildItem's FullName
+    # (see Engine.ps1's Invoke-Scan fix, review follow-up 5, #5). $env:TEMP
+    # resolves through an 8.3 short name on some Windows hosts (GitHub Actions
+    # windows-latest runners: C:\Users\RUNNER~1\... for
+    # C:\Users\runneradmin\...) -- every test in this file that built its own
+    # staging dir straight from $env:TEMP inherited that mismatch
+    # independently of whether Invoke-Scan's own fix was in place.
+    $env:TEMP         = (Get-Item -LiteralPath $env:TEMP).FullName
     $script:Root      = Split-Path $PSScriptRoot -Parent
     . (Join-Path $Root 'src/Invoke-MediaTransferScan.ps1')
     $script:Quiet     = $true

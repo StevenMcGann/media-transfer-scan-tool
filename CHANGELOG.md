@@ -111,6 +111,40 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       `Invoke-ArchiveMemberDispatch` remains the sole point that charges
       `MemberCount`/`ExpandedBytes`, exactly as it already does for
       ZIP-extracted members.
+    - A fifth review round found two more gaps and a mis-scoped budget check:
+      - Streamed tar extraction (round 3) could leave partially-extracted
+        content behind in the staging directory when a HARD-block (traversal,
+        the aggregate size/entry-count caps) or a stream-read error fired
+        after earlier entries in the SAME tarball had already been written —
+        `StagingPath` is never set on failure, so those bytes were never
+        charged and the leftovers sat until the whole scan's staging root was
+        removed. Every early-failure path in `Expand-TarArchive` now deletes
+        any partial content before returning.
+      - A semantic container (wheel/egg/`.nupkg`) that happened to be the
+        LAST admitted member of its parent archive (`MemberCount` already at
+        `MaxMembers`) was blocked by the nested-container look-ahead gate's
+        member-COUNT check, even though semantic containers are never
+        member-dispatched and their entries never consume `MemberCount` —
+        only their estimated bytes do. Order-dependent loss of Python/NuGet
+        coverage for content that would easily have fit the byte budget.
+        `Test-ArchiveWouldExceedBudget` now takes a `-SkipCountCheck` switch,
+        applied only for a semantic-container child.
+      - `Get-ArchiveExpansionEstimate`'s ZIP central-directory read counted
+        explicit directory entries alongside file entries, but
+        `Invoke-ArchiveMemberDispatch`'s member loop walks
+        `Get-ChildItem -File`, which never charges a directory to
+        `MemberCount` — a ZIP with 2,501 files and 2,501 matching directory
+        entries estimated 5,002 and could be rejected even though only 2,501
+        members would ever actually be charged. The estimate now excludes
+        entries whose name ends in `/`.
+      - A nested semantic container's pre-extraction byte estimate (round 3)
+        is precharged to the shared budget BEFORE `Expand-UnitInPlace` runs.
+        If extraction then failed (zip-slip guard, bomb/ratio guard, a
+        corrupt archive), nothing was written to disk but the precharge
+        stayed — a crafted, always-rejected container could exhaust the
+        shared byte budget with phantom bytes and no content to show for it.
+        The precharge is now a reservation, rolled back if `StagingPath`
+        never gets set.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

@@ -212,6 +212,20 @@ function Expand-TarArchive {
     $budgetLocalCount = 0
     $budgetLocalBytes = 0L
 
+    # A HARD-block (traversal/bomb/entry-count cap) or a stream-read error can
+    # fire after EARLIER entries in this same tarball were already written --
+    # streaming extraction has no "inspect first, then extract" phase the way
+    # ZIP's central-directory precheck does. Leaving that partial content
+    # behind on failure both wastes disk (repeated crafted tarballs never get
+    # charged against the budget, since StagingPath is never set on failure)
+    # and is stale content nothing will ever clean up until the whole scan's
+    # staging root is removed. Called immediately before every Success=$false
+    # return in this function.
+    $clearPartialExtraction = {
+        Remove-Item -LiteralPath $OutputDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $OutputDir -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+
     $fileStream = $null; $gzipStream = $null; $tarReader = $null
     try {
         $fileStream = [System.IO.File]::OpenRead($InputFile)
@@ -231,6 +245,7 @@ function Expand-TarArchive {
                     -Issue "Path-traversal entry in tarball: $entryName" `
                     -TestID 'MTS-EXTRACT-TRAVERSAL' `
                     -Recommendation 'Rejected — tarball tries to write outside the extraction directory.'))
+                & $clearPartialExtraction
                 return @{ Success = $false; Findings = $findings.ToArray(); BudgetStopped = $false }
             }
 
@@ -239,6 +254,7 @@ function Expand-TarArchive {
                 $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' -Severity 'HIGH' -Confidence 'HIGH' `
                     -UnitType 'archive' -File $RelPath -Issue "Tarball has more than $($script:MaxEntryCount) entries." `
                     -TestID 'MTS-EXTRACT-BOMB' -Recommendation 'Rejected — aggregate entry count exceeds the safety cap.'))
+                & $clearPartialExtraction
                 return @{ Success = $false; Findings = $findings.ToArray(); BudgetStopped = $false }
             }
 
@@ -264,6 +280,7 @@ function Expand-TarArchive {
                         -UnitType 'archive' -File $RelPath `
                         -Issue ("Total uncompressed size exceeds the {0:N0}-byte per-archive cap." -f $script:MaxTotalUncompressed) `
                         -TestID 'MTS-EXTRACT-BOMB' -Recommendation 'Rejected — aggregate decompressed size exceeds the safety cap.'))
+                    & $clearPartialExtraction
                     return @{ Success = $false; Findings = $findings.ToArray(); BudgetStopped = $false }
                 }
 
@@ -298,6 +315,7 @@ function Expand-TarArchive {
         $findings.Add((New-Finding -Tool 'Extractor' -Category 'parser' -Severity 'HIGH' -Confidence 'MEDIUM' `
             -UnitType 'archive' -File $RelPath -Issue "Tarball extraction error: $_" `
             -TestID 'MTS-EXTRACT-TAR-ERR' -Recommendation 'Verify the archive is a valid gzip tarball.'))
+        & $clearPartialExtraction
         return @{ Success = $false; Findings = $findings.ToArray(); BudgetStopped = $false }
     } finally {
         if ($tarReader)  { $tarReader.Dispose() }

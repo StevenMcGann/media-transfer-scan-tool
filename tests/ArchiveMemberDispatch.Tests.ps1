@@ -781,4 +781,138 @@ Describe 'Archive-member dispatch — semantic-container budget check is pre-hoc
         $budget.ExpandedBytes | Should -Be ($compressedWheelSize + $estimate.Bytes)
         $budget.NextStageIndex | Should -Be 1   # it WAS extracted
     }
+
+    It 'still extracts a nested wheel that is the LAST admitted member, even though MemberCount is already at MaxMembers (review follow-up 5, #2)' {
+        # The BUG: a semantic container is never member-dispatched, so its
+        # internal entries never consume Budget.MemberCount -- only its
+        # estimated BYTES get charged. But the look-ahead gate applied the
+        # SAME count check a generic (recursed) archive needs, so a semantic
+        # container that happened to be the parent's LAST admitted member
+        # (MemberCount already == MaxMembers, from the unconditional per-
+        # member pre-charge above) was blocked purely on a count that was
+        # never actually going to be consumed -- order-dependent loss of
+        # Python/NuGet coverage. Plenty of byte headroom here isolates the
+        # count check specifically.
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'nested_wheel.zip'; Path = 'nested_wheel.zip'
+                                    RelativePath = 'nested_wheel.zip'; StagingPath = $script:P5r2Extraction.StagingPath }
+        $budget = New-ArchiveTreeBudget
+        $budget.MaxMembers = 1     # after this member's own pre-charge, MemberCount == MaxMembers == 1
+        $budget.MaxBytes   = 100MB # comfortable -- only the COUNT look-ahead is in question here
+        $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:P5r2Context `
+            -Enabled $script:P5r2Enabled -Budget $budget -Depth 1
+
+        @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+        $budget.NextStageIndex | Should -Be 1   # it WAS extracted, not blocked
+    }
+}
+
+Describe 'Tarball extraction — partial content cleaned up on a mid-stream failure (review follow-up 5, #1)' {
+    It 'removes already-written entries when the aggregate size cap trips partway through' {
+        # The BUG: a HARD-block (traversal/bomb/entry-count cap) or a stream
+        # error can fire after EARLIER entries in the SAME tarball were
+        # already written -- streaming extraction has no "inspect first, then
+        # extract" phase the way ZIP's central-directory precheck does.
+        # Leaving that partial content behind wastes disk AND is never
+        # charged against the budget (StagingPath is never set on failure),
+        # so repeated crafted tarballs can each leave more leftovers.
+        # multi_member.tgz's entries are 1000/2000/3000 real bytes -- a cap
+        # of 2500 lets file1 (1000) write, then trips on file2 (+2000=3000).
+        $origMax = $script:MaxTotalUncompressed
+        $stage = Join-Path $env:TEMP "mts-p7r1-$(Get-Random)"
+        try {
+            $script:MaxTotalUncompressed = 2500
+            $r = Expand-SubmissionArchive -InputFile (Join-Path $script:ArcMemDir 'multi_member.tgz') -OutputDir $stage
+            $r.Success | Should -BeFalse
+            @($r.Findings | Where-Object { $_.TestID -eq 'MTS-EXTRACT-BOMB' }).Count | Should -Be 1
+            # Decisive proof: file1 WAS written before the cap tripped on
+            # file2 -- exactly what leaves partial content without the fix --
+            # yet nothing remains in the staging directory afterward.
+            @(Get-ChildItem -LiteralPath $stage -Recurse -File -ErrorAction SilentlyContinue).Count | Should -Be 0
+        } finally {
+            $script:MaxTotalUncompressed = $origMax
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Archive-tree budget — directory entries excluded from the ZIP expansion estimate (review follow-up 5, #3)' {
+    It 'counts only file entries, not the directory entries the same tree produces' {
+        # The BUG: the ZIP central-directory read counted every entry,
+        # including explicit directory entries. Invoke-ArchiveMemberDispatch
+        # uses Get-ChildItem -File, which never charges a directory to
+        # MemberCount -- a ZIP with N files and N matching directory entries
+        # estimated 2N and could be rejected even though only N members would
+        # ever actually be charged.
+        $zipPath = Join-Path $env:TEMP "mts-p7r3-$(Get-Random).zip"
+        try {
+            $fs = [System.IO.File]::Create($zipPath)
+            $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($i in 1..3) {
+                    $za.CreateEntry("dir$i/") | Out-Null   # explicit directory entry -- FullName ends '/'
+                    $fileEntry = $za.CreateEntry("dir$i/file$i.txt")
+                    $sw = [System.IO.StreamWriter]::new($fileEntry.Open())
+                    try { $sw.Write("hello $i") } finally { $sw.Close() }
+                }
+            } finally { $za.Dispose(); $fs.Dispose() }
+
+            $estimate = Get-ArchiveExpansionEstimate -Path $zipPath
+            $estimate | Should -Not -BeNullOrEmpty
+            $estimate.Count | Should -Be 3   # not 6 -- the 3 directory entries must not be counted
+        } finally {
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Archive-member dispatch — phantom-byte precharge rolled back on failed expansion (review follow-up 5, #4)' {
+    It 'rolls back the semantic-container byte precharge when extraction fails (zip-slip guard)' {
+        # The BUG: a nested semantic container's estimated size is precharged
+        # to Budget.ExpandedBytes BEFORE Expand-UnitInPlace runs (review
+        # follow-up 3). If extraction subsequently fails (zip-slip guard,
+        # bomb/ratio guard, ...), nothing was ever written to disk, but the
+        # precharge stayed -- a crafted, always-rejected container could
+        # exhaust the shared byte budget with phantom bytes and no content to
+        # show for it.
+        $stageParent = Join-Path $env:TEMP "mts-p7r4-parent-$(Get-Random)"
+        $workDir     = Join-Path $env:TEMP "mts-p7r4-work-$(Get-Random)"
+        New-Item -ItemType Directory -Path $stageParent -Force | Out-Null
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        try {
+            $evilWhl = Join-Path $stageParent 'evil.whl'
+            $fs = [System.IO.File]::Create($evilWhl)
+            $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $e = $za.CreateEntry('../../escape.txt')
+                $sw = [System.IO.StreamWriter]::new($e.Open())
+                try { $sw.Write('pwned') } finally { $sw.Close() }
+            } finally { $za.Dispose(); $fs.Dispose() }
+
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $workDir
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) | Where-Object { $_.DefaultEnabled })
+
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'container.zip'; Path = 'container.zip'
+                                        RelativePath = 'container.zip'; StagingPath = $stageParent }
+            $budget = New-ArchiveTreeBudget
+
+            $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
+                -Enabled $enabled -Budget $budget -Depth 1
+
+            # The traversal guard blocked extraction -- nothing was written.
+            @($findings | Where-Object { $_.TestID -eq 'MTS-EXTRACT-TRAVERSAL' }).Count | Should -Be 1
+            # Decisive proof: only the unconditional per-member pre-charge
+            # (evil.whl's own compressed file size, charged for any admitted
+            # member regardless of type) remains -- the separate pre-
+            # extraction byte ESTIMATE, charged before Expand-UnitInPlace ran,
+            # must have been rolled back once extraction actually failed.
+            $compressedSize = (Get-Item $evilWhl).Length
+            $budget.ExpandedBytes | Should -Be $compressedSize
+        } finally {
+            Remove-Item $stageParent -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }

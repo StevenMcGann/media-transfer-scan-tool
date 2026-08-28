@@ -97,6 +97,15 @@ function Get-ArchiveExpansionEstimate {
         feasible: tar/tgz has no equivalent index (reading it requires
         decompressing the whole gzip stream), and a corrupt/unreadable zip is
         left for Expand-SubmissionArchive to reject and report properly.
+
+        Count excludes explicit directory entries (ZipArchiveEntry.FullName
+        ending in '/', the format's own convention — a directory entry never
+        has real content). Invoke-ArchiveMemberDispatch's member loop walks
+        Get-ChildItem -File, which never charges a directory to MemberCount;
+        counting them here overstated the estimate against what would
+        actually be charged (a review follow-up: a ZIP with 2,501 files and
+        2,501 matching directory entries estimated 5,002 and was rejected,
+        even though only 2,501 members would ever be charged).
     #>
     param([Parameter(Mandatory)][string]$Path)
     $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
@@ -106,7 +115,10 @@ function Get-ArchiveExpansionEstimate {
         try {
             $bytes = 0L
             $count = 0
-            foreach ($e in $zip.Entries) { $bytes += [int64]$e.Length; $count++ }
+            foreach ($e in $zip.Entries) {
+                if ($e.FullName.EndsWith('/')) { continue }
+                $bytes += [int64]$e.Length; $count++
+            }
             return @{ Bytes = $bytes; Count = $count }
         } finally { $zip.Dispose() }
     } catch {
@@ -126,15 +138,29 @@ function Test-ArchiveWouldExceedBudget {
         Get-ArchiveExpansionEstimate couldn't read), falls back to requiring
         at least $script:ArchiveTreeSafeHeadroomBytes of remaining headroom —
         conservative, since the true size is unknown.
+
+        -SkipCountCheck (review follow-up): a semantic container (wheel/egg/
+        .nupkg) is never member-dispatched, so its internal entries never
+        consume $Budget.MemberCount — only its estimated bytes get charged
+        (Invoke-ArchiveMemberDispatch's precharge). Applying the count
+        look-ahead to one anyway meant a semantic container that happened to
+        be the parent archive's LAST admitted member (MemberCount already at
+        MaxMembers) was blocked purely on a count check that was never going
+        to consume any count in the first place — order-dependent loss of
+        Python/NuGet coverage for content that would easily have fit the
+        byte budget. Callers pass this for a semantic-container child only; a
+        generic archive child still needs the count check, since ITS members
+        really will be walked and charged one by one.
     #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][PSCustomObject]$Budget)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][PSCustomObject]$Budget, [switch]$SkipCountCheck)
 
     $remainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
     $remainingCount = $Budget.MaxMembers - $Budget.MemberCount
-    if ($remainingCount -le 0) { return $true }
+    if (-not $SkipCountCheck -and $remainingCount -le 0) { return $true }
 
     $estimate = Get-ArchiveExpansionEstimate -Path $Path
     if ($null -ne $estimate) {
+        if ($SkipCountCheck) { return $estimate.Bytes -gt $remainingBytes }
         return ($estimate.Bytes -gt $remainingBytes) -or ($estimate.Count -gt $remainingCount)
     }
     return $remainingBytes -lt $script:ArchiveTreeSafeHeadroomBytes
@@ -392,7 +418,7 @@ function Invoke-ArchiveMemberDispatch {
         # the top-level gate, this one is allowed to block: it's one member
         # among many in an already budget-constrained parent, not a whole
         # submission's only content.
-        elseif ($isSemanticContainerChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName -Budget $Budget)) {
+        elseif ($isSemanticContainerChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName -Budget $Budget -SkipCountCheck)) {
             $budgetBlocked = $true
             $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType $childUnit.Type -File $childRel `
@@ -414,6 +440,7 @@ function Invoke-ArchiveMemberDispatch {
             # about. A recursed generic archive is NOT charged here too --
             # its own member loop already charges each of ITS members
             # individually; doing both would double-count the same bytes.
+            $preEstimate = $null
             if ($isSemanticContainerChild) {
                 $preEstimate = Get-ArchiveExpansionEstimate -Path $file.FullName
                 if ($null -ne $preEstimate) { $Budget.ExpandedBytes += $preEstimate.Bytes }
@@ -421,6 +448,19 @@ function Invoke-ArchiveMemberDispatch {
 
             $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
             foreach ($f in $expansion.Findings) { $f.File = $childRel; $findings.Add($f) }
+
+            # The precharge above is a RESERVATION, not a final charge: if
+            # Expand-UnitInPlace didn't actually set StagingPath (zip-slip
+            # guard, decompression-bomb/ratio guard, corrupt archive, ...),
+            # nothing was written to disk and the reserved bytes are phantom
+            # -- a crafted, always-rejected container could otherwise exhaust
+            # the shared budget without ever writing a single byte (review
+            # follow-up). Roll it back; $Budget.ExpandedBytes is guaranteed to
+            # still hold exactly this amount (nothing else touches it between
+            # the charge above and here).
+            if ($null -ne $preEstimate -and -not $childUnit.StagingPath) {
+                $Budget.ExpandedBytes -= $preEstimate.Bytes
+            }
 
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }

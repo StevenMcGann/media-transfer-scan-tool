@@ -253,6 +253,12 @@
     },
     "archive_member/shell_only.zip": {
       "expectHazard": false
+    },
+    "archive_member/nested_wheel.zip": {
+      "expectHazard": false
+    },
+    "archive_member/malicious_bin.zip": {
+      "expectFinding": "PICKLE-REDUCE"
     }
   }
 }

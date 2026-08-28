@@ -856,6 +856,27 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr(zipfile.ZipInfo('run.sh', FIXED_ZIP_DT), '#!/bin/bash\necho hello\n')
 write(os.path.join(ARCMEM_DIR, 'shell_only.zip'), buf.getvalue())
 
+# G. A real wheel (semantic container) embedded inside a generic zip (review
+#    follow-up on #37, P4 review). Proves the wheel's EXPANDED content size
+#    (once extracted), not just its compressed size as it sat inside the
+#    parent zip, gets charged to the shared archive-tree budget.
+with open(os.path.join(PYTHON_DIR, 'clean_pkg-1.0-py3-none-any.whl'), 'rb') as _f:
+    _clean_wheel_bytes = _f.read()
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('bundled.whl', FIXED_ZIP_DT), _clean_wheel_bytes)
+write(os.path.join(ARCMEM_DIR, 'nested_wheel.zip'), buf.getvalue())
+
+# H. A malicious pickle stored under a .bin extension, not .pkl (review
+#    follow-up on #37, P4 review). PickleOpcodeScan's old whole-archive walk
+#    covered .bin/.h5/.hdf5/.pb/.onnx/.npy/.npz; recursive member dispatch
+#    only routes what Classify.ps1 recognizes as 'model' -- these extensions
+#    needed to be added there too, or this is silently missed.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('model.bin', FIXED_ZIP_DT), _pickle.dumps(_Exploit()))
+write(os.path.join(ARCMEM_DIR, 'malicious_bin.zip'), buf.getvalue())
+
 # ─────────────────────────────────────────────────────────────────────────────
 # VB-family fixtures (issue #25) — exported VBA modules and VBScript.
 # Static text only: nothing here is ever executed, and the "payloads" reference
@@ -1026,6 +1047,8 @@ manifest = {
         "archive_member/nested_bomb.zip":             {"expectFinding": "MTS-EXTRACT-BOMB"},
         "archive_member/no_dupes.zip":                {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
         "archive_member/shell_only.zip":              {"expectHazard": False},
+        "archive_member/nested_wheel.zip":            {"expectHazard": False},
+        "archive_member/malicious_bin.zip":           {"expectFinding": "PICKLE-REDUCE"},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

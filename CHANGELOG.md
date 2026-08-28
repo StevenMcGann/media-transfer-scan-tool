@@ -42,6 +42,42 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     dispatch's own per-member findings for the same files).
   - `MTS-EXTRACT-NESTED`'s wording no longer claims nested content is "scanned
     at top level only" — it now is opened and scanned, recursively.
+  - Two rounds of independent review on the initial implementation found the
+    budget/depth enforcement above checked too LATE, after the disk cost it
+    was meant to prevent had already been paid, plus two coverage gaps:
+    - The depth cap and shared byte budget are now checked **before**
+      extracting a nested archive, not after — a would-be-too-deep or
+      would-overflow archive is hashed but never decompressed.
+    - The per-member byte check is now look-ahead
+      (`ExpandedBytes + memberSize > MaxBytes`, checked before acceptance)
+      instead of post-hoc, so the one member that crosses the cap can no
+      longer slip through.
+    - The top-level pre-extraction budget check is now also look-ahead — it
+      estimates an archive's uncompressed size from its ZIP central
+      directory (no extraction needed) and blocks it if that estimate
+      exceeds remaining headroom, rather than only blocking once the budget
+      was already fully exhausted. Falls back to a conservative 10MB
+      safe-headroom threshold for tar/tgz, which has no equivalent cheap
+      index.
+    - A nested semantic container's (wheel/`.nupkg`) real EXPANDED size is
+      now charged to the shared budget after extraction — previously only
+      its compressed size as it sat inside the parent archive was counted,
+      so a zip bundling many large wheels could consume far more disk than
+      the budget's own accounting reflected.
+    - The budget/depth gates now key on the classified unit `Type ==
+      'archive'` specifically, not "is a ZIP-format file" — a semantic
+      container (wheel/egg/`.nupkg`) is never member-dispatched and does not
+      itself consume this budget, so it must always be allowed to extract
+      regardless of budget state. Gating on the broader check had silently
+      broken `PythonRules`/`PipAudit` and NuGet `.nuspec` parsing for any
+      submission after an earlier, unrelated generic archive had already
+      used up the shared budget.
+    - `.bin`, `.h5`, `.hdf5`, `.pb`, `.onnx`, `.npy`, and `.npz` are now
+      recognized as `model` type in `Classify.ps1`'s extension map.
+      `PickleOpcodeScan`'s removed whole-archive walk used to cover these
+      extensions; member dispatch only routes what the classifier recognizes
+      as `model`, so a malicious pickle stored under e.g. `model.bin` inside
+      a ZIP was silently missed until this was added.
 
 ## [0.11.0] - 2026-08-27
 

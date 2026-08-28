@@ -17,7 +17,12 @@
     (issue #31) and reaches this analyzer through the exact same path as a loose
     model file — this used to ALSO walk a generic archive's StagingPath itself
     (UnitTypes included 'archive'); removed, since that would now duplicate
-    every finding member dispatch already produces for the same file.
+    every finding member dispatch already produces for the same file. The full
+    set of extensions routed to 'model' (.pkl/.pickle/.pt/.pth/.joblib/
+    .safetensors/.gguf/.bin/.h5/.hdf5/.pb/.onnx/.npy/.npz) lives in
+    Classify.ps1's ExtTypeMap — one classification decision shared by loose
+    top-level files and archive members alike, not a separate list here that
+    could silently drift out of sync with what New-Unit actually classifies.
 #>
 @{
     Name           = 'PickleOpcodeScan'

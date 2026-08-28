@@ -30,6 +30,14 @@ $script:ArchiveTreeMaxDepth      = 5          # archive-in-archive-in-archive...
 $script:ArchiveTreeMaxMembers    = 5000       # cumulative classified+dispatched members, whole run
 $script:ArchiveTreeMaxBytes      = 1GB        # cumulative member bytes walked, whole run
 
+# When an archive's uncompressed size can't be cheaply estimated before
+# extraction (tar/tgz has no central-directory-style index; a corrupt/
+# unreadable zip will be rejected by Expand-SubmissionArchive anyway), require
+# at least this much headroom before attempting extraction at all. Small
+# enough to not block ordinary submissions, large enough that splitting
+# content across many small tarballs can't meaningfully outrun the cap.
+$script:ArchiveTreeSafeHeadroomBytes = 10MB
+
 function New-AnalyzerContext {
     param(
         [string]$Mode,
@@ -78,6 +86,58 @@ function Test-IsArchiveUnit {
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
     $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
     return $ext -in @('.whl', '.egg', '.zip', '.nupkg')
+}
+
+function Get-ArchiveExpansionEstimate {
+    <#
+        Cheap, NO-EXTRACTION estimate of an archive's uncompressed size and
+        entry count, read straight from the ZIP central directory (a listing
+        that already exists in the file — no decompression needed). Returns
+        @{ Bytes = <int64>; Count = <int> }, or $null when no cheap estimate is
+        feasible: tar/tgz has no equivalent index (reading it requires
+        decompressing the whole gzip stream), and a corrupt/unreadable zip is
+        left for Expand-SubmissionArchive to reject and report properly.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($ext -notin @('.zip', '.whl', '.egg', '.nupkg')) { return $null }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        try {
+            $bytes = 0L
+            $count = 0
+            foreach ($e in $zip.Entries) { $bytes += [int64]$e.Length; $count++ }
+            return @{ Bytes = $bytes; Count = $count }
+        } finally { $zip.Dispose() }
+    } catch {
+        return $null
+    }
+}
+
+function Test-ArchiveWouldExceedBudget {
+    <#
+        Would extracting the archive at $Path push the shared archive-tree
+        budget over its cap? Look-ahead, not exhaustion-only: a prior check
+        that only blocked once the budget was ALREADY at/over the cap let an
+        archive through whenever there was SOME headroom left, even if far
+        less than that archive's own size — the next big archive still went
+        over. Uses an accurate pre-extraction estimate (ZIP central directory)
+        when feasible; when it isn't (tar/tgz, or an archive
+        Get-ArchiveExpansionEstimate couldn't read), falls back to requiring
+        at least $script:ArchiveTreeSafeHeadroomBytes of remaining headroom —
+        conservative, since the true size is unknown.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][PSCustomObject]$Budget)
+
+    $remainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
+    $remainingCount = $Budget.MaxMembers - $Budget.MemberCount
+    if ($remainingCount -le 0) { return $true }
+
+    $estimate = Get-ArchiveExpansionEstimate -Path $Path
+    if ($null -ne $estimate) {
+        return ($estimate.Bytes -gt $remainingBytes) -or ($estimate.Count -gt $remainingCount)
+    }
+    return $remainingBytes -lt $script:ArchiveTreeSafeHeadroomBytes
 }
 
 function Invoke-UnitDispatch {
@@ -263,6 +323,18 @@ function Invoke-ArchiveMemberDispatch {
         # knows its own immediate relative path, not the parent's label.
         foreach ($f in $classified.Findings) { $f.File = $childRel; $findings.Add($f) }
 
+        # These two traversal gates apply ONLY to a member that will be
+        # member-dispatched further (a GENERIC 'archive' child, recursed into
+        # below) — NOT to a semantic container (python/nuget/model: a wheel/
+        # egg/.nupkg also happens to be a ZIP file, but it is never recursed
+        # into and its whole-staging-tree analyzer (PythonRules/OsvScan/...)
+        # depends on its StagingPath existing. Gating those on depth or budget
+        # blocked PythonRules from ever seeing a wheel's contents and broke
+        # NuGet identity parsing (.nuspec unreadable) whenever an EARLIER,
+        # unrelated generic archive had already used up the shared budget or
+        # nesting depth — semantic containers must always extract.
+        $isGenericArchiveChild = $childUnit.Type -eq 'archive'
+
         # Depth cap MUST be checked before extraction, not after: recursing
         # into a would-be-too-deep nested archive via Invoke-ArchiveMemberDispatch
         # would open/decompress it first and only THEN discover, at the top of
@@ -270,9 +342,10 @@ function Invoke-ArchiveMemberDispatch {
         # opened" for an archive that was, in fact, opened. Check here, one
         # level up, using the depth the RECURSIVE call would run at, and skip
         # Expand-UnitInPlace entirely when it would already be over the cap.
-        $depthBlocked = $false
-        $recursed     = $false
-        if ((Test-IsArchiveUnit -Unit $childUnit) -and ($Depth + 1) -gt $Budget.MaxDepth) {
+        $depthBlocked  = $false
+        $budgetBlocked = $false
+        $recursed      = $false
+        if ($isGenericArchiveChild -and ($Depth + 1) -gt $Budget.MaxDepth) {
             $depthBlocked = $true
             $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType 'archive' -File $childRel `
@@ -281,25 +354,58 @@ function Invoke-ArchiveMemberDispatch {
                 -Recommendation 'Deeply nested archives are a common evasion/bomb vector; inspect this member manually if it is expected content.'))
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
-        } else {
+        }
+        # Look-ahead budget check (review follow-up): would extracting THIS
+        # nested archive push the shared cumulative total over the cap? The
+        # per-member pre-charge above only weighed the archive's own
+        # (compressed) file size against the budget -- its EXPANDED contents,
+        # once opened, are what actually consume the budget as its own member
+        # loop walks them. Checked here so a nested archive that would clearly
+        # blow the remaining headroom is never opened in the first place.
+        elseif ($isGenericArchiveChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName -Budget $Budget)) {
+            $budgetBlocked = $true
+            $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
+                -Confidence 'HIGH' -UnitType 'archive' -File $childRel `
+                -Issue 'Nested archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
+                -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
+                -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+            $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
+            foreach ($f in $dispatch.Findings) { $findings.Add($f) }
+        }
+        else {
             $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
             foreach ($f in $expansion.Findings) { $f.File = $childRel; $findings.Add($f) }
 
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
 
-            if ($expansion.IsArchive -and $childUnit.Type -eq 'archive' -and $childUnit.StagingPath) {
-                $recursed = $true
-                $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
-                    -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
-                foreach ($f in $nestedFindings) { $findings.Add($f) }
+            if ($expansion.IsArchive -and $childUnit.StagingPath) {
+                if ($isGenericArchiveChild) {
+                    $recursed = $true
+                    $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
+                        -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
+                    foreach ($f in $nestedFindings) { $findings.Add($f) }
+                } else {
+                    # Semantic container (python/nuget/model): not recursed, so
+                    # its expanded size is never otherwise counted anywhere —
+                    # the pre-charge above only counted the compressed file.
+                    # Charge its REAL on-disk footprint so later archives in
+                    # this scan see accurate remaining headroom. A recursed
+                    # generic archive is NOT charged here too — its own member
+                    # loop already charges each of ITS members individually;
+                    # doing both would double-count the same bytes.
+                    $expandedSize = (Get-ChildItem -LiteralPath $childUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
+                        Measure-Object -Property Length -Sum).Sum
+                    if ($expandedSize) { $Budget.ExpandedBytes += [int64]$expandedSize }
+                }
             }
         }
 
-        # Depth-capped and recursed members already carry their own explicit
-        # finding explaining why nothing more is here — don't ALSO fold them
-        # into the generic "no analyzer coverage" aggregate below.
-        if (-not $dispatch.HasCoverage -and -not $depthBlocked -and -not $recursed) {
+        # Depth-capped, budget-blocked, and recursed members already carry
+        # their own explicit finding explaining why nothing more is here —
+        # don't ALSO fold them into the generic "no analyzer coverage"
+        # aggregate below.
+        if (-not $dispatch.HasCoverage -and -not $depthBlocked -and -not $budgetBlocked -and -not $recursed) {
             $uninspected.Add("$childRel ($($childUnit.Type))")
         }
     }
@@ -386,20 +492,40 @@ function Invoke-Scan {
             # nothing previously stopped this loop from unconditionally decompressing
             # every TOP-LEVEL archive first. A submission of many individually-small,
             # individually-valid archives could otherwise exhaust disk before the
-            # shared budget ever got a chance to fire.
+            # shared budget ever got a chance to fire. Look-ahead (Test-ArchiveWouldExceedBudget),
+            # not exhaustion-only: a check that only blocked once the budget was
+            # ALREADY at/over the cap let the one archive that pushes it over
+            # through, every time, since there was always SOME headroom left
+            # right up until that archive's own extraction filled it.
+            #
+            # Gated on $unit.Type -eq 'archive' specifically, NOT
+            # Test-IsArchiveUnit (which also matches .whl/.egg/.nupkg): a
+            # semantic container is never member-dispatched and does not
+            # itself consume this budget, but PythonRules/OsvScan depend on
+            # its StagingPath existing -- blocking its extraction because an
+            # unrelated EARLIER generic archive used up the budget silently
+            # broke wheel/NuGet analysis. Semantic containers always extract.
             $topLevelBudgetBlocked = $false
-            if ((Test-IsArchiveUnit -Unit $unit) -and
-                ($budget.MemberCount -ge $budget.MaxMembers -or $budget.ExpandedBytes -ge $budget.MaxBytes)) {
+            if ($unit.Type -eq 'archive' -and (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $budget)) {
                 $topLevelBudgetBlocked = $true
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType 'archive' -File $unit.RelativePath `
-                    -Issue ("Archive not opened — the shared archive-tree budget ({0} members / {1:N0} bytes) was already exhausted by earlier archives in this scan." -f `
-                        $budget.MaxMembers, $budget.MaxBytes) `
+                    -Issue 'Archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
             } else {
                 $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
                 foreach ($f in $expansion.Findings) { $findings.Add($f) }
+
+                # A top-level semantic container's expanded size is otherwise
+                # never counted (it isn't member-dispatched, so no per-member
+                # loop charges it) -- charge its real on-disk footprint so
+                # later archives in this scan see accurate remaining headroom.
+                if ($expansion.IsArchive -and $unit.Type -ne 'archive' -and $unit.StagingPath) {
+                    $expandedSize = (Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
+                        Measure-Object -Property Length -Sum).Sum
+                    if ($expandedSize) { $budget.ExpandedBytes += [int64]$expandedSize }
+                }
             }
 
             Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"

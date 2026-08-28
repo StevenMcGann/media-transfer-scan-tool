@@ -51,10 +51,10 @@ AfterAll { Remove-Item $script:Out -Recurse -Force -ErrorAction SilentlyContinue
 # ─────────────────────────────────────────────────────────────────────────────
 Describe 'Archive-member dispatch — unit-count and schema preservation' {
     It 'does not add extracted archive members as top-level Units' {
-        # Six fixture zips in archive_member/, several with 2+ members each —
+        # Eight fixture zips in archive_member/, several with 2+ members each —
         # the Units array must still have exactly one entry per SUBMITTED file.
-        $R.Units.Count | Should -Be 6
-        @($R.Units | Where-Object { $_.Name -match '\.(sh|js|py|txt|json|pkl)$' }).Count | Should -Be 0
+        $R.Units.Count | Should -Be 8
+        @($R.Units | Where-Object { $_.Name -match '\.(sh|js|py|txt|json|pkl|whl|bin)$' }).Count | Should -Be 0
     }
 
     It 'folds member findings onto the parent archive using the archive!inner/path label' {
@@ -354,5 +354,197 @@ Describe 'Archive-member dispatch — staging cleanup' {
         ScanDir 'archive_member/two_level_nested.zip' | Out-Null
         $tempAfter = @(Get-ChildItem $env:TEMP -Directory -Filter 'mts-staging-*' -ErrorAction SilentlyContinue).Count
         $tempAfter | Should -Be $tempBefore
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Second Codex review on PR #37 (commit 33b12f6): four more real bugs, all in
+# budget/depth enforcement. Each block below targets exactly one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Describe 'Archive-tree budget — look-ahead estimate, not exhaustion-only (review follow-up 2, #1)' {
+    # The BUG: the top-level precheck only blocked once the budget was ALREADY
+    # at/over the cap. An archive bigger than the REMAINING headroom, but
+    # smaller than the cap itself, sailed through every time -- there was
+    # always SOME headroom left right up until that archive's own extraction
+    # filled it. Get-ArchiveExpansionEstimate/Test-ArchiveWouldExceedBudget did
+    # not exist in the pre-fix code, so these tests can't even resolve against
+    # it -- a strong regression guard on their own.
+    It 'estimates a real ZIP''s uncompressed size and entry count without extracting it' {
+        $estimate = Get-ArchiveExpansionEstimate -Path (Join-Path $script:ArcMemDir 'no_dupes.zip')
+        $estimate | Should -Not -BeNullOrEmpty
+        $estimate.Count | Should -Be 2
+        $estimate.Bytes | Should -BeGreaterThan 0
+    }
+
+    It 'returns $null for a tarball -- no cheap central-directory-style index exists' {
+        $estimate = Get-ArchiveExpansionEstimate -Path (Join-Path $script:Corpus 'npm/tarball/evil_pkg-1.0.0.tgz')
+        $estimate | Should -BeNullOrEmpty
+    }
+
+    It 'blocks an archive whose estimated size exceeds remaining headroom even though the budget is NOT yet exhausted' {
+        $path = Join-Path $script:ArcMemDir 'no_dupes.zip'
+        $estimate = Get-ArchiveExpansionEstimate -Path $path
+        $budget = New-ArchiveTreeBudget
+        $budget.ExpandedBytes = $budget.MaxBytes - $estimate.Bytes + 1   # one byte short of enough room
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $budget | Should -BeTrue
+        # Sanity: NOT exhausted by the old, buggy exhaustion-only definition.
+        $budget.ExpandedBytes | Should -BeLessThan $budget.MaxBytes
+    }
+
+    It 'allows an archive that DOES fit in remaining headroom' {
+        $path = Join-Path $script:ArcMemDir 'no_dupes.zip'
+        Test-ArchiveWouldExceedBudget -Path $path -Budget (New-ArchiveTreeBudget) | Should -BeFalse
+    }
+
+    It 'falls back to the safe-headroom threshold when no estimate is feasible (tarball)' {
+        $path = Join-Path $script:Corpus 'npm/tarball/evil_pkg-1.0.0.tgz'
+        $tightBudget = New-ArchiveTreeBudget
+        $tightBudget.ExpandedBytes = $tightBudget.MaxBytes - 1MB   # 1MB headroom, below the 10MB safe threshold
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $tightBudget | Should -BeTrue
+
+        $roomyBudget = New-ArchiveTreeBudget   # full headroom
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $roomyBudget | Should -BeFalse
+    }
+
+    It 'blocks a top-level archive via a real Invoke-Scan run once it would exceed remaining headroom' {
+        $estimate = Get-ArchiveExpansionEstimate -Path (Join-Path $script:ArcMemDir 'no_dupes.zip')
+        $srcDir = Join-Path $env:TEMP "mts-p4r1-src-$(Get-Random)"
+        New-Item -ItemType Directory -Path $srcDir -Force | Out-Null
+        Copy-Item (Join-Path $script:ArcMemDir 'no_dupes.zip') (Join-Path $srcDir 'first.zip')
+        Copy-Item (Join-Path $script:ArcMemDir 'no_dupes.zip') (Join-Path $srcDir 'second.zip')
+        $out2 = Join-Path $env:TEMP "mts-p4r1-out-$(Get-Random)"
+        New-Item -ItemType Directory -Path $out2 -Force | Out-Null
+        $origMaxBytes = $script:ArchiveTreeMaxBytes
+        try {
+            # Room for one archive's real expansion plus a sliver -- not two.
+            $script:ArchiveTreeMaxBytes = $estimate.Bytes + 100
+            $r2 = Invoke-Scan -Path $srcDir -Profile core `
+                -AnalyzerDir $script:Analyzers -ReportsDir $out2 -Mode offline
+            $opened  = @($r2.Units | Where-Object { @($_.Findings | Where-Object { $_.File -match '!' }).Count -gt 0 })
+            $blocked = @($r2.Units | Where-Object { @($_.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count -gt 0 })
+            $opened.Count  | Should -Be 1
+            $blocked.Count | Should -Be 1
+        } finally {
+            $script:ArchiveTreeMaxBytes = $origMaxBytes
+            Remove-Item $srcDir, $out2 -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Archive-member dispatch — semantic container bytes charged to shared budget (review follow-up 2, #2)' {
+    BeforeAll {
+        $script:WheelStage = Join-Path $env:TEMP "mts-p4r2-stage-$(Get-Random)"
+        $script:WheelExtraction = Expand-SubmissionArchive `
+            -InputFile (Join-Path $script:ArcMemDir 'nested_wheel.zip') -OutputDir $script:WheelStage
+        $script:WheelTestContext = [PSCustomObject]@{
+            Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = (Join-Path $env:TEMP "mts-p4r2-work-$(Get-Random)")
+            ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+        }
+        New-Item -ItemType Directory -Path $script:WheelTestContext.WorkDir -Force | Out-Null
+        $script:WheelTestEnabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) |
+            Where-Object { $_.DefaultEnabled })
+    }
+    AfterAll {
+        Remove-Item $script:WheelStage -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $script:WheelTestContext.WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'charges the wheel''s REAL expanded size, not just its compressed size, to the shared budget' {
+        # BUG: a wheel found as a member is extracted (its own whole-tree
+        # analyzer needs StagingPath) but never recursed into (semantic
+        # container) -- so its per-member pre-charge (the compressed .whl
+        # FILE'S own size, as it sat inside the parent zip) was the only
+        # thing ever counted. Its actual, potentially much larger extracted
+        # contents were invisible to the budget entirely.
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'nested_wheel.zip'; Path = 'nested_wheel.zip'
+                                    RelativePath = 'nested_wheel.zip'; StagingPath = $script:WheelExtraction.StagingPath }
+        $budget = New-ArchiveTreeBudget
+        Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:WheelTestContext `
+            -Enabled $script:WheelTestEnabled -Budget $budget -Depth 1 | Out-Null
+
+        $compressedWheelSize = (Get-ChildItem -LiteralPath $script:WheelExtraction.StagingPath -Recurse -File |
+            Select-Object -First 1).Length
+        # The wheel's OWN extracted staging dir (unit1_bundled.whl -- this
+        # test's dispatch call is the only extraction that happens).
+        $wheelStageDir = Join-Path $script:WheelTestContext.WorkDir 'unit1_bundled.whl'
+        Test-Path -LiteralPath $wheelStageDir -PathType Container | Should -BeTrue
+        $realExpanded = (Get-ChildItem -LiteralPath $wheelStageDir -Recurse -File |
+            Measure-Object -Property Length -Sum).Sum
+
+        # Charged total = compressed pre-charge + the wheel's real expanded
+        # content -- strictly more than the compressed size alone, which is
+        # what the pre-fix code left the budget at.
+        $budget.ExpandedBytes | Should -BeGreaterThan $compressedWheelSize
+        $budget.ExpandedBytes | Should -Be ($compressedWheelSize + $realExpanded)
+    }
+}
+
+Describe 'Archive-member dispatch — model-extension coverage restored (review follow-up 2, #3)' {
+    It 'catches a malicious pickle stored under .bin, not just .pkl' {
+        # BUG: PickleOpcodeScan's OLD whole-archive walk covered .bin/.h5/
+        # .hdf5/.pb/.onnx/.npy/.npz; removing that walk (member dispatch made
+        # it redundant) silently dropped these extensions, since Classify.ps1
+        # never routed them to 'model' -- they became 'unsupported' and only
+        # got an aggregate MTS-ARCHIVE-MEMBER-UNINSPECTED notice instead of
+        # being scanned at all.
+        $u = UnitOf 'malicious_bin.zip'
+        $u | Should -Not -BeNullOrEmpty
+        $reduce = @($u.Findings | Where-Object {
+            $_.TestID -eq 'PICKLE-REDUCE' -and $_.File -eq 'malicious_bin.zip!model.bin' })
+        $reduce.Count | Should -Be 1
+        # Must not ALSO read as "no coverage" for the same member.
+        @($u.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-MEMBER-UNINSPECTED' }).Count | Should -Be 0
+    }
+
+    It 'classifies each model-adjacent extension as model type directly (Classify.ps1)' {
+        $tmpDir = Join-Path $env:TEMP "mts-p4r3-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        try {
+            foreach ($ext in @('.bin', '.h5', '.hdf5', '.pb', '.onnx', '.npy', '.npz')) {
+                $f = Join-Path $tmpDir "sample$ext"
+                Set-Content -LiteralPath $f -Value 'not a real model, just bytes' -NoNewline
+                $classified = New-Unit -File (Get-Item $f) -ScanRoot $tmpDir
+                $classified.Unit.Type | Should -Be 'model' -Because "$ext should classify as model"
+            }
+        } finally { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Archive-member dispatch — budget gate never blocks semantic containers (review follow-up 2, #4)' {
+    It 'still extracts a top-level wheel even when the shared budget starts fully exhausted' {
+        # BUG: the top-level precheck gated on Test-IsArchiveUnit, which also
+        # matches .whl/.egg/.nupkg -- so once an EARLIER, unrelated generic
+        # archive exhausted the shared budget, a semantic container was
+        # blocked from extracting too, even though it's never member-
+        # dispatched and doesn't consume this budget at all. That broke
+        # PythonRules/PipAudit (StagingPath never set) and NuGet .nuspec
+        # parsing for every submission after the first exhausting archive.
+        $srcDir = Join-Path $env:TEMP "mts-p4r4-src-$(Get-Random)"
+        New-Item -ItemType Directory -Path $srcDir -Force | Out-Null
+        Copy-Item (Join-Path $script:Root 'tests/fixtures/corpus/python/clean_pkg-1.0-py3-none-any.whl') $srcDir
+        $out2 = Join-Path $env:TEMP "mts-p4r4-out-$(Get-Random)"
+        New-Item -ItemType Directory -Path $out2 -Force | Out-Null
+        $origMaxMembers = $script:ArchiveTreeMaxMembers
+        $origMaxBytes   = $script:ArchiveTreeMaxBytes
+        try {
+            $script:ArchiveTreeMaxMembers = 0   # budget starts pre-exhausted, before ANY unit is processed
+            $script:ArchiveTreeMaxBytes   = 0
+            $r2 = Invoke-Scan -Path $srcDir -Profile core `
+                -AnalyzerDir $script:Analyzers -ReportsDir $out2 -Mode offline
+
+            $wheelUnit = $r2.Units | Where-Object { $_.Name -like '*.whl' }
+            $wheelUnit | Should -Not -BeNullOrEmpty
+            $wheelUnit.Type | Should -Be 'python'
+            @($wheelUnit.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+            # Decisive proof extraction actually happened: PipAudit early-
+            # returns @() when StagingPath is null (see PipAudit.ps1); this
+            # finding only fires once StagingPath is confirmed set.
+            @($wheelUnit.Findings | Where-Object { $_.TestID -eq 'MTS-PIPAUDIT-UNAVAIL' }).Count | Should -Be 1
+        } finally {
+            $script:ArchiveTreeMaxMembers = $origMaxMembers
+            $script:ArchiveTreeMaxBytes   = $origMaxBytes
+            Remove-Item $srcDir, $out2 -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

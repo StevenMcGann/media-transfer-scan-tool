@@ -572,7 +572,10 @@ Describe 'Tarball extraction — streamed with per-entry budget enforcement (rev
             $r = Expand-SubmissionArchive -InputFile $script:MultiTar -OutputDir $stage -Budget $budget
             $r.Success | Should -BeTrue
             @(Get-ChildItem -LiteralPath $stage -File -Recurse).Count | Should -Be 3
-            $budget.ExpandedBytes | Should -Be 6000   # 1000 + 2000 + 3000
+            # Streaming extraction reads $Budget for look-ahead headroom but
+            # never writes to it (review follow-up 4) -- Invoke-ArchiveMemberDispatch
+            # is the sole authoritative charging point once these members are walked.
+            $budget.ExpandedBytes | Should -Be 0
             @($r.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
         } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -591,8 +594,8 @@ Describe 'Tarball extraction — streamed with per-entry budget enforcement (rev
             $extracted[0].Name | Should -Be 'file1.bin'
             # Decisive proof file2/file3 were NEVER WRITTEN (not written-then-
             # deleted) -- the directory has exactly the one file, nothing else.
-            $budget.ExpandedBytes | Should -Be 1000
-            $budget.ExpandedBytes | Should -BeLessOrEqual $budget.MaxBytes
+            # $budget itself stays untouched -- streaming only reads it (see above).
+            $budget.ExpandedBytes | Should -Be 0
             @($r.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 1
         } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -652,6 +655,54 @@ Describe 'Tarball extraction — streamed with per-entry budget enforcement (rev
         $r = ScanDir 'npm/tarball'
         $u = $r.Units | Where-Object { $_.Name -like '*.tgz' }
         @($u.Findings | Where-Object { $_.TestID -eq 'NPM-LIFECYCLE-SCRIPT' }).Count | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Archive-member dispatch — streamed tar extraction does not double-charge the shared budget (review follow-up 4)' {
+    # The BUG: Expand-TarArchive charged $Budget.MemberCount/$Budget.ExpandedBytes
+    # for every entry AS IT STREAMED THEM TO DISK. Invoke-ArchiveMemberDispatch's
+    # own member loop then charged the SAME extracted files AGAIN when it walked
+    # the tar's StagingPath for dispatch. A tarball at (or near) MaxMembers had
+    # its budget exhausted by the extraction-time charge alone, so dispatch's
+    # look-ahead check saw no headroom left and skipped members that were
+    # already safely on disk -- under-analyzing content the configured limits
+    # were meant to allow.
+    BeforeAll {
+        $script:P6r1Tar = Join-Path $script:ArcMemDir 'multi_member.tgz'
+    }
+
+    It 'fully dispatches a tarball at exactly MaxMembers -- streaming and dispatch must not double-charge the same entries' {
+        $stage = Join-Path $env:TEMP "mts-p6r1-$(Get-Random)"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        try {
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $stage
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) | Where-Object { $_.DefaultEnabled })
+
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxMembers = 3   # exactly multi_member.tgz's entry count -- no slack
+
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'multi_member.tgz'; Path = $script:P6r1Tar
+                                        RelativePath = 'multi_member.tgz'; StagingPath = $null }
+            Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget | Out-Null
+            $unit.StagingPath | Should -Not -BeNullOrEmpty
+            # All 3 entries actually landed on disk -- extraction itself wasn't
+            # the thing that was short-changed.
+            @(Get-ChildItem -LiteralPath $unit.StagingPath -File -Recurse).Count | Should -Be 3
+
+            $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
+                -Enabled $enabled -Budget $budget -Depth 1
+
+            # Double-charging would have left MemberCount at 3 (or more) BEFORE
+            # dispatch's loop even ran a single iteration, tripping its
+            # "count >= max" gate on the very first member. Single, correct
+            # charging lands MemberCount at exactly 3 -- once per file, by
+            # dispatch alone.
+            $budget.MemberCount | Should -Be 3
+            @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+        } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 

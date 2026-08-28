@@ -42,9 +42,10 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     dispatch's own per-member findings for the same files).
   - `MTS-EXTRACT-NESTED`'s wording no longer claims nested content is "scanned
     at top level only" — it now is opened and scanned, recursively.
-  - Three rounds of independent review on the initial implementation found the
+  - Four rounds of independent review on the initial implementation found the
     budget/depth enforcement above checked too LATE, after the disk cost it
-    was meant to prevent had already been paid, plus two coverage gaps:
+    was meant to prevent had already been paid, plus two coverage gaps and a
+    double-counting bug:
     - The depth cap and shared byte budget are now checked **before**
       extracting a nested archive, not after — a would-be-too-deep or
       would-overflow archive is hashed but never decompressed.
@@ -97,6 +98,19 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       entry-count cap now apply to tarballs too (no per-entry compression
       ratio exists for a tar — the whole stream is one continuous gzip, not
       independently-compressed entries like ZIP).
+    - The tar streaming extraction above and `Invoke-ArchiveMemberDispatch`'s
+      per-member loop were both charging the shared budget for the same
+      extracted files — once as each tar entry was written to disk, and again
+      when dispatch walked those same files afterward. A tarball at or near
+      the member/byte cap could have its budget exhausted by the extraction-
+      time charge alone, so dispatch's own look-ahead check then skipped
+      members that were already safely on disk — under-analyzing content the
+      configured limits were meant to allow, not enforcing them correctly.
+      Tar streaming now only *reads* the budget (a snapshot of remaining
+      headroom, to decide when to stop writing) and never mutates it;
+      `Invoke-ArchiveMemberDispatch` remains the sole point that charges
+      `MemberCount`/`ExpandedBytes`, exactly as it already does for
+      ZIP-extracted members.
 
 ## [0.11.0] - 2026-08-27
 

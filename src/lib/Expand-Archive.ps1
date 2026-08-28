@@ -158,12 +158,22 @@ function Expand-TarArchive {
         call reports Success=$false.
 
         When $Budget is supplied (non-$null), each file entry's size is
-        weighed against the shared archive-tree budget BEFORE it is written —
-        look-ahead, the same principle as every other budget check in this
-        codebase (Engine.ps1's Test-ArchiveWouldExceedBudget and per-member
-        loop). Extraction simply STOPS at that entry (Success stays $true —
-        this is normal, expected behavior for a large submission, not an
-        error) and $findings carries an MTS-ARCHIVE-BUDGET-EXCEEDED note.
+        weighed against a SNAPSHOT of the shared archive-tree budget's
+        remaining headroom, taken once before streaming starts — look-ahead,
+        the same principle as every other budget check in this codebase
+        (Engine.ps1's Test-ArchiveWouldExceedBudget and per-member loop).
+        Extraction simply STOPS at that entry (Success stays $true — this is
+        normal, expected behavior for a large submission, not an error) and
+        $findings carries an MTS-ARCHIVE-BUDGET-EXCEEDED note.
+
+        This function reads $Budget but never writes to it: every extracted
+        member here is a NEW unit that Invoke-ArchiveMemberDispatch walks and
+        charges for real immediately afterwards (the same authoritative
+        charging point ZIP-extracted members already go through). Charging
+        $Budget here too would double-count these exact files a moment
+        later — undercounting real remaining headroom and starving dispatch
+        of budget it should have had (issue #31 review round 4).
+
         $Budget = $null means "no budget enforcement" (e.g. a direct test
         call, or a future caller that doesn't need it) — extraction proceeds
         unbounded by budget, same as before this fix, still subject to the
@@ -189,6 +199,18 @@ function Expand-TarArchive {
     $entryCount = 0
     $symlinkCount = 0
     $nestedNames = [System.Collections.Generic.List[string]]::new()
+
+    # Read-only snapshot of remaining headroom — Invoke-ArchiveMemberDispatch
+    # charges $Budget for real once these members are walked; this function
+    # only ever reads it, never mutates it (see the double-charge note above).
+    $budgetRemainingCount = [int64]0
+    $budgetRemainingBytes = [int64]0
+    if ($null -ne $Budget) {
+        $budgetRemainingCount = $Budget.MaxMembers - $Budget.MemberCount
+        $budgetRemainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
+    }
+    $budgetLocalCount = 0
+    $budgetLocalBytes = 0L
 
     $fileStream = $null; $gzipStream = $null; $tarReader = $null
     try {
@@ -251,13 +273,13 @@ function Expand-TarArchive {
                 }
 
                 if ($null -ne $Budget) {
-                    if ($Budget.MemberCount -ge $Budget.MaxMembers -or
-                        ($Budget.ExpandedBytes + $entrySize) -gt $Budget.MaxBytes) {
+                    if (($budgetLocalCount + 1) -gt $budgetRemainingCount -or
+                        ($budgetLocalBytes + $entrySize) -gt $budgetRemainingBytes) {
                         $budgetStopped = $true
                         break
                     }
-                    $Budget.MemberCount++
-                    $Budget.ExpandedBytes += $entrySize
+                    $budgetLocalCount++
+                    $budgetLocalBytes += $entrySize
                 }
             }
 

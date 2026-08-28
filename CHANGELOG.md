@@ -8,6 +8,8 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-27
+
 ### Added
 - **OSV.dev dependency-vulnerability audit — PyPI, npm, NuGet** ([#32](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/32)).
   New **`OsvScan`** analyzer (core, default-on — this tool always has network
@@ -34,6 +36,15 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     ecosystem — and any future one — reports the same way.
   - Adding two `UnitType` values is non-breaking under
     [docs/contract.md](docs/contract.md) §1.
+
+### Fixed
+- **`Finding.File` now carries the audited unit's path everywhere, not a
+  `"dependency: name version"` descriptor.** `docs/contract.md` §1 defines
+  `File` as a relative path; `PipAudit`'s CVE findings put a dependency label
+  there instead. The dependency identity moved into `Issue`
+  (`"Dependency 'name version': CVE-...: ..."`), matching the convention
+  `OsvScan` uses. This also restores traceability when `Requires-Dist` is read
+  from more than one wheel in a single scan.
 
 ## [0.10.0] - 2026-08-21
 

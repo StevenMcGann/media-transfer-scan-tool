@@ -115,6 +115,9 @@ Describe 'Archive-member dispatch — depth cap and cumulative budget (direct)' 
         $script:StageOut = Join-Path $env:TEMP "mts-arcmem-stage-$(Get-Random)"
         $script:Extraction = Expand-SubmissionArchive `
             -InputFile (Join-Path $script:ArcMemDir 'no_dupes.zip') -OutputDir $script:StageOut
+        $script:NestedStageOut = Join-Path $env:TEMP "mts-arcmem-nested-stage-$(Get-Random)"
+        $script:NestedExtraction = Expand-SubmissionArchive `
+            -InputFile (Join-Path $script:ArcMemDir 'two_level_nested.zip') -OutputDir $script:NestedStageOut
         $script:TestContext = [PSCustomObject]@{
             Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $env:TEMP
             ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
@@ -122,7 +125,10 @@ Describe 'Archive-member dispatch — depth cap and cumulative budget (direct)' 
         $script:TestEnabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) |
             Where-Object { $_.DefaultEnabled })
     }
-    AfterAll { Remove-Item $script:StageOut -Recurse -Force -ErrorAction SilentlyContinue }
+    AfterAll {
+        Remove-Item $script:StageOut -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $script:NestedStageOut -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     It 'does not open a nested archive past the depth cap' {
         $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'no_dupes.zip'; Path = 'no_dupes.zip'
@@ -172,6 +178,114 @@ Describe 'Archive-member dispatch — depth cap and cumulative budget (direct)' 
         $secondExceeded.Count | Should -Be 1
         $secondExceeded[0].Issue | Should -Match '2 member'
         $budget.MemberCount | Should -Be 2   # unchanged by unit2 -- nothing more was ever counted
+    }
+
+    It 'checks the depth cap BEFORE extraction, not after (review follow-up)' {
+        # two_level_nested.zip = outer.zip{inner.zip{deep/risky.sh}} -- two real
+        # levels. MaxDepth=1 means recursing into inner.zip would run at depth 2,
+        # over the cap. The BUG: the old code called Expand-UnitInPlace on
+        # inner.zip UNCONDITIONALLY, THEN discovered the cap only once the
+        # recursive Invoke-ArchiveMemberDispatch call started -- inner.zip was
+        # decompressed regardless of what the finding claimed. Proof this is
+        # fixed: nothing traceable to INSIDE inner.zip appears anywhere, only a
+        # depth-cap note for inner.zip itself (plus its own FileHash, since the
+        # FILE is still hashed -- only its extraction is skipped).
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'two_level_nested.zip'; Path = 'two_level_nested.zip'
+                                    RelativePath = 'two_level_nested.zip'; StagingPath = $script:NestedExtraction.StagingPath }
+        $budget = New-ArchiveTreeBudget
+        $budget.MaxDepth = 1
+        $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:TestContext `
+            -Enabled $script:TestEnabled -Budget $budget -Depth 1
+
+        @($findings | Where-Object {
+            $_.TestID -eq 'MTS-ARCHIVE-DEPTH-CAP' -and $_.File -eq 'two_level_nested.zip!inner.zip' }).Count |
+            Should -Be 1
+        # Nothing about inner.zip's OWN contents (e.g. deep/risky.sh) exists anywhere.
+        @($findings | Where-Object { $_.File -like 'two_level_nested.zip!inner.zip!*' }).Count | Should -Be 0
+        @($findings | Where-Object { $_.TestID -eq 'SHELL-B64-EXEC' }).Count | Should -Be 0
+        # The inner.zip FILE itself is still hashed -- dispatch still runs on the
+        # un-extracted unit; only Expand-UnitInPlace (the extraction) is skipped.
+        @($findings | Where-Object {
+            $_.TestID -eq 'MTS-HASH-001' -and $_.File -eq 'two_level_nested.zip!inner.zip' }).Count |
+            Should -Be 1
+        # Decisive proof extraction itself never ran: BOTH the old and new code
+        # produce the SAME depth-cap finding here (the old code's recursive call
+        # still hits its own top-of-function guard before WALKING inner.zip's
+        # members) -- the only observable difference is whether inner.zip was
+        # ever decompressed at all. Expand-UnitInPlace claims a stage-dir slot
+        # (NextStageIndex++) every time it runs; zero claimed slots means
+        # Expand-SubmissionArchive was never called for inner.zip.
+        $budget.NextStageIndex | Should -Be 0
+    }
+
+    It 'never lets ExpandedBytes exceed MaxBytes -- look-ahead, not post-hoc (review follow-up)' {
+        # The BUG: the old check was `ExpandedBytes -ge MaxBytes`, evaluated
+        # BEFORE adding the CURRENT member's size -- so the one member whose
+        # OWN size crosses the cap was still accepted (the total only exceeded
+        # the cap AFTER acceptance). Set MaxBytes to one byte less than the sum
+        # of no_dupes.zip's two members combined: the old check would accept
+        # both (each check ran against a total that hadn't crossed the cap
+        # YET); the fix must exclude at least the second.
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'no_dupes.zip'; Path = 'no_dupes.zip'
+                                    RelativePath = 'no_dupes.zip'; StagingPath = $script:Extraction.StagingPath }
+        $totalBytes = (Get-ChildItem -LiteralPath $script:Extraction.StagingPath -Recurse -File |
+            Measure-Object -Property Length -Sum).Sum
+        $budget = New-ArchiveTreeBudget
+        $budget.MaxBytes = $totalBytes - 1
+        $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:TestContext `
+            -Enabled $script:TestEnabled -Budget $budget -Depth 1
+
+        $budget.ExpandedBytes | Should -BeLessOrEqual $budget.MaxBytes
+        @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 1
+    }
+}
+
+Describe 'Archive-member dispatch — shared budget checked BEFORE top-level extraction (review follow-up)' {
+    It 'does not extract a top-level archive once an EARLIER archive in the same scan already exhausted the shared budget' {
+        # The BUG: Invoke-ArchiveMemberDispatch only throttles MEMBER processing
+        # inside an ALREADY-extracted archive -- nothing previously stopped the
+        # top-level scan loop from unconditionally decompressing every
+        # top-level archive first. A submission of many individually-small,
+        # individually-valid archives could exhaust disk before the shared
+        # budget got a chance to block anything.
+        #
+        # Two copies of the SAME single-member archive: with MaxMembers=1,
+        # whichever is processed FIRST exactly exhausts the budget (1 member,
+        # no overshoot -- completes cleanly); the SECOND must be blocked before
+        # Expand-UnitInPlace ever runs on it (order-independent assertions,
+        # since Get-ChildItem enumeration order isn't guaranteed).
+        $srcDir = Join-Path $env:TEMP "mts-p1-src-$(Get-Random)"
+        New-Item -ItemType Directory -Path $srcDir -Force | Out-Null
+        Copy-Item (Join-Path $script:ArcMemDir 'shell_only.zip') (Join-Path $srcDir 'first.zip')
+        Copy-Item (Join-Path $script:ArcMemDir 'shell_only.zip') (Join-Path $srcDir 'second.zip')
+        $out2 = Join-Path $env:TEMP "mts-p1-out-$(Get-Random)"
+        New-Item -ItemType Directory -Path $out2 -Force | Out-Null
+        $origMaxMembers = $script:ArchiveTreeMaxMembers
+        try {
+            $script:ArchiveTreeMaxMembers = 1
+            $r2 = Invoke-Scan -Path $srcDir -Profile core `
+                -AnalyzerDir $script:Analyzers -ReportsDir $out2 -Mode offline
+
+            $opened  = @($r2.Units | Where-Object { @($_.Findings | Where-Object { $_.File -match '!' }).Count -gt 0 })
+            $blocked = @($r2.Units | Where-Object { @($_.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count -gt 0 })
+
+            $opened.Count  | Should -Be 1
+            $blocked.Count | Should -Be 1
+            $opened[0].Name | Should -Not -Be $blocked[0].Name
+
+            # The blocked archive shows NO evidence its contents were ever touched.
+            @($blocked[0].Findings | Where-Object { $_.File -match '!' }).Count | Should -Be 0
+            $blockedFinding = @($blocked[0].Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' })
+            $blockedFinding.Count | Should -Be 1
+            $blockedFinding[0].Issue | Should -Match 'not opened'
+            # The top-level per-unit MTS-NO-ANALYZER check must not ALSO fire --
+            # the budget-exceeded finding already explains the gap.
+            @($blocked[0].Findings | Where-Object { $_.TestID -eq 'MTS-NO-ANALYZER' }).Count | Should -Be 0
+        } finally {
+            $script:ArchiveTreeMaxMembers = $origMaxMembers
+            Remove-Item $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out2 -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

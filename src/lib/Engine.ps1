@@ -236,11 +236,18 @@ function Invoke-ArchiveMemberDispatch {
     $budgetSkipped = 0
 
     for ($i = 0; $i -lt $members.Count; $i++) {
-        if ($Budget.MemberCount -ge $Budget.MaxMembers -or $Budget.ExpandedBytes -ge $Budget.MaxBytes) {
+        $file = $members[$i]
+        # Look-ahead: would ACCEPTING this member push the cumulative total
+        # past the byte cap? Checking the total alone (post-hoc, AFTER
+        # accepting) let the one member that crosses 1GB slip through — its
+        # own size was never weighed against the remaining headroom before it
+        # was admitted. MemberCount's check needs no look-ahead: "count >=
+        # max" and "count + 1 > max" are the same test for an integer tally.
+        if ($Budget.MemberCount -ge $Budget.MaxMembers -or
+            ($Budget.ExpandedBytes + [int64]$file.Length) -gt $Budget.MaxBytes) {
             $budgetSkipped = $members.Count - $i
             break
         }
-        $file = $members[$i]
         $Budget.MemberCount++
         $Budget.ExpandedBytes += [int64]$file.Length
 
@@ -256,21 +263,43 @@ function Invoke-ArchiveMemberDispatch {
         # knows its own immediate relative path, not the parent's label.
         foreach ($f in $classified.Findings) { $f.File = $childRel; $findings.Add($f) }
 
-        $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
-        foreach ($f in $expansion.Findings) { $f.File = $childRel; $findings.Add($f) }
+        # Depth cap MUST be checked before extraction, not after: recursing
+        # into a would-be-too-deep nested archive via Invoke-ArchiveMemberDispatch
+        # would open/decompress it first and only THEN discover, at the top of
+        # that call, that Depth exceeds the cap -- the report would say "not
+        # opened" for an archive that was, in fact, opened. Check here, one
+        # level up, using the depth the RECURSIVE call would run at, and skip
+        # Expand-UnitInPlace entirely when it would already be over the cap.
+        $depthBlocked = $false
+        $recursed     = $false
+        if ((Test-IsArchiveUnit -Unit $childUnit) -and ($Depth + 1) -gt $Budget.MaxDepth) {
+            $depthBlocked = $true
+            $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
+                -Confidence 'HIGH' -UnitType 'archive' -File $childRel `
+                -Issue "Nested archive not opened — depth cap ($($Budget.MaxDepth)) reached." `
+                -TestID 'MTS-ARCHIVE-DEPTH-CAP' `
+                -Recommendation 'Deeply nested archives are a common evasion/bomb vector; inspect this member manually if it is expected content.'))
+            $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
+            foreach ($f in $dispatch.Findings) { $findings.Add($f) }
+        } else {
+            $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
+            foreach ($f in $expansion.Findings) { $f.File = $childRel; $findings.Add($f) }
 
-        $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
-        foreach ($f in $dispatch.Findings) { $findings.Add($f) }
+            $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
+            foreach ($f in $dispatch.Findings) { $findings.Add($f) }
 
-        $recursed = $false
-        if ($expansion.IsArchive -and $childUnit.Type -eq 'archive' -and $childUnit.StagingPath) {
-            $recursed = $true
-            $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
-                -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
-            foreach ($f in $nestedFindings) { $findings.Add($f) }
+            if ($expansion.IsArchive -and $childUnit.Type -eq 'archive' -and $childUnit.StagingPath) {
+                $recursed = $true
+                $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
+                    -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
+                foreach ($f in $nestedFindings) { $findings.Add($f) }
+            }
         }
 
-        if (-not $dispatch.HasCoverage -and -not $recursed) {
+        # Depth-capped and recursed members already carry their own explicit
+        # finding explaining why nothing more is here — don't ALSO fold them
+        # into the generic "no analyzer coverage" aggregate below.
+        if (-not $dispatch.HasCoverage -and -not $depthBlocked -and -not $recursed) {
             $uninspected.Add("$childRel ($($childUnit.Type))")
         }
     }
@@ -352,8 +381,26 @@ function Invoke-Scan {
             foreach ($f in $classified.Findings) { $findings.Add($f) }
 
             # ── Extraction / notebook projection ────────────────────────────
-            $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
-            foreach ($f in $expansion.Findings) { $findings.Add($f) }
+            # Budget check BEFORE extraction, not after: Invoke-ArchiveMemberDispatch
+            # only throttles MEMBER processing inside an already-extracted archive —
+            # nothing previously stopped this loop from unconditionally decompressing
+            # every TOP-LEVEL archive first. A submission of many individually-small,
+            # individually-valid archives could otherwise exhaust disk before the
+            # shared budget ever got a chance to fire.
+            $topLevelBudgetBlocked = $false
+            if ((Test-IsArchiveUnit -Unit $unit) -and
+                ($budget.MemberCount -ge $budget.MaxMembers -or $budget.ExpandedBytes -ge $budget.MaxBytes)) {
+                $topLevelBudgetBlocked = $true
+                $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
+                    -Confidence 'HIGH' -UnitType 'archive' -File $unit.RelativePath `
+                    -Issue ("Archive not opened — the shared archive-tree budget ({0} members / {1:N0} bytes) was already exhausted by earlier archives in this scan." -f `
+                        $budget.MaxMembers, $budget.MaxBytes) `
+                    -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
+                    -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+            } else {
+                $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
+                foreach ($f in $expansion.Findings) { $findings.Add($f) }
+            }
 
             Show-Status "Analyzing: $($unit.RelativePath) [$($unit.Type)]"
 
@@ -387,8 +434,10 @@ function Invoke-Scan {
             # dispatch (above) now answers the deeper "was the content INSIDE
             # the archive inspected" question honestly via its own aggregate
             # finding — this check is skipped for it so the two don't produce
-            # contradictory/redundant notices on the same unit.
-            if (-not $dispatch.HasCoverage -and -not $memberDispatched) {
+            # contradictory/redundant notices on the same unit. Same reasoning
+            # for a top-level archive the budget blocked before extraction: the
+            # MTS-ARCHIVE-BUDGET-EXCEEDED finding above already explains the gap.
+            if (-not $dispatch.HasCoverage -and -not $memberDispatched -and -not $topLevelBudgetBlocked) {
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'parser' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
                     -Issue ("No analyzer covers unit type '{0}' — file was hashed and listed but not inspected." -f $unit.Type) `

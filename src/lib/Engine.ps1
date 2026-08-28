@@ -214,9 +214,12 @@ function Expand-UnitInPlace {
         $Budget.NextStageIndex++
         $safeName = $Unit.Name -replace '[^\w\-.]', '_'
         $stageDir = Join-Path $Context.WorkDir "unit$($Budget.NextStageIndex)_$safeName"
-        $fallback = if ($null -ne $Context.Venv) { $Context.Venv.Python } else { '' }
 
-        $extraction = Expand-SubmissionArchive -InputFile $Unit.Path -OutputDir $stageDir -FallbackPython $fallback
+        # $Budget threaded through so a tarball (the one format whose
+        # uncompressed size can't be read before extraction — issue #31
+        # review) is stream-extracted with per-entry budget enforcement
+        # rather than bulk-written before any accounting can run.
+        $extraction = Expand-SubmissionArchive -InputFile $Unit.Path -OutputDir $stageDir -Budget $Budget
         foreach ($f in $extraction.Findings) { $findings.Add($f) }
 
         if ($extraction.Success) {
@@ -323,17 +326,21 @@ function Invoke-ArchiveMemberDispatch {
         # knows its own immediate relative path, not the parent's label.
         foreach ($f in $classified.Findings) { $f.File = $childRel; $findings.Add($f) }
 
-        # These two traversal gates apply ONLY to a member that will be
-        # member-dispatched further (a GENERIC 'archive' child, recursed into
-        # below) — NOT to a semantic container (python/nuget/model: a wheel/
-        # egg/.nupkg also happens to be a ZIP file, but it is never recursed
-        # into and its whole-staging-tree analyzer (PythonRules/OsvScan/...)
-        # depends on its StagingPath existing. Gating those on depth or budget
-        # blocked PythonRules from ever seeing a wheel's contents and broke
-        # NuGet identity parsing (.nuspec unreadable) whenever an EARLIER,
-        # unrelated generic archive had already used up the shared budget or
-        # nesting depth — semantic containers must always extract.
-        $isGenericArchiveChild = $childUnit.Type -eq 'archive'
+        # A GENERIC 'archive' child (recursed into below) and a ZIP-shaped
+        # SEMANTIC CONTAINER child (wheel/egg/.nupkg -- python/nuget/model,
+        # never recursed into, extracted as a single unit whose whole-
+        # staging-tree analyzer needs StagingPath) are gated differently:
+        # both must never WRITE TO DISK before the budget says the extraction
+        # fits (that's the recurring bug across every round of this review),
+        # but ONLY the generic-archive gate gets a depth cap (a semantic
+        # container is never recursed into, so nesting depth doesn't apply to
+        # it) — and neither gate applies to a TOP-LEVEL semantic container
+        # (Invoke-Scan's own loop), which must always extract regardless of
+        # budget state: it's the unit's ENTIRE content, not one member among
+        # many, so blocking it would leave that whole submitted file
+        # unanalyzed rather than just one archive member unaccounted for.
+        $isGenericArchiveChild    = $childUnit.Type -eq 'archive'
+        $isSemanticContainerChild = (Test-IsArchiveUnit -Unit $childUnit) -and -not $isGenericArchiveChild
 
         # Depth cap MUST be checked before extraction, not after: recursing
         # into a would-be-too-deep nested archive via Invoke-ArchiveMemberDispatch
@@ -372,32 +379,57 @@ function Invoke-ArchiveMemberDispatch {
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
         }
+        # Same look-ahead, for a NESTED semantic container (review follow-up
+        # 3): previously a wheel/.nupkg found as a member was expanded FIRST,
+        # then measured and charged AFTER the fact -- if it was the archive's
+        # last member, the scan could finish over-budget with no finding to
+        # show for it, and up to the per-archive ZIP cap (512MB) could
+        # overshoot silently. A ZIP-shaped semantic container's uncompressed
+        # size IS knowable upfront (its own central directory — the same
+        # estimate Test-ArchiveWouldExceedBudget already reads for a generic
+        # archive), so this is checked and charged BEFORE Expand-UnitInPlace
+        # ever runs, exactly like the generic-archive case above -- unlike
+        # the top-level gate, this one is allowed to block: it's one member
+        # among many in an already budget-constrained parent, not a whole
+        # submission's only content.
+        elseif ($isSemanticContainerChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName -Budget $Budget)) {
+            $budgetBlocked = $true
+            $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
+                -Confidence 'HIGH' -UnitType $childUnit.Type -File $childRel `
+                -Issue 'Semantic container not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
+                -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
+                -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
+            $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
+            foreach ($f in $dispatch.Findings) { $findings.Add($f) }
+        }
         else {
+            # A semantic container's expanded size is never otherwise counted
+            # anywhere (it isn't recursed into, so no per-member loop charges
+            # it) -- charge the PRE-EXTRACTION ESTIMATE, the same one the
+            # look-ahead gate above just used to confirm this fits, BEFORE
+            # Expand-UnitInPlace runs, not the measured real size after --
+            # every budget charge elsewhere in this function happens before
+            # the write it accounts for; measuring after the fact was
+            # exactly the "charge post-hoc" bug this whole review round is
+            # about. A recursed generic archive is NOT charged here too --
+            # its own member loop already charges each of ITS members
+            # individually; doing both would double-count the same bytes.
+            if ($isSemanticContainerChild) {
+                $preEstimate = Get-ArchiveExpansionEstimate -Path $file.FullName
+                if ($null -ne $preEstimate) { $Budget.ExpandedBytes += $preEstimate.Bytes }
+            }
+
             $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
             foreach ($f in $expansion.Findings) { $f.File = $childRel; $findings.Add($f) }
 
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
 
-            if ($expansion.IsArchive -and $childUnit.StagingPath) {
-                if ($isGenericArchiveChild) {
-                    $recursed = $true
-                    $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
-                        -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
-                    foreach ($f in $nestedFindings) { $findings.Add($f) }
-                } else {
-                    # Semantic container (python/nuget/model): not recursed, so
-                    # its expanded size is never otherwise counted anywhere —
-                    # the pre-charge above only counted the compressed file.
-                    # Charge its REAL on-disk footprint so later archives in
-                    # this scan see accurate remaining headroom. A recursed
-                    # generic archive is NOT charged here too — its own member
-                    # loop already charges each of ITS members individually;
-                    # doing both would double-count the same bytes.
-                    $expandedSize = (Get-ChildItem -LiteralPath $childUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                        Measure-Object -Property Length -Sum).Sum
-                    if ($expandedSize) { $Budget.ExpandedBytes += [int64]$expandedSize }
-                }
+            if ($expansion.IsArchive -and $isGenericArchiveChild -and $childUnit.StagingPath) {
+                $recursed = $true
+                $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
+                    -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
+                foreach ($f in $nestedFindings) { $findings.Add($f) }
             }
         }
 

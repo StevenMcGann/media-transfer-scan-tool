@@ -877,6 +877,20 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr(zipfile.ZipInfo('model.bin', FIXED_ZIP_DT), _pickle.dumps(_Exploit()))
 write(os.path.join(ARCMEM_DIR, 'malicious_bin.zip'), buf.getvalue())
 
+# I. A multi-member gzip tarball with deterministic, known per-entry sizes
+#    (review follow-up on #37, third review round). Proves tar extraction is
+#    now STREAMED with per-entry budget enforcement -- unlike the previous
+#    bulk `tar -xzf`/tarfile.extractall(), which wrote every entry before
+#    returning control, a tight budget must leave LATER entries unextracted
+#    while EARLIER ones (within budget) are still written.
+_multi_tar = os.path.join(ARCMEM_DIR, 'multi_member.tgz')
+with _tarfile.open(_multi_tar, 'w:gz') as tf:
+    for _i, _size in enumerate([1000, 2000, 3000], start=1):
+        _data = (str(_i).encode() * _size)[:_size]
+        _info = _tarfile.TarInfo(f'file{_i}.bin'); _info.size = len(_data); _info.mtime = FIXED_EPOCH
+        tf.addfile(_info, io.BytesIO(_data))
+print(f'  wrote {_multi_tar}')
+
 # ─────────────────────────────────────────────────────────────────────────────
 # VB-family fixtures (issue #25) — exported VBA modules and VBScript.
 # Static text only: nothing here is ever executed, and the "payloads" reference
@@ -1049,6 +1063,7 @@ manifest = {
         "archive_member/shell_only.zip":              {"expectHazard": False},
         "archive_member/nested_wheel.zip":            {"expectHazard": False},
         "archive_member/malicious_bin.zip":           {"expectFinding": "PICKLE-REDUCE"},
+        "archive_member/multi_member.tgz":            {"expectHazard": False},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

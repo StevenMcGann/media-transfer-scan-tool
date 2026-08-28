@@ -42,7 +42,7 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
     dispatch's own per-member findings for the same files).
   - `MTS-EXTRACT-NESTED`'s wording no longer claims nested content is "scanned
     at top level only" — it now is opened and scanned, recursively.
-  - Two rounds of independent review on the initial implementation found the
+  - Three rounds of independent review on the initial implementation found the
     budget/depth enforcement above checked too LATE, after the disk cost it
     was meant to prevent had already been paid, plus two coverage gaps:
     - The depth cap and shared byte budget are now checked **before**
@@ -59,25 +59,44 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       was already fully exhausted. Falls back to a conservative 10MB
       safe-headroom threshold for tar/tgz, which has no equivalent cheap
       index.
-    - A nested semantic container's (wheel/`.nupkg`) real EXPANDED size is
-      now charged to the shared budget after extraction — previously only
-      its compressed size as it sat inside the parent archive was counted,
-      so a zip bundling many large wheels could consume far more disk than
-      the budget's own accounting reflected.
+    - A nested semantic container's (wheel/`.nupkg`) EXPANDED size is
+      estimated from its own ZIP central directory and weighed against
+      remaining headroom BEFORE it is extracted — not measured and charged
+      after the fact, which let a zip bundling large wheels finish over
+      budget (once by up to the compressed member's own size, and again
+      when the earliest version of this fix still measured post-extraction)
+      with no finding to show for it.
     - The budget/depth gates now key on the classified unit `Type ==
       'archive'` specifically, not "is a ZIP-format file" — a semantic
       container (wheel/egg/`.nupkg`) is never member-dispatched and does not
-      itself consume this budget, so it must always be allowed to extract
-      regardless of budget state. Gating on the broader check had silently
+      itself consume this budget, so a TOP-LEVEL one must always be allowed
+      to extract regardless of budget state (it's the unit's entire content,
+      not one member among many). Gating on the broader check had silently
       broken `PythonRules`/`PipAudit` and NuGet `.nuspec` parsing for any
       submission after an earlier, unrelated generic archive had already
-      used up the shared budget.
+      used up the shared budget. A NESTED semantic container (one member
+      inside an already budget-constrained parent archive) is still subject
+      to the same look-ahead gate as a nested generic archive — see above.
     - `.bin`, `.h5`, `.hdf5`, `.pb`, `.onnx`, `.npy`, and `.npz` are now
       recognized as `model` type in `Classify.ps1`'s extension map.
       `PickleOpcodeScan`'s removed whole-archive walk used to cover these
       extensions; member dispatch only routes what the classifier recognizes
       as `model`, so a malicious pickle stored under e.g. `model.bin` inside
       a ZIP was silently missed until this was added.
+    - Tarball (`.tgz`/`.tar.gz`) extraction is now streamed entry-by-entry via
+      .NET's `System.Formats.Tar` — no external `tar` binary or Python
+      fallback — checking the shared budget before writing EACH entry and
+      stopping partway through (with an explicit `MTS-ARCHIVE-BUDGET-EXCEEDED`
+      finding) rather than writing everything before any accounting could
+      run. A tar's uncompressed size can't be read upfront the way a ZIP's
+      central directory allows, so bulk extraction (the previous `tar -xzf`/
+      Python `tarfile.extractall()` approach) was the one remaining path
+      where a highly-compressible nested tarball could consume unbounded
+      disk regardless of how tight the budget was. Also closes a pre-existing
+      gap the ZIP path already had: a per-archive aggregate size cap and
+      entry-count cap now apply to tarballs too (no per-entry compression
+      ratio exists for a tar — the whole stream is one continuous gzip, not
+      independently-compressed entries like ZIP).
 
 ## [0.11.0] - 2026-08-27
 

@@ -259,6 +259,9 @@
     },
     "archive_member/malicious_bin.zip": {
       "expectFinding": "PICKLE-REDUCE"
+    },
+    "archive_member/multi_member.tgz": {
+      "expectHazard": false
     }
   }
 }

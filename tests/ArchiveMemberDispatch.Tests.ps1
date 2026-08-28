@@ -51,9 +51,9 @@ AfterAll { Remove-Item $script:Out -Recurse -Force -ErrorAction SilentlyContinue
 # ─────────────────────────────────────────────────────────────────────────────
 Describe 'Archive-member dispatch — unit-count and schema preservation' {
     It 'does not add extracted archive members as top-level Units' {
-        # Eight fixture zips in archive_member/, several with 2+ members each —
+        # Nine fixture archives in archive_member/, several with 2+ members each —
         # the Units array must still have exactly one entry per SUBMITTED file.
-        $R.Units.Count | Should -Be 8
+        $R.Units.Count | Should -Be 9
         @($R.Units | Where-Object { $_.Name -match '\.(sh|js|py|txt|json|pkl|whl|bin)$' }).Count | Should -Be 0
     }
 
@@ -546,5 +546,188 @@ Describe 'Archive-member dispatch — budget gate never blocks semantic containe
             $script:ArchiveTreeMaxBytes   = $origMaxBytes
             Remove-Item $srcDir, $out2 -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Third Codex review on PR #37 (commit 06a207b): the SAME root problem in two
+# more places -- extraction still happened before budget enforcement.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Describe 'Tarball extraction — streamed with per-entry budget enforcement (review follow-up 3, #1)' {
+    # The BUG: tar was bulk-extracted (`tar -xzf` / Python tarfile.extractall()),
+    # writing EVERY entry before returning control -- a highly-compressible
+    # tarball could consume unbounded disk before any budget accounting ever
+    # ran. multi_member.tgz's 3 entries (1000/2000/3000 real bytes each,
+    # ~168 compressed TOTAL via gzip) make that gap concrete: its on-disk size
+    # gives no hint of what it actually writes.
+    BeforeAll {
+        $script:MultiTar = Join-Path $script:ArcMemDir 'multi_member.tgz'
+    }
+
+    It 'extracts every entry when the budget comfortably fits (baseline)' {
+        $stage = Join-Path $env:TEMP "mts-p5r1-full-$(Get-Random)"
+        try {
+            $budget = New-ArchiveTreeBudget
+            $r = Expand-SubmissionArchive -InputFile $script:MultiTar -OutputDir $stage -Budget $budget
+            $r.Success | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $stage -File -Recurse).Count | Should -Be 3
+            $budget.ExpandedBytes | Should -Be 6000   # 1000 + 2000 + 3000
+            @($r.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+        } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'stops mid-stream once the budget is reached -- LATER entries are never written' {
+        $stage = Join-Path $env:TEMP "mts-p5r1-partial-$(Get-Random)"
+        try {
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxBytes = 2500   # room for file1 (1000) + file2 (2000) is 3000 -- too much;
+                                      # room for file1 alone (1000) is comfortable; file2 (2000 more,
+                                      # cumulative 3000) exceeds 2500 -- extraction must stop AT file2.
+            $r = Expand-SubmissionArchive -InputFile $script:MultiTar -OutputDir $stage -Budget $budget
+            $r.Success | Should -BeTrue   # stopping early is normal, not an error
+            $extracted = @(Get-ChildItem -LiteralPath $stage -File -Recurse)
+            $extracted.Count | Should -Be 1
+            $extracted[0].Name | Should -Be 'file1.bin'
+            # Decisive proof file2/file3 were NEVER WRITTEN (not written-then-
+            # deleted) -- the directory has exactly the one file, nothing else.
+            $budget.ExpandedBytes | Should -Be 1000
+            $budget.ExpandedBytes | Should -BeLessOrEqual $budget.MaxBytes
+            @($r.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 1
+        } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'writes NOTHING when the budget has no room at all' {
+        $stage = Join-Path $env:TEMP "mts-p5r1-none-$(Get-Random)"
+        try {
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxBytes = 0
+            $r = Expand-SubmissionArchive -InputFile $script:MultiTar -OutputDir $stage -Budget $budget
+            $r.Success | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $stage -File -Recurse -ErrorAction SilentlyContinue).Count | Should -Be 0
+            $budget.ExpandedBytes | Should -Be 0
+        } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'is unbounded when no budget is supplied (direct callers unaffected)' {
+        $stage = Join-Path $env:TEMP "mts-p5r1-nobudget-$(Get-Random)"
+        try {
+            $r = Expand-SubmissionArchive -InputFile $script:MultiTar -OutputDir $stage
+            $r.Success | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $stage -File -Recurse).Count | Should -Be 3
+        } finally { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'still rejects a path-traversal entry in a tarball' {
+        # Regression: the rewrite must keep tar's existing zip-slip protection.
+        $tmpDir = Join-Path $env:TEMP "mts-p5r1-trav-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $tarPath = Join-Path $tmpDir 'traversal.tgz'
+        # Build a traversal tarball directly with .NET -- no Python dependency.
+        $fileStream = [System.IO.File]::Create($tarPath)
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        $tarWriter  = [System.Formats.Tar.TarWriter]::new($gzipStream)
+        try {
+            $entry = [System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile, '../../escape.txt')
+            $entry.DataStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes('pwned'))
+            $tarWriter.WriteEntry($entry)
+        } finally { $tarWriter.Dispose(); $gzipStream.Dispose(); $fileStream.Dispose() }
+
+        $stage = Join-Path $env:TEMP "mts-p5r1-trav-stage-$(Get-Random)"
+        try {
+            $r = Expand-SubmissionArchive -InputFile $tarPath -OutputDir $stage -Budget (New-ArchiveTreeBudget)
+            $r.Success | Should -BeFalse
+            @($r.Findings | Where-Object { $_.TestID -eq 'MTS-EXTRACT-TRAVERSAL' }).Count | Should -Be 1
+            @(Get-ChildItem -LiteralPath $stage -File -Recurse -ErrorAction SilentlyContinue).Count | Should -Be 0
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'still extracts a real submitted tarball end-to-end through the full engine (regression)' {
+        # The one existing functional test that depends on tar extraction
+        # actually working end-to-end, re-affirmed here for this fix's own
+        # test suite: Npm.Tests.ps1 already covers this via the full pipeline.
+        $r = ScanDir 'npm/tarball'
+        $u = $r.Units | Where-Object { $_.Name -like '*.tgz' }
+        @($u.Findings | Where-Object { $_.TestID -eq 'NPM-LIFECYCLE-SCRIPT' }).Count | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Archive-member dispatch — semantic-container budget check is pre-hoc, not post-hoc (review follow-up 3, #2)' {
+    BeforeAll {
+        $script:P5r2Stage = Join-Path $env:TEMP "mts-p5r2-stage-$(Get-Random)"
+        $script:P5r2Extraction = Expand-SubmissionArchive `
+            -InputFile (Join-Path $script:ArcMemDir 'nested_wheel.zip') -OutputDir $script:P5r2Stage
+        $script:P5r2Context = [PSCustomObject]@{
+            Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = (Join-Path $env:TEMP "mts-p5r2-work-$(Get-Random)")
+            ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+        }
+        New-Item -ItemType Directory -Path $script:P5r2Context.WorkDir -Force | Out-Null
+        $script:P5r2Enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) |
+            Where-Object { $_.DefaultEnabled })
+    }
+    AfterAll {
+        Remove-Item $script:P5r2Stage -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $script:P5r2Context.WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'never extracts a nested wheel whose estimated size would exceed remaining headroom' {
+        # The BUG: a nested wheel/.nupkg was expanded FIRST via Expand-UnitInPlace,
+        # then measured and charged AFTER the fact -- there was no gate at all,
+        # so it always extracted regardless of budget, potentially overshooting
+        # by up to the per-archive ZIP cap (512MB) with no finding to show for
+        # it. Fixed: the SAME central-directory estimate used for a generic
+        # archive is read for a semantic container BEFORE Expand-UnitInPlace
+        # runs, and extraction is skipped entirely if it wouldn't fit.
+        $wheelPath = @(Get-ChildItem -LiteralPath $script:P5r2Extraction.StagingPath -Filter '*.whl' -Recurse)[0].FullName
+        $estimate = Get-ArchiveExpansionEstimate -Path $wheelPath
+        $estimate | Should -Not -BeNullOrEmpty
+        $compressedWheelSize = (Get-Item $wheelPath).Length
+
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'nested_wheel.zip'; Path = 'nested_wheel.zip'
+                                    RelativePath = 'nested_wheel.zip'; StagingPath = $script:P5r2Extraction.StagingPath }
+        $budget = New-ArchiveTreeBudget
+        # Enough room for the PRE-EXISTING per-member pre-charge (the wheel's
+        # own compressed-file size, charged unconditionally for any accepted
+        # member before this fix's gate even runs) but one byte short of ALSO
+        # fitting its estimated expanded content -- isolates THIS gate from
+        # the older, generic per-member budget check.
+        $budget.MaxBytes = $compressedWheelSize + $estimate.Bytes - 1
+        $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:P5r2Context `
+            -Enabled $script:P5r2Enabled -Budget $budget -Depth 1
+
+        $blocked = @($findings | Where-Object {
+            $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.File -eq 'nested_wheel.zip!bundled.whl' })
+        $blocked.Count | Should -Be 1
+
+        # Decisive proof extraction never even started: NextStageIndex (claimed
+        # by Expand-UnitInPlace every time it actually runs) stayed at 0.
+        $budget.NextStageIndex | Should -Be 0
+        # Only the generic per-member pre-charge (the wheel's own compressed
+        # size) landed -- this fix's gate blocks BEFORE adding the estimate,
+        # so the total must stop there, not silently include it anyway.
+        $budget.ExpandedBytes | Should -Be $compressedWheelSize
+    }
+
+    It 'charges the ESTIMATE before extraction when it DOES fit, not the measured size after' {
+        $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'nested_wheel.zip'; Path = 'nested_wheel.zip'
+                                    RelativePath = 'nested_wheel.zip'; StagingPath = $script:P5r2Extraction.StagingPath }
+        $budget = New-ArchiveTreeBudget
+        Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $script:P5r2Context `
+            -Enabled $script:P5r2Enabled -Budget $budget -Depth 1 | Out-Null
+
+        # The wheel WAS extracted this time (fits comfortably) -- confirm the
+        # charge matches the pre-extraction estimate exactly (not a smaller or
+        # larger post-hoc measurement -- a ZIP central directory's reported
+        # size and the real extracted size are the same number, but WHICH one
+        # was actually used matters for the invariant this fix restores: never
+        # charge after a write that already happened).
+        $wheelPath = @(Get-ChildItem -LiteralPath $script:P5r2Extraction.StagingPath -Filter '*.whl' -Recurse)[0].FullName
+        $estimate = Get-ArchiveExpansionEstimate -Path $wheelPath
+        $compressedWheelSize = (Get-Item $wheelPath).Length
+        $budget.ExpandedBytes | Should -Be ($compressedWheelSize + $estimate.Bytes)
+        $budget.NextStageIndex | Should -Be 1   # it WAS extracted
     }
 }

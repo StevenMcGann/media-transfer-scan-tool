@@ -8,6 +8,8 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-28
+
 ### Security
 - **NuGet identity spoofing via a nested decoy `<metadata>` block** — a
   `.nupkg` with exactly one root `.nuspec` (so it passes the existing
@@ -33,7 +35,16 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
   querybatch still produces a finding via the existing "detail unavailable"
   fallback when the fetch stops early — none are silently dropped — and the
   skipped advisories are reported as an explicit coverage-gap finding, grouped
-  by manifest.
+  by manifest. The stopped-early message also now reads "were skipped without
+  an attempt (not just failed)" rather than the more ambiguous "were not
+  fetched", to distinguish never-attempted advisories from attempted-and-failed
+  ones (only the former count toward the reported number).
+
+Both findings were caught by independent review of #33/#32 after it shipped
+in 0.11.0; neither had a live exploit reported. Regression coverage added:
+`nuget/nested_decoy` (plus direct fixtures for the new fail-closed shape
+checks — two root `<metadata>` elements, a duplicate `<id>`, a missing
+`<version>`) and a mocked failure→success→failure detail-fetch test.
 
 ## [0.11.0] - 2026-08-27
 

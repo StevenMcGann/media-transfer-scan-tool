@@ -217,16 +217,55 @@
                 return $null
             }
 
-            # Namespace-agnostic: the nuspec xmlns URI has changed across NuGet
-            # client versions (2010/05, 2011/08, 2012/06, 2013/01, 2013/05, ...).
-            $idNode  = $xml.SelectSingleNode("//*[local-name()='metadata']/*[local-name()='id']")
-            $verNode = $xml.SelectSingleNode("//*[local-name()='metadata']/*[local-name()='version']")
-            $id  = if ($idNode)  { $idNode.InnerText.Trim() }  else { '' }
-            $ver = if ($verNode) { $verNode.InnerText.Trim() } else { '' }
+            # Read ONLY the root <package>'s direct-child <metadata> — never a
+            # document-wide search. A `//` XPath (the previous approach) matches
+            # a <metadata> ANYWHERE in the tree, in document order: a decoy
+            # <metadata><id>Benign</id>...</metadata> nested inside some other
+            # element ahead of the real one resolves to the decoy's identity,
+            # and the package's real (possibly vulnerable) identity is never
+            # queried — the same evasion the multi-root-.nuspec check above
+            # blocks, just one level down, inside a single nuspec file. PoC
+            # verified before this fix: a <decoy><metadata><id>Totally.Benign
+            # .Package</id>... resolved ahead of a real Newtonsoft.Json 12.0.1
+            # <package><metadata> sibling.
+            # Namespace-agnostic on LocalName only: the nuspec xmlns URI has
+            # changed across NuGet client versions (2010/05, 2011/08, 2012/06,
+            # 2013/01, 2013/05, ...) — comparing by local-name, not full name,
+            # is unaffected by which one a given package declares.
+            $root = $xml.DocumentElement
+            if (-not $root -or $root.LocalName -ne 'package') {
+                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
+                    -UnitType 'nuget' -File $Unit.RelativePath `
+                    -Issue ".nuspec root element is '$(if ($root) { $root.LocalName } else { '<none>' })', not <package> — cannot identify the package for an OSV lookup." `
+                    -TestID 'OSV-NUGET-MALFORMED'))
+                return $null
+            }
+            $metadataNodes = @($root.ChildNodes | Where-Object { $_.LocalName -eq 'metadata' })
+            if ($metadataNodes.Count -ne 1) {
+                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
+                    -UnitType 'nuget' -File $Unit.RelativePath `
+                    -Issue ".nuspec has $($metadataNodes.Count) <metadata> element(s) directly under <package> (expected exactly 1) -- ambiguous identity, cannot identify the package for an OSV lookup." `
+                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
+                    -Recommendation 'A valid nuspec has exactly one <package><metadata> element. Treat this package as suspect and inspect it manually.'))
+                return $null
+            }
+            $metadata = $metadataNodes[0]
+            $idNodes  = @($metadata.ChildNodes | Where-Object { $_.LocalName -eq 'id' })
+            $verNodes = @($metadata.ChildNodes | Where-Object { $_.LocalName -eq 'version' })
+            if ($idNodes.Count -ne 1 -or $verNodes.Count -ne 1) {
+                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
+                    -UnitType 'nuget' -File $Unit.RelativePath `
+                    -Issue ".nuspec <metadata> has $($idNodes.Count) <id> and $($verNodes.Count) <version> element(s) (expected exactly 1 each) -- ambiguous identity, cannot identify the package for an OSV lookup." `
+                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
+                    -Recommendation 'A valid nuspec has exactly one <id> and one <version> in <metadata>. Treat this package as suspect and inspect it manually.'))
+                return $null
+            }
+            $id  = $idNodes[0].InnerText.Trim()
+            $ver = $verNodes[0].InnerText.Trim()
             if (-not $id -or -not $ver) {
                 $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
                     -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue '.nuspec is missing <id> and/or <version> — cannot identify the package for an OSV lookup.' `
+                    -Issue '.nuspec <id> and/or <version> is empty — cannot identify the package for an OSV lookup.' `
                     -TestID 'OSV-NUGET-NO-NUSPEC'))
                 return $null
             }

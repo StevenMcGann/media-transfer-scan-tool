@@ -235,6 +235,24 @@
     "archive/traversal.zip": {
       "expectFinding": "MTS-EXTRACT-TRAVERSAL",
       "blocked": true
+    },
+    "archive_member/disguised_and_scripts.zip": {
+      "expectFinding": "MTS-DISGUISE-002"
+    },
+    "archive_member/js_no_pkg.zip": {
+      "expectFinding": "NPM-JS-CHILD-PROCESS"
+    },
+    "archive_member/two_level_nested.zip": {
+      "expectFinding": "SHELL-B64-EXEC"
+    },
+    "archive_member/nested_bomb.zip": {
+      "expectFinding": "MTS-EXTRACT-BOMB"
+    },
+    "archive_member/no_dupes.zip": {
+      "expectFinding": "NPM-LIFECYCLE-SCRIPT"
+    },
+    "archive_member/shell_only.zip": {
+      "expectHazard": false
     }
   }
 }

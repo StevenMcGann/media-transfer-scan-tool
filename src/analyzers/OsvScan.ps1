@@ -10,10 +10,15 @@
                an explicit "unpinned, OSV skipped" finding rather than
                silently passed over — a fuzzy specifier can't be matched to
                one OSV record with confidence.
-      - npm:   package-lock.json (loose 'npm' unit, or found inside an
-               extracted 'archive' unit) — schema v1 (`dependencies`) and
-               v2/v3 (`packages`); lockfile versions are always exact-resolved,
-               so there is no "unpinned" case here.
+      - npm:   package-lock.json — a loose 'npm' unit. A lockfile inside a
+               GENERIC archive is classified as its own 'npm' unit by
+               recursive archive-member dispatch (issue #31) and reaches the
+               exact same loose-unit path; this used to ALSO walk a whole npm
+               tarball's StagingPath itself (UnitTypes included 'archive'),
+               removed since that duplicated member dispatch's own findings
+               for the same lockfile. Schema v1 (`dependencies`) and v2/v3
+               (`packages`); lockfile versions are always exact-resolved, so
+               there is no "unpinned" case here.
       - NuGet: a .nupkg's OWN identity (id + version read from its embedded
                .nuspec, namespace-agnostically — the schema URI has changed
                across NuGet client versions). The artifact itself is the
@@ -33,8 +38,8 @@
 #>
 @{
     Name           = 'OsvScan'
-    Version        = '0.1.0'
-    UnitTypes      = @('python-requirements', 'npm', 'archive', 'nuget')
+    Version        = '0.2.0'
+    UnitTypes      = @('python-requirements', 'npm', 'nuget')
     RequiredTools  = @()
     Offline        = $true   # no tool to provision; the OSV call itself needs network
     Tier           = 'core'
@@ -276,30 +281,15 @@
                 if ($dep) { $deps = @($dep) }
             }
             default {
-                # 'npm' (loose) or 'archive' (extracted .tgz) — find package-lock.json.
-                $lockFiles = [System.Collections.Generic.List[string]]::new()
-                if ($Unit.Type -eq 'archive') {
-                    if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
-                              (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return @() }
-                    Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'package-lock.json' -ErrorAction SilentlyContinue |
-                        ForEach-Object { $lockFiles.Add($_.FullName) }
-                } elseif ($Unit.Name.ToLowerInvariant() -eq 'package-lock.json') {
-                    $lockFiles.Add($Unit.Path)
-                }
-                if ($lockFiles.Count -eq 0) { return @() }   # not an npm package / no lockfile — nothing for this analyzer here
-
-                $manifestRel = if ($Unit.Type -eq 'archive' -and $Unit.StagingPath -and $lockFiles[0].StartsWith($Unit.StagingPath)) {
-                    "$($Unit.RelativePath)!" + $lockFiles[0].Substring($Unit.StagingPath.Length).TrimStart('\', '/')
-                } else { $Unit.RelativePath }
-
-                $allDeps = [System.Collections.Generic.List[object]]::new()
-                foreach ($lock in $lockFiles) {
-                    $lockRel = if ($Unit.Type -eq 'archive' -and $Unit.StagingPath -and $lock.StartsWith($Unit.StagingPath)) {
-                        "$($Unit.RelativePath)!" + $lock.Substring($Unit.StagingPath.Length).TrimStart('\', '/')
-                    } else { $Unit.RelativePath }
-                    foreach ($d in @(Get-NpmLockDeps -LockPath $lock -Rel $lockRel -Findings $findings)) { $allDeps.Add($d) }
-                }
-                $deps = $allDeps.ToArray()
+                # 'npm' — a loose package-lock.json. A lockfile found inside a
+                # GENERIC archive is classified as its own 'npm' unit by
+                # recursive archive-member dispatch (issue #31) and reaches
+                # this exact branch — this used to ALSO walk a whole npm
+                # tarball's StagingPath itself (UnitTypes included 'archive');
+                # removed, since that would now duplicate every finding member
+                # dispatch already produces for the same lockfile.
+                if ($Unit.Name.ToLowerInvariant() -ne 'package-lock.json') { return @() }
+                $deps = @(Get-NpmLockDeps -LockPath $Unit.Path -Rel $Unit.RelativePath -Findings $findings)
             }
         }
 

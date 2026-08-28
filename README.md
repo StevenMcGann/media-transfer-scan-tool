@@ -47,12 +47,12 @@ The current release includes coverage for:
 - NuGet packages
 - PE and ELF binary inspection
 - Pickle-based and common machine-learning model formats
-- ZIP-family and tar archives, including path traversal and decompression-bomb controls
+- ZIP-family and tar archives, including path traversal and decompression-bomb controls, with every extracted member recursively classified and scanned by the full analyzer set (nested archives included, to a bounded depth/size budget)
 - Known dependency vulnerabilities through OSV.dev for supported PyPI, npm, and NuGet inputs
 
 The default **core** profile favors focused, higher-signal checks. The **full** profile adds Bandit and detect-secrets, which provide broader coverage but may generate more review noise.
 
-Files for which no enabled analyzer claims meaningful coverage receive an explicit `MTS-NO-ANALYZER` finding. Tool failures and blocked external analyzers are also surfaced; they are not treated as clean results.
+Files for which no enabled analyzer claims meaningful coverage receive an explicit `MTS-NO-ANALYZER` finding (an uninspected archive member gets an aggregate `MTS-ARCHIVE-MEMBER-UNINSPECTED` note on its parent archive instead, so a large archive doesn't produce one warning per file). Tool failures and blocked external analyzers are also surfaced; they are not treated as clean results.
 
 For the stable JSON schema, analyzer contract, CLI surface, and exit codes, see [docs/contract.md](docs/contract.md).
 

@@ -109,7 +109,13 @@ function Test-ZipArchiveHazards {
                 -Recommendation 'Review — symlinks in archives can redirect writes/reads outside the tree.'))
         }
 
-        # ── Nested archives — flag (extracted top-level only; no recursion) ──
+        # ── Nested archives — flag (informational; recursed by the engine) ───
+        # Generic 'archive' units are recursively member-dispatched (issue #31):
+        # a nested archive found here IS opened, extracted, and its own members
+        # classified and analyzed, subject to the shared depth/count/byte budget
+        # (Engine.ps1). This finding is now purely informational -- it names
+        # what nesting was present, not a coverage gap by itself; a real gap
+        # (depth/budget exhausted) gets its own explicit finding at that point.
         $nested = @($entryNames | Where-Object {
             $n = $_.ToLowerInvariant()
             @($script:NestedArchiveExt | Where-Object { $n.EndsWith($_) }).Count -gt 0
@@ -117,9 +123,9 @@ function Test-ZipArchiveHazards {
         if ($nested.Count -gt 0) {
             $findings.Add((New-Finding -Tool 'Extractor' -Category 'archive-hazard' `
                 -Severity 'LOW' -Confidence 'MEDIUM' -UnitType 'archive' -File $RelPath `
-                -Issue "Archive contains $($nested.Count) nested archive(s) (scanned at top level only): $(($nested | Select-Object -First 3) -join ', ')" `
+                -Issue "Archive contains $($nested.Count) nested archive(s): $(($nested | Select-Object -First 3) -join ', ')" `
                 -TestID 'MTS-EXTRACT-NESTED' `
-                -Recommendation 'Review nested archives separately — they are a common bomb/evasion vector.'))
+                -Recommendation 'Nested archives are a common bomb/evasion vector — review the recursively-scanned findings for these members.'))
         }
     } finally {
         $zip.Dispose()

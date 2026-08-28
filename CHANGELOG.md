@@ -8,6 +8,41 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **Recursive archive-member dispatch** ([#31](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/31)).
+  Contents of a generic `archive` unit (`.zip`, `.tgz`/`.tar.gz`) were previously
+  only inspected for npm content (`NpmScan`) and model content
+  (`PickleOpcodeScan`) — anything else extracted from a ZIP was never analyzed,
+  and nothing said so. Every extracted member is now classified by content
+  (`New-Unit`, reused as-is — a disguised script hiding behind an innocent
+  extension, e.g. `payload.txt`, is caught for free) and dispatched through the
+  full analyzer set (`Invoke-UnitDispatch`, factored out of the top-level scan
+  loop for reuse), with findings folded onto the PARENT archive using the
+  existing `archive!inner/path` label — members are never added as new
+  top-level `Units`, so the v1 JSON schema and unit counts are unchanged.
+  - A nested archive is extracted the same hardened way (zip-slip/
+    decompression-bomb/symlink guards run before every extraction, at every
+    depth) and recursed into, subject to a depth cap (default 5) and a
+    cumulative member-count/byte budget (default 5000 members / 1GB) **shared
+    across the whole scan run**, not reset per archive — many individually-small
+    archives can't bypass the cap by splitting content across them. Exceeding
+    either produces an explicit `MTS-ARCHIVE-DEPTH-CAP` /
+    `MTS-ARCHIVE-BUDGET-EXCEEDED` finding naming the skipped member(s).
+  - A member with no type-specific analyzer coverage is not given its own
+    finding (that would be one warning per README/data file in a large
+    archive) — uncovered members are aggregated into one
+    `MTS-ARCHIVE-MEMBER-UNINSPECTED` INFO finding per parent archive, so a
+    disabled or unsupported type never silently reads as "reviewed and clean".
+  - Semantic containers (wheels/eggs, `.nupkg`, PyTorch `.pt/.pth`) are
+    extracted but NOT member-dispatched — their existing whole-staging-tree
+    analyzer (PythonRules/PipAudit/OsvScan/PickleOpcodeScan) already covers
+    them, and recursing further would duplicate those findings. `NpmScan`,
+    `PickleOpcodeScan`, and `OsvScan`'s old generic-`archive` whole-tree walks
+    are removed (now redundant with, and would have duplicated, member
+    dispatch's own per-member findings for the same files).
+  - `MTS-EXTRACT-NESTED`'s wording no longer claims nested content is "scanned
+    at top level only" — it now is opened and scanned, recursively.
+
 ## [0.11.0] - 2026-08-27
 
 ### Added

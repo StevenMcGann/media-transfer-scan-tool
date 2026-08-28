@@ -321,17 +321,6 @@ function Invoke-ArchiveMemberDispatch {
     }
 
     $members = @(Get-ChildItem -LiteralPath $ArchiveUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue)
-    # TEMP DEBUG (issue #31 CI investigation — remove before merge): CI's
-    # Windows runner shows a spurious literal "zip\" segment inserted into
-    # member File labels that never reproduces locally. Print the raw
-    # StagingPath and one real extracted FullName to see whether the staging
-    # directory itself, or just the label math, is where the value diverges.
-    if ($members.Count -gt 0) {
-        Write-Host "DEBUG-ARCMEM archiveUnit.Name=$($ArchiveUnit.Name)"
-        Write-Host "DEBUG-ARCMEM archiveUnit.StagingPath=[$($ArchiveUnit.StagingPath)] (Length=$($ArchiveUnit.StagingPath.Length))"
-        Write-Host "DEBUG-ARCMEM members[0].FullName=[$($members[0].FullName)]"
-        Write-Host "DEBUG-ARCMEM members[0].FullName.Substring=[$($members[0].FullName.Substring($ArchiveUnit.StagingPath.Length))]"
-    }
     $uninspected   = [System.Collections.Generic.List[string]]::new()
     $budgetSkipped = 0
 
@@ -541,6 +530,21 @@ function Invoke-Scan {
     $scanRoot     = (Resolve-Path -LiteralPath $Path).ProviderPath
     $stamp        = Get-Date -Format 'yyyyMMdd_HHmmss'
     $stagingRoot  = Join-Path $env:TEMP "mts-staging-$stamp-$(Get-Random)"
+    New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
+    # Canonicalize to the long-name form. $env:TEMP resolves through an 8.3
+    # short name on some Windows hosts (observed on GitHub Actions
+    # windows-latest runners: C:\Users\RUNNER~1\... rather than
+    # C:\Users\runneradmin\...) -- DirectoryInfo.FullName expands it (unlike
+    # Resolve-Path, which leaves it alone), and it must be expanded HERE,
+    # once, before anything is built from it. Every archive-member inner-path
+    # computation (Invoke-ArchiveMemberDispatch) does
+    # $file.FullName.Substring($ArchiveUnit.StagingPath.Length), assuming
+    # StagingPath is a literal character-for-character prefix of FullName --
+    # Get-ChildItem always reports the long form when it enumerates, so a
+    # short-form StagingPath silently truncates by the length difference,
+    # swallowing the tail of the archive's own staging-dir name (e.g. "zip",
+    # "tgz") into what should have been the member's inner path.
+    $stagingRoot  = (Get-Item -LiteralPath $stagingRoot).FullName
 
     # Default HelperDir as sibling of the analyzers dir (src/helpers).
     if (-not $HelperDir -and $AnalyzerDir) {
@@ -561,8 +565,6 @@ function Invoke-Scan {
     $unitResults = [System.Collections.Generic.List[object]]::new()
 
     try {
-        New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
-
         foreach ($file in Get-DiscoveredFiles -ScanRoot $scanRoot) {
             $classified = New-Unit -File $file -ScanRoot $scanRoot
             $unit       = $classified.Unit

@@ -916,3 +916,53 @@ Describe 'Archive-member dispatch — phantom-byte precharge rolled back on fail
         }
     }
 }
+
+Describe 'Invoke-Scan — staging root survives an 8.3 short-name $env:TEMP (review follow-up 5, #5)' {
+    It 'does not truncate archive-member inner paths when $env:TEMP resolves through an 8.3 short name' {
+        # The BUG (CI-only failures that never reproduced locally across
+        # several rounds): $stagingRoot was built directly from $env:TEMP and
+        # used verbatim as the prefix for $file.FullName.Substring(...)
+        # everywhere in Invoke-ArchiveMemberDispatch. On a host where
+        # $env:TEMP resolves through an 8.3 short name (confirmed on GitHub
+        # Actions windows-latest runners: C:\Users\RUNNER~1\... for
+        # C:\Users\runneradmin\...), Get-ChildItem's FullName -- which always
+        # reports the LONG form when it enumerates -- no longer shares a
+        # character-for-character prefix with StagingPath, silently
+        # truncating the inner path by the length difference and swallowing
+        # the tail of the archive's own staging-dir name (e.g. "zip", "tgz")
+        # into what should have been the member's inner path alone.
+        #
+        # Reproduced here without needing an actual CI runner: build a
+        # deliberately long-named directory (long enough that NTFS assigns it
+        # an 8.3 alias -- true on every Windows host that hasn't disabled
+        # short-name generation entirely, not just CI's) and point $env:TEMP
+        # at it for the duration of one Invoke-Scan call.
+        $fso = New-Object -ComObject Scripting.FileSystemObject
+        $fakeTempLong = Join-Path $env:TEMP "mts-fake-temp-profile-longname-$(Get-Random)"
+        New-Item -ItemType Directory -Path $fakeTempLong -Force | Out-Null
+        $fakeTempShort = $fso.GetFolder($fakeTempLong).ShortPath
+
+        if ($fakeTempShort -eq $fakeTempLong) {
+            Remove-Item -LiteralPath $fakeTempLong -Recurse -Force -ErrorAction SilentlyContinue
+            Set-ItResult -Skipped -Because '8.3 short-name generation is disabled on this volume -- cannot reproduce the triggering condition here.'
+            return
+        }
+
+        $origTemp = $env:TEMP
+        try {
+            $env:TEMP = $fakeTempShort
+            $out = Join-Path $fakeTempLong 'out'
+            New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+            $r = Invoke-Scan -Path $script:ArcMemDir -Profile core `
+                -AnalyzerDir $script:Analyzers -ReportsDir $out -Mode offline
+            $u = $r.Units | Where-Object { $_.Name -eq 'two_level_nested.zip' }
+            $hit = @($u.Findings | Where-Object { $_.TestID -eq 'SHELL-B64-EXEC' })
+            $hit.Count | Should -Be 1
+            $hit[0].File | Should -Be "two_level_nested.zip!inner.zip!deep${script:S}risky.sh"
+        } finally {
+            $env:TEMP = $origTemp
+            Remove-Item -LiteralPath $fakeTempLong -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

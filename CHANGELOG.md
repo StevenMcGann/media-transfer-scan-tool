@@ -145,6 +145,26 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
         shared byte budget with phantom bytes and no content to show for it.
         The precharge is now a reservation, rolled back if `StagingPath`
         never gets set.
+    - Also root-caused a CI-only Pester failure (9 tests in
+      `ArchiveMemberDispatch.Tests.ps1`, never reproduced across several
+      earlier attempts on identical pwsh/fixtures): `$stagingRoot`
+      (`Invoke-Scan`) was built directly from `$env:TEMP` and used verbatim
+      as the prefix for `$file.FullName.Substring(...)` throughout
+      `Invoke-ArchiveMemberDispatch`. On a host where `$env:TEMP` resolves
+      through an 8.3 short name (confirmed on GitHub Actions
+      `windows-latest` runners: `C:\Users\RUNNER~1\...` for
+      `C:\Users\runneradmin\...`), `Get-ChildItem`'s `FullName` — always the
+      long form when it enumerates — no longer shares a character-for-
+      character prefix with `StagingPath`, silently truncating every
+      archive-member inner path by the length difference and swallowing the
+      tail of the archive's own staging-dir name (e.g. `zip`, `tgz`) into
+      what should have been the member's inner path alone. `$stagingRoot` is
+      now canonicalized once, right after creation, via
+      `(Get-Item -LiteralPath $stagingRoot).FullName` (which expands an 8.3
+      alias; `Resolve-Path` does not) — a regression test reproduces the
+      exact failure by pointing `$env:TEMP` at a deliberately long-named
+      directory for one `Invoke-Scan` call, verified failing against the
+      pre-fix code.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

@@ -185,6 +185,15 @@
     "nuget/nested_decoy/Spoofed.1.0.0.nupkg": {
       "expectOsvOnline": true
     },
+    "nuget/multi_metadata/MultiMeta.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
+    },
+    "nuget/duplicate_id/DupeId.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
+    },
+    "nuget/missing_version/NoVersion.1.0.0.nupkg": {
+      "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
+    },
     "model/safe.pkl": {
       "expectDeserialization": false
     },

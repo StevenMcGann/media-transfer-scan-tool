@@ -226,6 +226,40 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         $stopped[0].Issue | Should -Match '3 of 5'
         $stopped[0].File  | Should -Be 'requirements.txt'
     }
+
+    It 'resets the detail-fetch consecutive-failure counter on a success (review follow-up)' {
+        # fail, succeed, fail, succeed -- with MaxConsecutiveFailures 2, this
+        # must NOT stop early: no two failures ever occur back-to-back, so the
+        # counter should reset to 0 on every success. Locks in that the
+        # counter is CONSECUTIVE, not a cumulative total across the whole loop.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..4 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailAttempts = [System.Collections.Generic.List[string]]::new()
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            $script:detailAttempts.Add($Id)
+            if ($Id -in @('GHSA-test-0001', 'GHSA-test-0003')) { throw "simulated failure for $Id" }
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'LOW' } }
+        }
+
+        $deps = 1..4 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps -MaxConsecutiveFailures 2)
+
+        # All 4 distinct ids were attempted -- the loop never stopped early.
+        $script:detailAttempts.Count | Should -Be 4
+        # No "stopped after consecutive failures" aggregate note fired.
+        @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' }).Count | Should -Be 0
+        # All 4 confirmed hits are still reported: 2 with full detail (severity
+        # LOW from the mocked record), 2 via the "detail unavailable" fallback
+        # (severity HIGH, the conservative default for an unscored known vuln).
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 4
+        @($vulns | Where-Object { $_.Severity -eq 'LOW' }).Count  | Should -Be 2
+        @($vulns | Where-Object { $_.Severity -eq 'HIGH' }).Count | Should -Be 2
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,9 +408,36 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         # decoy. This has only ONE root .nuspec, so the multi-nuspec ambiguity
         # check does not (and should not) fire here -- a single, unambiguous
         # OSV-NUGET-OFFLINE note proves exactly one identity was resolved.
+        # This is a STRUCTURAL check only (exactly one identity, not rejected);
+        # see the deterministic mocked test below for which identity it was.
         $r = ScanDir 'nuget/nested_decoy'
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' }).Count | Should -Be 0
+    }
+
+    It 'submits the REAL identity to OSV, not the decoy -- deterministic, no network (review follow-up)' {
+        # The structural test above only proves ONE identity was resolved, not
+        # WHICH one. The live 'audits the REAL identity...' test below proves
+        # it today, but depends on network availability and OSV's current
+        # data. This mocks Invoke-OsvQueryBatch (still exercises the real
+        # -Mode online code path -- only the network call itself is faked) and
+        # asserts directly on the (name, version) submitted to OSV: the real
+        # 'Newtonsoft.Json 12.0.1', never the decoy 'Totally.Benign.Package 1.0.0'.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            param($Queries, $TimeoutSec)
+            return @($Queries | ForEach-Object { [PSCustomObject]@{} })   # no-vuln shape
+        }
+        $r = ScanDir 'nuget/nested_decoy' -Mode online
+        Should -Invoke -CommandName Invoke-OsvQueryBatch -Times 1 -ParameterFilter {
+            $Queries.Count -eq 1 -and
+            $Queries[0].package.name -eq 'Newtonsoft.Json' -and
+            $Queries[0].package.ecosystem -eq 'NuGet' -and
+            $Queries[0].version -eq '12.0.1'
+        }
+        # Belt-and-suspenders: the decoy's identity must never appear in the query.
+        Should -Invoke -CommandName Invoke-OsvQueryBatch -Times 0 -ParameterFilter {
+            $Queries.package.name -eq 'Totally.Benign.Package'
+        }
     }
 
     It 'rejects a package with an ambiguous (multi root-.nuspec) identity rather than guessing' {
@@ -391,6 +452,39 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         $ambiguous[0].Issue | Should -Match 'AAA.Decoy.Package'
         $ambiguous[0].Issue | Should -Match 'Newtonsoft.Json'
         # Must not silently audit either identity as if only one manifest existed.
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a single .nuspec with two root-level metadata elements (review follow-up)' {
+        # Direct coverage for the fail-closed branch added alongside the
+        # nested-decoy fix: two metadata elements as SIBLINGS under package
+        # (not nested, unlike 'nested_decoy' above) -- structurally invalid,
+        # but nothing stops a crafted package from shipping it.
+        # NOTE: Pester's It-name templating expands '<word>' as a data-driven
+        # placeholder even without -ForEach -- literal angle-bracket XML tags
+        # in a test title throw 'variable not set' under Set-StrictMode. Kept
+        # out of every title in this file; see the Issue-text assertions for
+        # the actual tag names.
+        $r = ScanDir 'nuget/multi_metadata'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '2 <metadata> element'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a metadata block with a duplicate id element (review follow-up)' {
+        $r = ScanDir 'nuget/duplicate_id'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '2 <id>'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a metadata block with no version element at all (review follow-up)' {
+        $r = ScanDir 'nuget/missing_version'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '0 <version>'
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
     }
 }

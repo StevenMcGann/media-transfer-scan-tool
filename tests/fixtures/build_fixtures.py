@@ -49,7 +49,8 @@ for sub in ('clean', 'malicious', 'js', 'tarball', 'locked'):
     os.makedirs(os.path.join(NPM_DIR, sub), exist_ok=True)
 for sub in ('clean', 'unpinned', 'vulnerable', 'hash_pinned'):
     os.makedirs(os.path.join(PYREQ_DIR, sub), exist_ok=True)
-for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous', 'nested_decoy'):
+for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous', 'nested_decoy',
+            'multi_metadata', 'duplicate_id', 'missing_version'):
     os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -244,6 +245,18 @@ def make_nupkg_nested_decoy(decoy_id, decoy_ver, real_id, real_ver) -> bytes:
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
         zi = zipfile.ZipInfo(f'{real_id}.nuspec', date_time=FIXED_ZIP_DT)
         z.writestr(zi, nuspec)
+    return buf.getvalue()
+
+
+def make_nupkg_raw_nuspec(nuspec_xml: str, nuspec_filename: str) -> bytes:
+    """Build a .nupkg with a single, ARBITRARY-content root .nuspec -- for
+    exercising the fail-closed shape checks directly (multiple <metadata>,
+    duplicate/missing <id>/<version>) rather than only the specific decoy
+    scenario above."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo(nuspec_filename, date_time=FIXED_ZIP_DT)
+        z.writestr(zi, nuspec_xml)
     return buf.getvalue()
 
 
@@ -746,6 +759,44 @@ write(os.path.join(NUGET_DIR, 'ambiguous', 'Confused.1.0.0.nupkg'),
 write(os.path.join(NUGET_DIR, 'nested_decoy', 'Spoofed.1.0.0.nupkg'),
       make_nupkg_nested_decoy('Totally.Benign.Package', '1.0.0', 'Newtonsoft.Json', '12.0.1'))
 
+# Multiple root-level <metadata> elements (structurally invalid nuspec, but
+# nothing stops a crafted package from shipping it) — must be rejected as
+# ambiguous rather than silently picking the first one.
+write(os.path.join(NUGET_DIR, 'multi_metadata', 'MultiMeta.1.0.0.nupkg'),
+      make_nupkg_raw_nuspec(
+          '<?xml version="1.0" encoding="utf-8"?>\n'
+          '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+          '  <metadata><id>First.Identity</id><version>1.0.0</version></metadata>\n'
+          '  <metadata><id>Second.Identity</id><version>2.0.0</version></metadata>\n'
+          '</package>\n',
+          'MultiMeta.nuspec'))
+
+# Duplicate <id> within a single, otherwise-valid <metadata> block — must be
+# rejected as ambiguous rather than picking the first <id>.
+write(os.path.join(NUGET_DIR, 'duplicate_id', 'DupeId.1.0.0.nupkg'),
+      make_nupkg_raw_nuspec(
+          '<?xml version="1.0" encoding="utf-8"?>\n'
+          '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+          '  <metadata>\n'
+          '    <id>First.Id</id>\n'
+          '    <id>Second.Id</id>\n'
+          '    <version>1.0.0</version>\n'
+          '  </metadata>\n'
+          '</package>\n',
+          'DupeId.nuspec'))
+
+# Missing <version> element entirely — must be rejected (not misread as an
+# empty-but-present version) rather than silently proceeding with no version.
+write(os.path.join(NUGET_DIR, 'missing_version', 'NoVersion.1.0.0.nupkg'),
+      make_nupkg_raw_nuspec(
+          '<?xml version="1.0" encoding="utf-8"?>\n'
+          '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">\n'
+          '  <metadata>\n'
+          '    <id>No.Version.Package</id>\n'
+          '  </metadata>\n'
+          '</package>\n',
+          'NoVersion.nuspec'))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model / pickle fixtures (v0.7)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -968,6 +1019,9 @@ manifest = {
         "nuget/collide/b/Same.1.0.0.nupkg":                 {"expectFinding": "OSV-NUGET-NO-NUSPEC"},
         "nuget/ambiguous/Confused.1.0.0.nupkg":              {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
         "nuget/nested_decoy/Spoofed.1.0.0.nupkg":            {"expectOsvOnline": True},
+        "nuget/multi_metadata/MultiMeta.1.0.0.nupkg":        {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
+        "nuget/duplicate_id/DupeId.1.0.0.nupkg":             {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
+        "nuget/missing_version/NoVersion.1.0.0.nupkg":       {"expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"},
         "model/safe.pkl":          {"expectDeserialization": False},
         "model/malicious.pkl":     {"expectFinding": "PICKLE-REDUCE"},
         "model/model.safetensors": {"expectFinding": "MODEL-SAFE-FORMAT"},

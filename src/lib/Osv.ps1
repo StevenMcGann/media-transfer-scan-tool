@@ -406,7 +406,7 @@ function Get-OsvDependencyFindings {
         foreach ($grp in ($affectedHits | Group-Object { $_.Dep.ManifestFile })) {
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
                 -UnitType $UnitType -File $grp.Name `
-                -Issue ("OSV advisory-detail lookup stopped after {0} consecutive failures -- {1} of {2} distinct advisories were not fetched. Affected dependencies here are still flagged as vulnerable, without summary/severity/fix detail." -f `
+                -Issue ("OSV advisory-detail lookup stopped after {0} consecutive failures -- {1} of {2} distinct advisories were skipped without an attempt (not just failed). Affected dependencies here are still flagged as vulnerable, without summary/severity/fix detail." -f `
                     $MaxConsecutiveFailures, $skippedIds.Count, $uniqueIds.Count) `
                 -TestID $ErrorTestId `
                 -Recommendation 'Re-run online when api.osv.dev is reachable for full advisory detail.'))

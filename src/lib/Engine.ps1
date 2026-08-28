@@ -64,12 +64,24 @@ function New-ArchiveTreeBudget {
     <# One of these per Invoke-Scan run — mutated in place as archives (at any
        nesting depth) are extracted and their members walked. #>
     [PSCustomObject]@{
-        MaxDepth       = $script:ArchiveTreeMaxDepth
-        MaxMembers     = $script:ArchiveTreeMaxMembers
-        MaxBytes       = $script:ArchiveTreeMaxBytes
-        MemberCount    = 0
-        ExpandedBytes  = 0L
-        NextStageIndex = 0   # global counter for unique staging-dir names, any depth
+        MaxDepth              = $script:ArchiveTreeMaxDepth
+        MaxMembers            = $script:ArchiveTreeMaxMembers
+        MaxBytes              = $script:ArchiveTreeMaxBytes
+        MemberCount           = 0
+        ExpandedBytes         = 0L
+        NextStageIndex        = 0   # global counter for unique staging-dir names, any depth
+        # Cumulative bytes extracted from TOP-LEVEL semantic containers
+        # (wheel/egg/.nupkg) specifically — deliberately SEPARATE from
+        # ExpandedBytes/MaxBytes above (review follow-up 5, #6). A top-level
+        # semantic container must always extract regardless of the SHARED
+        # archive-tree budget (an unrelated earlier generic archive must
+        # never silently zero out Python/NuGet coverage — see the "budget
+        # gate never blocks semantic containers" note below), but with NO
+        # bound at all on this category, many top-level wheels/eggs/.nupkg
+        # files (each individually allowed up to the 512MB per-archive cap)
+        # could still exhaust disk with no run-wide limit. Capped against the
+        # SAME $script:ArchiveTreeMaxBytes ceiling, tracked independently.
+        TopLevelSemanticBytes = 0L
     }
 }
 
@@ -322,20 +334,34 @@ function Invoke-ArchiveMemberDispatch {
 
     $members = @(Get-ChildItem -LiteralPath $ArchiveUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue)
     $uninspected   = [System.Collections.Generic.List[string]]::new()
-    $budgetSkipped = 0
+    $budgetSkipped = [System.Collections.Generic.List[string]]::new()
 
     for ($i = 0; $i -lt $members.Count; $i++) {
         $file = $members[$i]
-        # Look-ahead: would ACCEPTING this member push the cumulative total
-        # past the byte cap? Checking the total alone (post-hoc, AFTER
+        # MemberCount exhaustion is a true dead end: the count only grows, so
+        # once it hits the cap, every remaining member -- not just this one --
+        # can never be admitted either. Skip the whole rest of the loop in one
+        # go rather than testing each remaining member individually.
+        if ($Budget.MemberCount -ge $Budget.MaxMembers) {
+            for ($j = $i; $j -lt $members.Count; $j++) {
+                $budgetSkipped.Add($members[$j].FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/'))
+            }
+            break
+        }
+        # Byte look-ahead: would ACCEPTING this member push the cumulative
+        # total past the byte cap? Checking the total alone (post-hoc, AFTER
         # accepting) let the one member that crosses 1GB slip through — its
         # own size was never weighed against the remaining headroom before it
-        # was admitted. MemberCount's check needs no look-ahead: "count >=
-        # max" and "count + 1 > max" are the same test for an integer tally.
-        if ($Budget.MemberCount -ge $Budget.MaxMembers -or
-            ($Budget.ExpandedBytes + [int64]$file.Length) -gt $Budget.MaxBytes) {
-            $budgetSkipped = $members.Count - $i
-            break
+        # was admitted. Unlike MemberCount above, a byte miss is per-member,
+        # not exhaustion-wide: an earlier oversized member must not block a
+        # LATER smaller one that would still fit within remaining headroom
+        # (review follow-up 5, #7) -- an attacker placing one large benign
+        # member right before a small malicious script must not be able to
+        # keep that script from ever being analyzed while budget remains.
+        # Skip only THIS member and keep evaluating the rest.
+        if (($Budget.ExpandedBytes + [int64]$file.Length) -gt $Budget.MaxBytes) {
+            $budgetSkipped.Add($file.FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/'))
+            continue
         }
         $Budget.MemberCount++
         $Budget.ExpandedBytes += [int64]$file.Length
@@ -492,15 +518,13 @@ function Invoke-ArchiveMemberDispatch {
             -Recommendation 'Absence of findings here is absence of coverage, not evidence these members are safe.'))
     }
 
-    if ($budgetSkipped -gt 0) {
-        $skippedNames = @($members[($members.Count - $budgetSkipped)..($members.Count - 1)] | ForEach-Object {
-            $_.FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/')
-        } | Select-Object -First 10)
-        $more = if ($budgetSkipped -gt $skippedNames.Count) { " and $($budgetSkipped - $skippedNames.Count) more" } else { '' }
+    if ($budgetSkipped.Count -gt 0) {
+        $skippedNames = @($budgetSkipped | Select-Object -First 10)
+        $more = if ($budgetSkipped.Count -gt $skippedNames.Count) { " and $($budgetSkipped.Count - $skippedNames.Count) more" } else { '' }
         $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
             -Confidence 'HIGH' -UnitType 'archive' -File $ArchiveUnit.RelativePath `
             -Issue ("Archive-tree budget exhausted (cumulative {0} member(s) / {1:N0} bytes across this scan) — {2} member(s) not inspected: {3}{4}." -f `
-                $Budget.MaxMembers, $Budget.MaxBytes, $budgetSkipped, ($skippedNames -join ', '), $more) `
+                $Budget.MaxMembers, $Budget.MaxBytes, $budgetSkipped.Count, ($skippedNames -join ', '), $more) `
             -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
             -Recommendation 'Absence of findings here is absence of coverage, not evidence these members are safe. Split the submission across multiple scans if this is expected content.'))
     }
@@ -589,8 +613,35 @@ function Invoke-Scan {
             # itself consume this budget, but PythonRules/OsvScan depend on
             # its StagingPath existing -- blocking its extraction because an
             # unrelated EARLIER generic archive used up the budget silently
-            # broke wheel/NuGet analysis. Semantic containers always extract.
+            # broke wheel/NuGet analysis. Semantic containers always extract
+            # regardless of the SHARED $budget's state.
+            #
+            # That guarantee must not mean NO bound at all, though (review
+            # follow-up 5, #6): with nothing else gating them, many top-level
+            # wheels/eggs/.nupkg files -- each individually allowed up to the
+            # 512MB per-archive decompression-bomb cap -- could cumulatively
+            # exhaust disk with no run-wide limit. Gated instead against
+            # $budget.TopLevelSemanticBytes, a SEPARATE running total that
+            # only this category ever charges or is blocked by -- an
+            # unrelated generic archive elsewhere still can never starve
+            # Python/NuGet coverage, but enough top-level semantic containers
+            # in the SAME scan still hit a real ceiling.
+            #
+            # The gate only ever applies from the SECOND top-level semantic
+            # container onward ($budget.TopLevelSemanticBytes -gt 0, i.e. this
+            # category has already gotten at least one guaranteed extraction
+            # in this scan) -- the FIRST one is always unconditional, exactly
+            # preserving review follow-up 2, #4's original guarantee, which is
+            # tested against a budget configured with MaxBytes/MaxMembers = 0
+            # (not just a nonzero one exhausted by prior activity): with
+            # nothing charged to this category yet, that scenario is
+            # indistinguishable from "no bound configured at all" and must
+            # still extract.
             $topLevelBudgetBlocked = $false
+            $topLevelSemanticBudget = [PSCustomObject]@{
+                MaxBytes = $budget.MaxBytes; ExpandedBytes = $budget.TopLevelSemanticBytes
+                MaxMembers = 0; MemberCount = 0
+            }
             if ($unit.Type -eq 'archive' -and (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $budget)) {
                 $topLevelBudgetBlocked = $true
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
@@ -598,6 +649,15 @@ function Invoke-Scan {
                     -Issue 'Archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+            } elseif ($unit.Type -ne 'archive' -and (Test-IsArchiveUnit -Unit $unit) -and
+                      $budget.TopLevelSemanticBytes -gt 0 -and
+                      (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget -SkipCountCheck)) {
+                $topLevelBudgetBlocked = $true
+                $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
+                    -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
+                    -Issue 'Semantic container not opened — extracting it would exceed the cumulative top-level semantic-container budget for this scan.' `
+                    -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
+                    -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
             } else {
                 $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
                 foreach ($f in $expansion.Findings) { $findings.Add($f) }
@@ -609,7 +669,10 @@ function Invoke-Scan {
                 if ($expansion.IsArchive -and $unit.Type -ne 'archive' -and $unit.StagingPath) {
                     $expandedSize = (Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
                         Measure-Object -Property Length -Sum).Sum
-                    if ($expandedSize) { $budget.ExpandedBytes += [int64]$expandedSize }
+                    if ($expandedSize) {
+                        $budget.ExpandedBytes += [int64]$expandedSize
+                        $budget.TopLevelSemanticBytes += [int64]$expandedSize
+                    }
                 }
             }
 

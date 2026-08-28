@@ -165,6 +165,33 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       exact failure by pointing `$env:TEMP` at a deliberately long-named
       directory for one `Invoke-Scan` call, verified failing against the
       pre-fix code.
+    - A sixth review round found two more gaps, both in how the shared
+      budget's blocking decisions were scoped:
+      - A top-level semantic container (wheel/egg/`.nupkg`) always extracts
+        regardless of the shared archive-tree budget — by design, since
+        blocking it because an unrelated earlier generic archive used up the
+        budget would silently break Python/NuGet coverage (round 2). But
+        with nothing else gating this category, many top-level wheels/eggs/
+        `.nupkg` files — each individually allowed up to the 512MB
+        per-archive decompression-bomb cap — could cumulatively exhaust disk
+        with no run-wide limit at all. Now bounded by a genuinely SEPARATE
+        cumulative counter (`Budget.TopLevelSemanticBytes`) that only this
+        category ever charges or is blocked by, so an unrelated archive
+        elsewhere still can never starve this coverage — but the FIRST
+        top-level semantic container in a scan is always exempt from this
+        new gate too, unconditionally, preserving the exact original
+        guarantee (tested against a budget configured with `MaxBytes`/
+        `MaxMembers = 0`, not just one exhausted by prior activity).
+      - `Invoke-ArchiveMemberDispatch`'s per-member loop `break`ed out of the
+        ENTIRE remaining walk the moment one member's own size didn't fit
+        the remaining byte headroom, treating every member after it as
+        skipped too — even a much smaller one that would easily have fit on
+        its own. An attacker could place one oversized benign member right
+        before a small malicious script to keep that script from ever being
+        analyzed while budget remained. The member-count exhaustion check
+        (once hit, truly a dead end — count only grows) still skips the
+        whole remaining suffix in one go; an individual byte-budget miss now
+        `continue`s past just that one member instead.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

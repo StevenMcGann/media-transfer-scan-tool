@@ -1,38 +1,168 @@
-# media-transfer-scan-tool
+# Media Transfer Scan Tool
 
 [![Tests](https://github.com/StevenMcGann/media-transfer-scan-tool/actions/workflows/test.yml/badge.svg)](https://github.com/StevenMcGann/media-transfer-scan-tool/actions/workflows/test.yml)
 
-Operator-driven **static** security scanner for media-transfer review: point it at a submission folder of untrusted artifacts and get a durable, per-submission report before anything is admitted to a trusted environment.
+A Windows-focused static security scanner for reviewing untrusted files before they are transferred into a trusted environment.
 
-> **Status:** **v0.11.0** — all planned file types (Python · disguised scripts · Office/PDF · shell · PowerShell · VBA/VBScript · npm · ML/model) + archive hardening + offline deployment, plus **curated high-signal Python rules** (`PythonRules`, core), a Defender/AMSI-safe engine, and an **OSV.dev dependency-vulnerability audit** (`OsvScan`, core, default-on) covering PyPI `requirements.txt`, npm `package-lock.json`, and NuGet `.nupkg`. The public contract is **frozen** ([docs/contract.md](docs/contract.md)) and operator/maintainer guides are written; **v1.0.0 tags once validated on real untrusted transfers** on the isolated host. Ships as **0.x** while coverage and the JSON/CLI contract expand; **1.0.0 is reserved for the full-coverage milestone** (all planned ingress types working, contract frozen, validated on real untrusted transfers). See [PLAN.md](PLAN.md).
+Point the scanner at a submission folder and it will inventory, classify, hash, and route the files through the appropriate analyzers. Each scan produces a durable report in JSON, HTML, and text formats.
 
-## What it is / is not
+> **Current release: v0.11.0**
+>
+> The planned file-type coverage and public report contract are implemented. The project remains in the 0.x series until it has been validated against real untrusted transfers on the intended isolated review host. See [PLAN.md](PLAN.md) and [CHANGELOG.md](CHANGELOG.md).
 
-- **Is:** a classifier + analyzer-registry engine that routes each file to the right static analyzers and renders one finding model as **JSON (canonical) + HTML (human) + slim TXT**.
-- **Is not:** a sandbox or detonation chamber. It never executes, imports, installs, or deserializes submitted content. *(Even so, run real untrusted transfers on an isolated host — see [docs/test-environment.md](docs/test-environment.md).)*
+## Purpose
 
-## Coverage (planned)
+Media-transfer reviews often involve mixed submissions: source code, scripts, documents, archives, packages, binaries, and machine-learning artifacts. A single antivirus result does not show whether every file was meaningfully inspected or whether a required analyzer failed to run.
 
-Python *(v0.1)* · disguised scripts *(v0.2)* · Office + PDF documents *(v0.3)* · shell *(v0.4)* · PowerShell *(v0.5)* · npm *(v0.6)* · ML/model files *(v0.7)* · archive hardening *(v0.8)* · VBA/VBScript *(v0.10)* · OSV.dev dependency-vulnerability audit *(v0.11)* → **v1.0.0 full-coverage milestone.**
+This tool provides a repeatable static-analysis gate that:
 
-## Runtime
+- Recursively inventories and hashes submitted files
+- Classifies content instead of trusting file extensions alone
+- Detects scripts disguised as ordinary files
+- Routes supported files to specialized analyzers
+- Reports disabled, unavailable, blocked, or missing analysis coverage
+- Produces a machine-readable audit record and a human-readable review report
+- Supports a packaged Windows workflow for isolated and air-gapped review hosts
 
-PowerShell **7.4+ only**. The offline bundle vendors a portable `pwsh`; a thin bootstrapper launches the engine under it so the operator installs nothing. See PLAN.md §3.6.
+## Safety Model
 
-## Quickstart (dev)
+The scanner performs **static analysis only**. It does not execute, import, install, open in the associated desktop application, or deserialize submitted content.
+
+Static analysis still carries parser risk. Real untrusted submissions should be scanned on an isolated, disposable review host with appropriate containment and recovery controls. Microsoft Defender or another EDR may independently detect or quarantine malicious submitted files; review those alerts alongside the scanner report.
+
+This tool is not a sandbox, detonation platform, or replacement for antivirus. A clean result means that the enabled analyzers found no reportable static indicators. It is not proof that the submission is safe.
+
+See [docs/test-environment.md](docs/test-environment.md) for the recommended review-host design and AV/EDR considerations.
+
+## Analysis Coverage
+
+The current release includes coverage for:
+
+- Python source, packages, wheels, notebooks, and pinned requirements
+- PowerShell, shell, VBA, and VBScript
+- Scripts disguised by an incorrect or innocuous file extension
+- Microsoft Office documents, embedded VBA, DDE fields, and remote templates
+- PDF active-content indicators
+- npm packages, JavaScript/TypeScript, lifecycle scripts, and lock files
+- NuGet packages
+- PE and ELF binary inspection
+- Pickle-based and common machine-learning model formats
+- ZIP-family and tar archives, including path traversal and decompression-bomb controls
+- Known dependency vulnerabilities through OSV.dev for supported PyPI, npm, and NuGet inputs
+
+The default **core** profile favors focused, higher-signal checks. The **full** profile adds Bandit and detect-secrets, which provide broader coverage but may generate more review noise.
+
+Files for which no enabled analyzer claims meaningful coverage receive an explicit `MTS-NO-ANALYZER` finding. Tool failures and blocked external analyzers are also surfaced; they are not treated as clean results.
+
+For the stable JSON schema, analyzer contract, CLI surface, and exit codes, see [docs/contract.md](docs/contract.md).
+
+## Running the Packaged Tool
+
+The operator bundle is the preferred way to run the scanner on Windows. It includes the supported PowerShell runtime and scanner dependencies, so the review host does not require a separate installation.
+
+From a command prompt in the bundle directory:
 
 ```powershell
-# Requires PowerShell 7.4+
-pwsh ./src/Invoke-MediaTransferScan.ps1 -Path .\sample-folder
+Scan.cmd -Path "D:\incoming\submission"
+```
 
-# Run tests
+The path must identify a folder. Files beneath it are scanned recursively, and the results are written to:
+
+```text
+D:\incoming\submission\.reports\
+```
+
+### Common Options
+
+Run the core profile, which is the default:
+
+```powershell
+Scan.cmd -Path "D:\incoming\submission" -Profile core
+```
+
+Add the broader Bandit and detect-secrets analyzers:
+
+```powershell
+Scan.cmd -Path "D:\incoming\submission" -Profile full
+```
+
+Enable or disable an individual analyzer:
+
+```powershell
+Scan.cmd -Path "D:\incoming\submission" -EnableAnalyzers DetectSecrets
+Scan.cmd -Path "D:\incoming\submission" -DisableAnalyzers ShellCheck
+```
+
+Run without network access:
+
+```powershell
+Scan.cmd -Path "D:\incoming\submission" -Mode offline
+```
+
+Offline mode uses the analyzers available in the bundle. Live OSV.dev dependency lookups require network access; when that coverage is unavailable, the report identifies the resulting gap rather than silently treating the dependencies as clean.
+
+For operating instructions and result interpretation, see [docs/operator-guide.md](docs/operator-guide.md).
+
+## Reports
+
+Each completed scan writes three timestamped reports from the same finding model:
+
+| Report | Purpose |
+| --- | --- |
+| `summary_<timestamp>.html` | Primary analyst report with overall risk, counts, and findings |
+| `summary_<timestamp>.json` | Canonical machine-readable report for automation and retention |
+| `summary_<timestamp>.txt` | Concise terminal-friendly summary focused on high-severity results |
+
+Overall risk reflects the highest reported severity:
+
+```text
+CLEAN < INFO < LOW < MEDIUM < HIGH < CRITICAL
+```
+
+The report also identifies analyzers that were disabled or unable to run. Review those coverage statements before interpreting a clean or low-risk result.
+
+## Running from Source
+
+Development checkouts require PowerShell 7.4 or later:
+
+```powershell
+pwsh ./src/Invoke-MediaTransferScan.ps1 -Path .\sample-folder
+```
+
+If a required analyzer dependency is not already available, connected development environments can allow provisioning with `-AutoInstall`. Do not use automatic installation on the untrusted review host.
+
+## Tests
+
+Run the full Pester test suite with:
+
+```powershell
 pwsh ./tests/Run-Tests.ps1
 ```
 
-## Lineage
+Maintainers should also review:
 
-Clean-room successor to [`scan-python-packages`](https://github.com/StevenMcGann/scan-python-packages), which **remains a separate, active tool** (not archived). This project is a superset that also scans Python.
+- [Maintainer guide](docs/maintainer-guide.md)
+- [Test-environment guidance](docs/test-environment.md)
+- [Public contract](docs/contract.md)
+- [Offline bundle documentation](bundle/README.md)
+- [Project plan](PLAN.md)
+- [Changelog](CHANGELOG.md)
+
+## Exit Codes
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | Scan completed with no findings |
+| 10 | Scan completed and findings were reported |
+| 2 | Scanner or analyzer execution error |
+| 3 | Invalid input |
+| 4 | A suitable PowerShell 7 runtime was not available |
+| 5 | Offline bundle integrity verification failed |
+
+## Project Lineage
+
+This project is a clean-room successor to [scan-python-packages](https://github.com/StevenMcGann/scan-python-packages). The earlier project remains a separate, active tool; Media Transfer Scan Tool expands the scope beyond Python while retaining Python scanning.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Licensed under the [MIT License](LICENSE).

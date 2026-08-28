@@ -372,13 +372,44 @@ function Get-OsvDependencyFindings {
     if ($hits.Count -eq 0) { return $out.ToArray() }
 
     # One detail fetch per DISTINCT id across the whole batch, not per dependency.
+    # Bounded the same way as the querybatch chunk loop above: this is a separate
+    # sequential network call per id with its own $TimeoutSec, and the engine
+    # applies no analyzer-level timeout here, so a manifest resolving to many
+    # distinct advisories during a /vulns/{id} outage could otherwise hold an
+    # online scan for uniqueIds.Count * $TimeoutSec. A hit already confirmed by
+    # querybatch is NOT dropped when detail is unavailable -- it still gets a
+    # finding via the "detail unavailable" fallback below, just without
+    # summary/severity/fix detail; only further ATTEMPTS stop.
     $uniqueIds = @($hits | ForEach-Object { $_.VulnIds } | Select-Object -Unique)
     $detailCache = @{}
-    foreach ($id in $uniqueIds) {
-        try { $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec $TimeoutSec }
-        catch {
+    $detailConsecutiveFailures = 0
+    $detailStoppedAtIndex = -1
+    for ($k = 0; $k -lt $uniqueIds.Count; $k++) {
+        $id = $uniqueIds[$k]
+        try {
+            $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec $TimeoutSec
+            $detailConsecutiveFailures = 0
+        } catch {
             Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"
             $detailCache[$id] = $null
+            $detailConsecutiveFailures++
+            if ($detailConsecutiveFailures -ge $MaxConsecutiveFailures) {
+                $detailStoppedAtIndex = $k + 1
+                break
+            }
+        }
+    }
+    if ($detailStoppedAtIndex -ge 0 -and $detailStoppedAtIndex -lt $uniqueIds.Count) {
+        $skippedIds = @($uniqueIds[$detailStoppedAtIndex..($uniqueIds.Count - 1)])
+        foreach ($id in $skippedIds) { $detailCache[$id] = $null }   # never attempted, not just failed
+        $affectedHits = @($hits | Where-Object { @($_.VulnIds | Where-Object { $_ -in $skippedIds }).Count -gt 0 })
+        foreach ($grp in ($affectedHits | Group-Object { $_.Dep.ManifestFile })) {
+            $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                -UnitType $UnitType -File $grp.Name `
+                -Issue ("OSV advisory-detail lookup stopped after {0} consecutive failures -- {1} of {2} distinct advisories were not fetched. Affected dependencies here are still flagged as vulnerable, without summary/severity/fix detail." -f `
+                    $MaxConsecutiveFailures, $skippedIds.Count, $uniqueIds.Count) `
+                -TestID $ErrorTestId `
+                -Recommendation 'Re-run online when api.osv.dev is reachable for full advisory detail.'))
         }
     }
 

@@ -8,6 +8,33 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Security
+- **NuGet identity spoofing via a nested decoy `<metadata>` block** — a
+  `.nupkg` with exactly one root `.nuspec` (so it passes the existing
+  multi-root-`.nuspec` ambiguity check) could still hide its real identity: the
+  previous document-wide `//` XPath search matched the *first* `<metadata>`
+  found anywhere in the file, in document order, so a decoy nested inside an
+  unrelated wrapper element ahead of the real `<package><metadata>` was
+  resolved instead — the package's real, possibly-vulnerable identity was
+  never queried against OSV. `Get-NuGetDep` (`src/analyzers/OsvScan.ps1`) now
+  reads only `<package>`'s direct-child `<metadata>`, and rejects (rather than
+  guesses at) an unexpected shape — more than one `<metadata>`, or more than
+  one `<id>`/`<version>` within it — the same fail-closed posture already
+  applied to the multi-nuspec-file case. PoC verified before the fix, and a
+  regression fixture (`nuget/nested_decoy`) added.
+- **Unbounded per-advisory detail-fetch loop** — `Get-OsvDependencyFindings`
+  (`src/lib/Osv.ps1`) bounds retries on the `POST /v1/querybatch` chunk loop
+  after repeated consecutive failures, but the separate sequential
+  `GET /v1/vulns/{id}` detail fetch (one call per distinct advisory) had no
+  such bound. A manifest resolving to many distinct advisories during a
+  detail-endpoint outage could hold an online scan for
+  `uniqueIds.Count * TimeoutSec`. Now bounded by the same
+  `-MaxConsecutiveFailures` parameter; a vulnerability already confirmed by
+  querybatch still produces a finding via the existing "detail unavailable"
+  fallback when the fetch stops early — none are silently dropped — and the
+  skipped advisories are reported as an explicit coverage-gap finding, grouped
+  by manifest.
+
 ## [0.11.0] - 2026-08-27
 
 ### Added

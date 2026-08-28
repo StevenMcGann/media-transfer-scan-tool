@@ -182,6 +182,9 @@
     "nuget/ambiguous/Confused.1.0.0.nupkg": {
       "expectFinding": "OSV-NUGET-AMBIGUOUS-NUSPEC"
     },
+    "nuget/nested_decoy/Spoofed.1.0.0.nupkg": {
+      "expectOsvOnline": true
+    },
     "model/safe.pkl": {
       "expectDeserialization": false
     },

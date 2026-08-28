@@ -192,6 +192,40 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         $stopped[0].Issue    | Should -Match '300 more dependencies'
         $stopped[0].File     | Should -Be 'requirements.txt'
     }
+
+    It 'bounds the per-advisory detail-fetch loop after repeated failures, without dropping already-confirmed hits' {
+        # 5 deps => querybatch confirms 5 DISTINCT vuln ids in one chunk (batch
+        # endpoint is healthy). The separate /v1/vulns/{id} detail endpoint is
+        # then persistently down: unlike the querybatch chunk loop, this
+        # sequential per-id loop previously had no MaxConsecutiveFailures bound,
+        # so a manifest resolving to many distinct advisories during a detail-
+        # endpoint outage could hold an online scan for uniqueIds.Count * 30s.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..5 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailCallCount = 0
+        Mock -CommandName Get-OsvVulnDetails -MockWith { $script:detailCallCount++; throw 'persistent detail-endpoint outage' }
+
+        $deps = 1..5 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps -MaxConsecutiveFailures 2)
+
+        # Only 2 of the 5 distinct ids were actually attempted, not all 5.
+        $script:detailCallCount | Should -Be 2
+        # Every confirmed hit STILL produces a vuln-dependency finding (via the
+        # "detail unavailable" fallback) -- a detail-fetch outage must not make a
+        # confirmed vulnerability silently disappear.
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 5
+        ($vulns.Severity | Select-Object -Unique) | Should -Be 'HIGH'
+        # ...and the stopped-early aggregate note names the 3 advisories skipped
+        # outright (never attempted, not just failed).
+        $stopped = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match '3 of 5'
+        $stopped[0].File  | Should -Be 'requirements.txt'
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +367,18 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         @($a.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
     }
 
+    It 'resolves the real identity, not a decoy metadata block nested elsewhere in a single .nuspec' {
+        # A document-wide '//' XPath search (the pre-fix bug) matches ANY
+        # <metadata> in document order, so a decoy nested inside a wrapper
+        # element ahead of the real <package><metadata> would resolve to the
+        # decoy. This has only ONE root .nuspec, so the multi-nuspec ambiguity
+        # check does not (and should not) fire here -- a single, unambiguous
+        # OSV-NUGET-OFFLINE note proves exactly one identity was resolved.
+        $r = ScanDir 'nuget/nested_decoy'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' }).Count | Should -Be 0
+    }
+
     It 'rejects a package with an ambiguous (multi root-.nuspec) identity rather than guessing' {
         # A real NuGet client (PackageArchiveReader.GetNuspecFile()) refuses to load a
         # package with more than one root .nuspec. Silently picking one (e.g.
@@ -361,5 +407,19 @@ Describe 'OsvScan — NuGet (.nupkg), live' -Tag 'Online' {
     It 'produces no vuln-dependency findings for a package/version with no OSV record' {
         $r = ScanDir 'nuget/clean' -Mode online
         @(AllFindings $r | Where-Object { $_.Tool -eq 'OsvScan' -and $_.Category -eq 'vuln-dependency' }).Count | Should -Be 0
+    }
+
+    It 'audits the REAL identity, not a nested decoy metadata block, against OSV' {
+        # 'Totally.Benign.Package 1.0.0' (the decoy) has no OSV record at all, so
+        # this is a decisive proof the fix works: if the decoy's identity were
+        # still being queried (the pre-fix bug), this would assert 0 findings,
+        # same as 'nuget/clean' above. Asserting the REAL Newtonsoft.Json
+        # 12.0.1 advisory is found instead proves the root-scoped metadata fix.
+        $r = ScanDir 'nuget/nested_decoy' -Mode online
+        $vulns = @(AllFindings $r | Where-Object { $_.Tool -eq 'OsvScan' -and $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -BeGreaterThan 0
+        $vulns[0].TestID | Should -Match '^(CVE|GHSA|PYSEC)-'
+        $vulns[0].Issue  | Should -Match '13\.0\.1'   # the published fixed version
+        ($vulns.Issue -join ' ') | Should -Not -Match 'Totally.Benign.Package'
     }
 }

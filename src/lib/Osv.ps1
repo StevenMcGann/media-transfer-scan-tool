@@ -289,6 +289,19 @@ function Get-OsvDependencyFindings {
         online scan for $TimeoutSec times the chunk count. The untried
         dependencies are still reported, grouped by manifest, as one gap finding
         each rather than silently dropped.
+
+        The per-id detail-fetch loop below has a SECOND, independent bound:
+        $MaxDetailFetches caps total detail-fetch ATTEMPTS regardless of
+        outcome. $MaxConsecutiveFailures alone never trips if the endpoint
+        alternates failure/success — the counter resets to 0 on every success
+        (correct for its own purpose: a genuinely flaky-but-working endpoint
+        shouldn't be treated as down) — so a manifest resolving to many
+        distinct advisories against a flapping /vulns/{id} endpoint could still
+        hold the scan for uniqueIds.Count * $TimeoutSec with no upper bound.
+        Stopping at the cap uses the same "detail unavailable" fallback and
+        coverage-gap finding as the consecutive-failure case — a hit already
+        confirmed by querybatch is never dropped, just reported without
+        summary/severity/fix detail.
     #>
     param(
         [Parameter(Mandatory)][string]$Tool,
@@ -296,7 +309,8 @@ function Get-OsvDependencyFindings {
         [Parameter(Mandatory)][object[]]$Dependencies,   # @{ Name; Version; Ecosystem; ManifestFile; DepLabel }
         [int]$TimeoutSec = 30,
         [string]$ErrorTestId = 'OSV-QUERY-ERR',
-        [int]$MaxConsecutiveFailures = 2
+        [int]$MaxConsecutiveFailures = 2,
+        [int]$MaxDetailFetches = 500
     )
     $out = [System.Collections.Generic.List[object]]::new()
     if ($Dependencies.Count -eq 0) { return $out.ToArray() }
@@ -383,9 +397,22 @@ function Get-OsvDependencyFindings {
     $uniqueIds = @($hits | ForEach-Object { $_.VulnIds } | Select-Object -Unique)
     $detailCache = @{}
     $detailConsecutiveFailures = 0
+    $detailAttempts = 0
     $detailStoppedAtIndex = -1
+    $detailStopReason = $null
     for ($k = 0; $k -lt $uniqueIds.Count; $k++) {
+        # Total-attempts cap, independent of the consecutive-failure cap below:
+        # checked BEFORE attempting so a manifest with more distinct advisories
+        # than $MaxDetailFetches can't out-stall a flapping endpoint that
+        # happens to alternate failure/success (the consecutive counter alone
+        # never trips in that case — see the doc comment above).
+        if ($detailAttempts -ge $MaxDetailFetches) {
+            $detailStoppedAtIndex = $k
+            $detailStopReason = 'max-fetches'
+            break
+        }
         $id = $uniqueIds[$k]
+        $detailAttempts++
         try {
             $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec $TimeoutSec
             $detailConsecutiveFailures = 0
@@ -395,6 +422,7 @@ function Get-OsvDependencyFindings {
             $detailConsecutiveFailures++
             if ($detailConsecutiveFailures -ge $MaxConsecutiveFailures) {
                 $detailStoppedAtIndex = $k + 1
+                $detailStopReason = 'consecutive-failures'
                 break
             }
         }
@@ -402,12 +430,17 @@ function Get-OsvDependencyFindings {
     if ($detailStoppedAtIndex -ge 0 -and $detailStoppedAtIndex -lt $uniqueIds.Count) {
         $skippedIds = @($uniqueIds[$detailStoppedAtIndex..($uniqueIds.Count - 1)])
         foreach ($id in $skippedIds) { $detailCache[$id] = $null }   # never attempted, not just failed
+        $reasonText = if ($detailStopReason -eq 'max-fetches') {
+            "reaching the {0}-advisory total detail-fetch cap for this scan" -f $MaxDetailFetches
+        } else {
+            "{0} consecutive failures" -f $MaxConsecutiveFailures
+        }
         $affectedHits = @($hits | Where-Object { @($_.VulnIds | Where-Object { $_ -in $skippedIds }).Count -gt 0 })
         foreach ($grp in ($affectedHits | Group-Object { $_.Dep.ManifestFile })) {
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
                 -UnitType $UnitType -File $grp.Name `
-                -Issue ("OSV advisory-detail lookup stopped after {0} consecutive failures -- {1} of {2} distinct advisories were skipped without an attempt (not just failed). Affected dependencies here are still flagged as vulnerable, without summary/severity/fix detail." -f `
-                    $MaxConsecutiveFailures, $skippedIds.Count, $uniqueIds.Count) `
+                -Issue ("OSV advisory-detail lookup stopped after {0} -- {1} of {2} distinct advisories were skipped without an attempt (not just failed). Affected dependencies here are still flagged as vulnerable, without summary/severity/fix detail." -f `
+                    $reasonText, $skippedIds.Count, $uniqueIds.Count) `
                 -TestID $ErrorTestId `
                 -Recommendation 'Re-run online when api.osv.dev is reachable for full advisory detail.'))
         }

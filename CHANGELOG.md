@@ -8,6 +8,24 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Security
+- **Detail-fetch loop could out-stall a flapping (not fully down) OSV
+  endpoint** — the 0.12.0 fix above bounded `Get-OsvDependencyFindings`'s
+  `GET /v1/vulns/{id}` loop with `-MaxConsecutiveFailures`, but that counter
+  resets to 0 on every success (correct for its own purpose — a genuinely
+  flaky-but-working endpoint shouldn't be treated as down). An endpoint that
+  *alternates* failure/success never trips it, so a manifest resolving to
+  many distinct advisories could still hold the scan for
+  `uniqueIds.Count * TimeoutSec` with no upper bound. Added a second,
+  independent `-MaxDetailFetches` parameter (default 500) capping total
+  fetch *attempts* regardless of outcome; the consecutive-failure check is
+  unchanged. Reaching either cap stops the loop the same way — remaining
+  advisories reported as a coverage-gap finding, already-confirmed
+  vulnerabilities still reported via the existing "detail unavailable"
+  fallback, none silently dropped. Caught by independent review of #36
+  after the 0.12.0 fix; regression test added (fail/succeed/fail/succeed/
+  succeed against a 3-fetch cap, verified against the pre-fix code).
+
 ## [0.12.0] - 2026-08-28
 
 ### Security

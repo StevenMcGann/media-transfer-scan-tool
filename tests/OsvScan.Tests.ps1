@@ -260,6 +260,48 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         @($vulns | Where-Object { $_.Severity -eq 'LOW' }).Count  | Should -Be 2
         @($vulns | Where-Object { $_.Severity -eq 'HIGH' }).Count | Should -Be 2
     }
+
+    It 'bounds total detail-fetch attempts even when failures never go consecutive (review follow-up)' {
+        # fail, succeed, fail, succeed, succeed -- with MaxConsecutiveFailures 2
+        # this NEVER trips (no two failures back-to-back), so without a SEPARATE
+        # total-attempts cap the loop would run all 5. MaxDetailFetches 3 must
+        # still stop it after exactly 3 attempts -- a manifest resolving to more
+        # distinct advisories than the cap must not be able to out-stall a
+        # flapping (not fully down) detail endpoint.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..5 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailAttempts2 = [System.Collections.Generic.List[string]]::new()
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            $script:detailAttempts2.Add($Id)
+            if ($Id -in @('GHSA-test-0001', 'GHSA-test-0003')) { throw "simulated failure for $Id" }
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'LOW' } }
+        }
+
+        $deps = 1..5 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps `
+            -MaxConsecutiveFailures 2 -MaxDetailFetches 3)
+
+        # Only the first 3 distinct ids were attempted -- the cap fired, not the
+        # (never-tripped) consecutive-failure counter.
+        $script:detailAttempts2.Count | Should -Be 3
+        $script:detailAttempts2 | Should -Be @('GHSA-test-0001', 'GHSA-test-0002', 'GHSA-test-0003')
+
+        # All 5 confirmed hits are STILL reported -- the 2 never-attempted
+        # advisories fall back to "detail unavailable", same as a failed fetch;
+        # a hit querybatch already confirmed is never silently dropped.
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 5
+
+        $stopped = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match 'total detail-fetch cap'
+        $stopped[0].Issue | Should -Match '2 of 5'
+        $stopped[0].File  | Should -Be 'requirements.txt'
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

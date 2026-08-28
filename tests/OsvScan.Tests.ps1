@@ -192,6 +192,116 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
         $stopped[0].Issue    | Should -Match '300 more dependencies'
         $stopped[0].File     | Should -Be 'requirements.txt'
     }
+
+    It 'bounds the per-advisory detail-fetch loop after repeated failures, without dropping already-confirmed hits' {
+        # 5 deps => querybatch confirms 5 DISTINCT vuln ids in one chunk (batch
+        # endpoint is healthy). The separate /v1/vulns/{id} detail endpoint is
+        # then persistently down: unlike the querybatch chunk loop, this
+        # sequential per-id loop previously had no MaxConsecutiveFailures bound,
+        # so a manifest resolving to many distinct advisories during a detail-
+        # endpoint outage could hold an online scan for uniqueIds.Count * 30s.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..5 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailCallCount = 0
+        Mock -CommandName Get-OsvVulnDetails -MockWith { $script:detailCallCount++; throw 'persistent detail-endpoint outage' }
+
+        $deps = 1..5 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps -MaxConsecutiveFailures 2)
+
+        # Only 2 of the 5 distinct ids were actually attempted, not all 5.
+        $script:detailCallCount | Should -Be 2
+        # Every confirmed hit STILL produces a vuln-dependency finding (via the
+        # "detail unavailable" fallback) -- a detail-fetch outage must not make a
+        # confirmed vulnerability silently disappear.
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 5
+        ($vulns.Severity | Select-Object -Unique) | Should -Be 'HIGH'
+        # ...and the stopped-early aggregate note names the 3 advisories skipped
+        # outright (never attempted, not just failed).
+        $stopped = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match '3 of 5'
+        $stopped[0].File  | Should -Be 'requirements.txt'
+    }
+
+    It 'resets the detail-fetch consecutive-failure counter on a success (review follow-up)' {
+        # fail, succeed, fail, succeed -- with MaxConsecutiveFailures 2, this
+        # must NOT stop early: no two failures ever occur back-to-back, so the
+        # counter should reset to 0 on every success. Locks in that the
+        # counter is CONSECUTIVE, not a cumulative total across the whole loop.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..4 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailAttempts = [System.Collections.Generic.List[string]]::new()
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            $script:detailAttempts.Add($Id)
+            if ($Id -in @('GHSA-test-0001', 'GHSA-test-0003')) { throw "simulated failure for $Id" }
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'LOW' } }
+        }
+
+        $deps = 1..4 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps -MaxConsecutiveFailures 2)
+
+        # All 4 distinct ids were attempted -- the loop never stopped early.
+        $script:detailAttempts.Count | Should -Be 4
+        # No "stopped after consecutive failures" aggregate note fired.
+        @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' }).Count | Should -Be 0
+        # All 4 confirmed hits are still reported: 2 with full detail (severity
+        # LOW from the mocked record), 2 via the "detail unavailable" fallback
+        # (severity HIGH, the conservative default for an unscored known vuln).
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 4
+        @($vulns | Where-Object { $_.Severity -eq 'LOW' }).Count  | Should -Be 2
+        @($vulns | Where-Object { $_.Severity -eq 'HIGH' }).Count | Should -Be 2
+    }
+
+    It 'bounds total detail-fetch attempts even when failures never go consecutive (review follow-up)' {
+        # fail, succeed, fail, succeed, succeed -- with MaxConsecutiveFailures 2
+        # this NEVER trips (no two failures back-to-back), so without a SEPARATE
+        # total-attempts cap the loop would run all 5. MaxDetailFetches 3 must
+        # still stop it after exactly 3 attempts -- a manifest resolving to more
+        # distinct advisories than the cap must not be able to out-stall a
+        # flapping (not fully down) detail endpoint.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            return @(1..5 | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-test-000$_" }) } })
+        }
+        $script:detailAttempts2 = [System.Collections.Generic.List[string]]::new()
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            $script:detailAttempts2.Add($Id)
+            if ($Id -in @('GHSA-test-0001', 'GHSA-test-0003')) { throw "simulated failure for $Id" }
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'LOW' } }
+        }
+
+        $deps = 1..5 | ForEach-Object {
+            @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies $deps `
+            -MaxConsecutiveFailures 2 -MaxDetailFetches 3)
+
+        # Only the first 3 distinct ids were attempted -- the cap fired, not the
+        # (never-tripped) consecutive-failure counter.
+        $script:detailAttempts2.Count | Should -Be 3
+        $script:detailAttempts2 | Should -Be @('GHSA-test-0001', 'GHSA-test-0002', 'GHSA-test-0003')
+
+        # All 5 confirmed hits are STILL reported -- the 2 never-attempted
+        # advisories fall back to "detail unavailable", same as a failed fetch;
+        # a hit querybatch already confirmed is never silently dropped.
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 5
+
+        $stopped = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match 'total detail-fetch cap'
+        $stopped[0].Issue | Should -Match '2 of 5'
+        $stopped[0].File  | Should -Be 'requirements.txt'
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +443,45 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         @($a.Findings | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
     }
 
+    It 'resolves the real identity, not a decoy metadata block nested elsewhere in a single .nuspec' {
+        # A document-wide '//' XPath search (the pre-fix bug) matches ANY
+        # <metadata> in document order, so a decoy nested inside a wrapper
+        # element ahead of the real <package><metadata> would resolve to the
+        # decoy. This has only ONE root .nuspec, so the multi-nuspec ambiguity
+        # check does not (and should not) fire here -- a single, unambiguous
+        # OSV-NUGET-OFFLINE note proves exactly one identity was resolved.
+        # This is a STRUCTURAL check only (exactly one identity, not rejected);
+        # see the deterministic mocked test below for which identity it was.
+        $r = ScanDir 'nuget/nested_decoy'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 1
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' }).Count | Should -Be 0
+    }
+
+    It 'submits the REAL identity to OSV, not the decoy -- deterministic, no network (review follow-up)' {
+        # The structural test above only proves ONE identity was resolved, not
+        # WHICH one. The live 'audits the REAL identity...' test below proves
+        # it today, but depends on network availability and OSV's current
+        # data. This mocks Invoke-OsvQueryBatch (still exercises the real
+        # -Mode online code path -- only the network call itself is faked) and
+        # asserts directly on the (name, version) submitted to OSV: the real
+        # 'Newtonsoft.Json 12.0.1', never the decoy 'Totally.Benign.Package 1.0.0'.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            param($Queries, $TimeoutSec)
+            return @($Queries | ForEach-Object { [PSCustomObject]@{} })   # no-vuln shape
+        }
+        $r = ScanDir 'nuget/nested_decoy' -Mode online
+        Should -Invoke -CommandName Invoke-OsvQueryBatch -Times 1 -ParameterFilter {
+            $Queries.Count -eq 1 -and
+            $Queries[0].package.name -eq 'Newtonsoft.Json' -and
+            $Queries[0].package.ecosystem -eq 'NuGet' -and
+            $Queries[0].version -eq '12.0.1'
+        }
+        # Belt-and-suspenders: the decoy's identity must never appear in the query.
+        Should -Invoke -CommandName Invoke-OsvQueryBatch -Times 0 -ParameterFilter {
+            $Queries.package.name -eq 'Totally.Benign.Package'
+        }
+    }
+
     It 'rejects a package with an ambiguous (multi root-.nuspec) identity rather than guessing' {
         # A real NuGet client (PackageArchiveReader.GetNuspecFile()) refuses to load a
         # package with more than one root .nuspec. Silently picking one (e.g.
@@ -345,6 +494,39 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
         $ambiguous[0].Issue | Should -Match 'AAA.Decoy.Package'
         $ambiguous[0].Issue | Should -Match 'Newtonsoft.Json'
         # Must not silently audit either identity as if only one manifest existed.
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a single .nuspec with two root-level metadata elements (review follow-up)' {
+        # Direct coverage for the fail-closed branch added alongside the
+        # nested-decoy fix: two metadata elements as SIBLINGS under package
+        # (not nested, unlike 'nested_decoy' above) -- structurally invalid,
+        # but nothing stops a crafted package from shipping it.
+        # NOTE: Pester's It-name templating expands '<word>' as a data-driven
+        # placeholder even without -ForEach -- literal angle-bracket XML tags
+        # in a test title throw 'variable not set' under Set-StrictMode. Kept
+        # out of every title in this file; see the Issue-text assertions for
+        # the actual tag names.
+        $r = ScanDir 'nuget/multi_metadata'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '2 <metadata> element'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a metadata block with a duplicate id element (review follow-up)' {
+        $r = ScanDir 'nuget/duplicate_id'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '2 <id>'
+        @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
+    }
+
+    It 'rejects a metadata block with no version element at all (review follow-up)' {
+        $r = ScanDir 'nuget/missing_version'
+        $ambiguous = @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-AMBIGUOUS-NUSPEC' })
+        $ambiguous.Count | Should -Be 1
+        $ambiguous[0].Issue | Should -Match '0 <version>'
         @(AllFindings $r | Where-Object { $_.TestID -eq 'OSV-NUGET-OFFLINE' }).Count | Should -Be 0
     }
 }
@@ -361,5 +543,19 @@ Describe 'OsvScan — NuGet (.nupkg), live' -Tag 'Online' {
     It 'produces no vuln-dependency findings for a package/version with no OSV record' {
         $r = ScanDir 'nuget/clean' -Mode online
         @(AllFindings $r | Where-Object { $_.Tool -eq 'OsvScan' -and $_.Category -eq 'vuln-dependency' }).Count | Should -Be 0
+    }
+
+    It 'audits the REAL identity, not a nested decoy metadata block, against OSV' {
+        # 'Totally.Benign.Package 1.0.0' (the decoy) has no OSV record at all, so
+        # this is a decisive proof the fix works: if the decoy's identity were
+        # still being queried (the pre-fix bug), this would assert 0 findings,
+        # same as 'nuget/clean' above. Asserting the REAL Newtonsoft.Json
+        # 12.0.1 advisory is found instead proves the root-scoped metadata fix.
+        $r = ScanDir 'nuget/nested_decoy' -Mode online
+        $vulns = @(AllFindings $r | Where-Object { $_.Tool -eq 'OsvScan' -and $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -BeGreaterThan 0
+        $vulns[0].TestID | Should -Match '^(CVE|GHSA|PYSEC)-'
+        $vulns[0].Issue  | Should -Match '13\.0\.1'   # the published fixed version
+        ($vulns.Issue -join ' ') | Should -Not -Match 'Totally.Benign.Package'
     }
 }

@@ -106,6 +106,16 @@ function New-ArchiveTreeBudget {
         # that), and separately from the top-level counter above, which has
         # its own always-allow-the-first rule that must not apply here.
         NestedSemanticEntries = 0
+        # Cumulative DIRECTORIES created by generic-archive extraction
+        # (review follow-up 5, #14). MemberCount only ever counts
+        # dispatchable members, and member dispatch enumerates
+        # Get-ChildItem -File — so directories an extraction creates were
+        # charged to nothing at all. Since Expand-Archive.ps1's own
+        # 50,000-entry cap resets per archive, a submission of many
+        # directory-only tarballs/zips could stage unbounded inodes while
+        # every cumulative counter stayed at zero. Subtracted from the count
+        # headroom alongside MemberCount wherever an extraction is gated.
+        StagedDirectories = 0
     }
 }
 
@@ -143,13 +153,17 @@ function Get-ArchiveExpansionEstimate {
         2,501 matching directory entries estimated 5,002 and was rejected,
         even though only 2,501 members would ever be charged).
 
-        TotalEntries counts EVERY entry, directories included — what
-        extraction actually creates on the filesystem, rather than what
-        member dispatch would charge. The top-level semantic-container gate
-        uses this (review follow-up 5, #12): those containers are never
-        member-dispatched, so their bound is about real inodes consumed, and
-        a package built purely from directory entries has Count = 0 while
-        still creating arbitrarily many directories.
+        TotalEntries is the count of real filesystem entries EXTRACTION WILL
+        CREATE — files plus every directory in their paths — rather than the
+        number of central-directory records. Those differ in both directions
+        (review follow-up 5, #12/#14): a package of pure directory records
+        has Count = 0 while still creating directories, and a single record
+        for a deep path like 'a/b/c/payload.py' creates FOUR entries because
+        ExtractToDirectory materializes every missing parent. Counting
+        records would let a handful of deep paths reserve one entry each
+        while staging hundreds of inodes. The semantic-container gates use
+        this: those containers are never member-dispatched, so their bound
+        is about real inodes consumed.
     #>
     param([Parameter(Mandatory)][string]$Path)
     $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
@@ -159,13 +173,28 @@ function Get-ArchiveExpansionEstimate {
         try {
             $bytes = 0L
             $count = 0
-            $totalEntries = 0
+            # Distinct directory paths, whether they appear as their own
+            # record or only implicitly as some file's parent — a set, since
+            # many entries share ancestors and each inode is created once.
+            $dirs = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             foreach ($e in $zip.Entries) {
-                $totalEntries++
-                if ($e.FullName.EndsWith('/')) { continue }
-                $bytes += [int64]$e.Length; $count++
+                $name = $e.FullName -replace '\\', '/'
+                $isDirRecord = $name.EndsWith('/')
+                if (-not $isDirRecord) { $bytes += [int64]$e.Length; $count++ }
+                # Walk every ancestor path segment: 'a/b/c/f.py' contributes
+                # 'a', 'a/b', 'a/b/c'; the dir record 'a/b/' contributes the
+                # same 'a' and 'a/b'.
+                $parent = $name.TrimEnd('/')
+                while ($true) {
+                    $slash = $parent.LastIndexOf('/')
+                    if ($isDirRecord -and $parent) { [void]$dirs.Add($parent); $isDirRecord = $false; continue }
+                    if ($slash -lt 0) { break }
+                    $parent = $parent.Substring(0, $slash)
+                    if (-not $parent) { break }
+                    [void]$dirs.Add($parent)
+                }
             }
-            return @{ Bytes = $bytes; Count = $count; TotalEntries = $totalEntries }
+            return @{ Bytes = $bytes; Count = $count; TotalEntries = ($count + $dirs.Count) }
         } finally { $zip.Dispose() }
     } catch {
         return $null
@@ -211,7 +240,12 @@ function Test-ArchiveWouldExceedBudget {
           [switch]$SkipCountCheck, [switch]$CountAllEntries)
 
     $remainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
-    $remainingCount = $Budget.MaxMembers - $Budget.MemberCount
+    # StagedDirectories is part of what this budget bounds (review follow-up
+    # 5, #14) -- directories created by extraction consume inodes exactly as
+    # files do, but are never charged to MemberCount. Synthetic budgets built
+    # by the semantic-container gates set it to 0: those pools track their own
+    # entries, directories included, in MemberCount's slot already.
+    $remainingCount = $Budget.MaxMembers - $Budget.MemberCount - $Budget.StagedDirectories
     if (-not $SkipCountCheck -and $remainingCount -le 0) { return $true }
 
     $estimate = Get-ArchiveExpansionEstimate -Path $Path
@@ -308,6 +342,16 @@ function Expand-UnitInPlace {
         if ($extraction.Success) {
             $Unit.StagingPath = $extraction.StagingPath
             Write-Log -Level DEBUG -Message "StagingPath set: $($Unit.StagingPath)"
+            # Charge the directories this extraction just created (review
+            # follow-up 5, #14). Nothing else ever does: MemberCount counts
+            # dispatchable members, and member dispatch enumerates
+            # -File only, so a directory-only archive previously left every
+            # cumulative counter untouched while still consuming inodes.
+            # Charged for EVERY archive, semantic containers included --
+            # their own entry pools gate admission, but the inodes are just
+            # as real either way.
+            $Budget.StagedDirectories += @(Get-ChildItem -LiteralPath $extraction.StagingPath `
+                -Recurse -Directory -Force -ErrorAction SilentlyContinue).Count
         } else {
             Write-Log -Level WARN -Message "Extraction failed for $($Unit.Name) — analyzers requiring staging will skip."
         }
@@ -515,6 +559,7 @@ function Invoke-ArchiveMemberDispatch {
                     -Budget ([PSCustomObject]@{
                         MaxBytes   = $Budget.MaxBytes;                 ExpandedBytes = $Budget.ExpandedBytes
                         MaxMembers = $script:ArchiveTreeMaxMembers;    MemberCount   = $Budget.NestedSemanticEntries
+                        StagedDirectories = 0
                     }) -CountAllEntries)) {
             $budgetBlocked = $true
             $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
@@ -722,6 +767,7 @@ function Invoke-Scan {
             $topLevelSemanticBudget = [PSCustomObject]@{
                 MaxBytes = $budget.MaxBytes; ExpandedBytes = $budget.TopLevelSemanticBytes
                 MaxMembers = $script:ArchiveTreeMaxMembers; MemberCount = $budget.TopLevelSemanticEntries
+                StagedDirectories = 0
             }
             if ($unit.Type -eq 'archive' -and (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $budget)) {
                 $topLevelBudgetBlocked = $true

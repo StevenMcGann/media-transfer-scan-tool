@@ -207,7 +207,11 @@ function Expand-TarArchive {
     $budgetRemainingCount = [int64]0
     $budgetRemainingBytes = [int64]0
     if ($null -ne $Budget) {
-        $budgetRemainingCount = $Budget.MaxMembers - $Budget.MemberCount
+        # StagedDirectories included: directories already created by earlier
+        # extractions in this run consume inodes exactly as files do (review
+        # follow-up 5, #14), and this tarball's own directory entries are
+        # counted against the same headroom below.
+        $budgetRemainingCount = $Budget.MaxMembers - $Budget.MemberCount - $Budget.StagedDirectories
         $budgetRemainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
     }
     $budgetLocalCount = 0
@@ -289,33 +293,40 @@ function Expand-TarArchive {
                 if (@($script:NestedArchiveExt | Where-Object { $n.EndsWith($_) }).Count -gt 0) {
                     $nestedNames.Add($entryName)
                 }
+            }
 
-                if ($null -ne $Budget) {
-                    # Count exhaustion is a true dead end: the local count
-                    # only grows, so once it hits the remaining headroom, no
-                    # LATER entry (regardless of size) can ever be admitted
-                    # either -- stop reading entirely.
-                    if (($budgetLocalCount + 1) -gt $budgetRemainingCount) {
-                        $budgetStopped = $true
-                        break
-                    }
-                    # Per-entry byte miss is NOT exhaustion-wide (review
-                    # follow-up 5, #9 -- the same fix as
-                    # Invoke-ArchiveMemberDispatch's per-member loop, review
-                    # follow-up 5, #7): one large entry must not block a
-                    # LATER, smaller one that would still fit within the
-                    # remaining headroom on its own. Skip only this entry --
-                    # don't write it -- and keep reading subsequent headers;
-                    # TarReader discards the unread data automatically on the
-                    # next GetNextEntry() call.
-                    if (($budgetLocalBytes + $entrySize) -gt $budgetRemainingBytes) {
-                        $budgetStopped = $true
-                        $budgetSkippedNames.Add($entryName)
-                        continue
-                    }
-                    $budgetLocalCount++
-                    $budgetLocalBytes += $entrySize
+            # Budget applies to DIRECTORY entries as well as files (review
+            # follow-up 5, #14): a directory this loop creates is a real
+            # staged inode, and nothing downstream ever charges it --
+            # MemberCount counts dispatchable members, and member dispatch
+            # enumerates -File only. A tarball of pure directory entries
+            # previously consumed no budget at all. Only the BYTE half is
+            # file-specific; a directory contributes no length.
+            if ($null -ne $Budget) {
+                # Count exhaustion is a true dead end: the local count only
+                # grows, so once it hits the remaining headroom, no LATER
+                # entry (regardless of size) can ever be admitted either --
+                # stop reading entirely.
+                if (($budgetLocalCount + 1) -gt $budgetRemainingCount) {
+                    $budgetStopped = $true
+                    break
                 }
+                # Per-entry byte miss is NOT exhaustion-wide (review
+                # follow-up 5, #9 -- the same fix as
+                # Invoke-ArchiveMemberDispatch's per-member loop, review
+                # follow-up 5, #7): one large entry must not block a
+                # LATER, smaller one that would still fit within the
+                # remaining headroom on its own. Skip only this entry --
+                # don't write it -- and keep reading subsequent headers;
+                # TarReader discards the unread data automatically on the
+                # next GetNextEntry() call.
+                if ($isFileEntry -and ($budgetLocalBytes + $entrySize) -gt $budgetRemainingBytes) {
+                    $budgetStopped = $true
+                    $budgetSkippedNames.Add($entryName)
+                    continue
+                }
+                $budgetLocalCount++
+                if ($isFileEntry) { $budgetLocalBytes += $entrySize }
             }
 
             $dest = Join-Path $OutputDir $entryName

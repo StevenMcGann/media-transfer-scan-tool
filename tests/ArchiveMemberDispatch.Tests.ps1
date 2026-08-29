@@ -1409,3 +1409,96 @@ Describe 'Archive-member dispatch — cumulative entry cap for NESTED semantic c
         }
     }
 }
+
+Describe 'Archive-tree budget — implicit parent directories counted in the entry estimate (review follow-up 5, #14a)' {
+    It 'counts every inode ExtractToDirectory will create, not just central-directory records' {
+        # The BUG: TotalEntries counted archive RECORDS. A single record for
+        # a deep path like 'a/b/c/payload.py' reserves one entry while
+        # extraction materializes four inodes (three parent directories plus
+        # the file), so repeated deep-path containers could reserve almost
+        # nothing while staging hundreds of directories.
+        $zipPath = Join-Path $env:TEMP "mts-p12r1-$(Get-Random).zip"
+        try {
+            $fs = [System.IO.File]::Create($zipPath)
+            $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $za.CreateEntry('a/b/c/payload.py') | Out-Null   # 1 file + 3 implicit dirs
+                $za.CreateEntry('a/b/other.py')     | Out-Null   # 1 file, dirs already counted
+            } finally { $za.Dispose(); $fs.Dispose() }
+
+            $est = Get-ArchiveExpansionEstimate -Path $zipPath
+            $est.Count | Should -Be 2   # dispatchable files, unchanged semantics
+            # 2 files + dirs {a, a/b, a/b/c} -- each shared ancestor counted ONCE.
+            $est.TotalEntries | Should -Be 5
+        } finally { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Tarball extraction — directory entries consume the cumulative budget (review follow-up 5, #14b)' {
+    It 'charges tar directory entries, so a directory-only tarball cannot stage inodes for free' {
+        # The BUG: only FILE entries incremented the tar budget counters, yet
+        # every directory entry was still created on disk. Nothing downstream
+        # charged them either -- MemberCount counts dispatchable members and
+        # member dispatch enumerates -File only -- so a directory-only
+        # tarball consumed no budget at all, and the per-archive 50,000-entry
+        # cap resets per tarball.
+        $tmpDir = Join-Path $env:TEMP "mts-p12r2-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $tarPath = Join-Path $tmpDir 'dirs.tgz'
+        $fileStream = [System.IO.File]::Create($tarPath)
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        $tarWriter  = [System.Formats.Tar.TarWriter]::new($gzipStream)
+        try {
+            foreach ($i in 1..10) {
+                $tarWriter.WriteEntry([System.Formats.Tar.PaxTarEntry]::new(
+                    [System.Formats.Tar.TarEntryType]::Directory, "dir$i/"))
+            }
+        } finally { $tarWriter.Dispose(); $gzipStream.Dispose(); $fileStream.Dispose() }
+
+        $stage = Join-Path $env:TEMP "mts-p12r2-stage-$(Get-Random)"
+        try {
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxMembers = 4   # room for 4 directories, not 10
+            $r = Expand-SubmissionArchive -InputFile $tarPath -OutputDir $stage -Budget $budget
+
+            $r.Success | Should -BeTrue
+            # Extraction stopped at the count cap instead of creating all 10.
+            @(Get-ChildItem -LiteralPath $stage -Recurse -Directory).Count | Should -Be 4
+            @($r.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 1
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'charges directories created by an extraction to the run-wide StagedDirectories counter' {
+        # Cumulative half of the same fix: without this, every new tarball
+        # got a fresh full headroom snapshot and the bound never accumulated
+        # across archives.
+        $tmpDir = Join-Path $env:TEMP "mts-p12r3-$(Get-Random)"
+        $workDir = Join-Path $env:TEMP "mts-p12r3-work-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        try {
+            $zipPath = Join-Path $tmpDir 'dirs.zip'
+            $fs = [System.IO.File]::Create($zipPath)
+            $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try { foreach ($i in 1..6) { $za.CreateEntry("dir$i/") | Out-Null } } finally { $za.Dispose(); $fs.Dispose() }
+
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $workDir
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'dirs.zip'; Path = $zipPath
+                                        RelativePath = 'dirs.zip'; StagingPath = $null }
+            $budget = New-ArchiveTreeBudget
+            Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget | Out-Null
+
+            $unit.StagingPath | Should -Not -BeNullOrEmpty
+            $budget.StagedDirectories | Should -Be 6
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

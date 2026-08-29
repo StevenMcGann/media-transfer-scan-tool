@@ -258,6 +258,28 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       before extraction and rolled back if it fails), kept separate from
       `MemberCount` so a semantic container is still never blocked merely
       because the dispatchable-member count is exhausted.
+    - An eleventh review round closed the last two ways staged inodes could
+      go uncounted — both cases where the entry accounting measured archive
+      RECORDS rather than the filesystem entries extraction actually
+      creates:
+      - `Get-ArchiveExpansionEstimate`'s `TotalEntries` counted
+        central-directory records, but `ExtractToDirectory` materializes
+        every missing parent directory: one record for `a/b/c/payload.py`
+        creates four inodes. A handful of deep paths could reserve one entry
+        each while staging hundreds of directories. `TotalEntries` now
+        counts files plus every distinct directory in their paths (implicit
+        ancestors included, each shared ancestor counted once).
+      - `Expand-TarArchive` incremented its budget counters for FILE entries
+        only, while still creating every directory entry — and nothing
+        downstream charged those either, since `MemberCount` counts
+        dispatchable members and member dispatch enumerates
+        `Get-ChildItem -File`. A directory-only tarball consumed no budget
+        at all, and the per-archive 50,000-entry cap resets per tarball.
+        Directory entries now consume the tar entry budget, and a new
+        run-wide `Budget.StagedDirectories` counter — charged after every
+        successful extraction and subtracted from the count headroom
+        wherever an extraction is gated — makes the bound cumulative across
+        archives rather than resetting for each one.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

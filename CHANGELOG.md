@@ -8,6 +8,8 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-29
+
 ### Added
 - **Recursive archive-member dispatch** ([#31](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/31)).
   Contents of a generic `archive` unit (`.zip`, `.tgz`/`.tar.gz`) were previously

@@ -157,10 +157,6 @@ Maintainers should also review:
 | 4 | A suitable PowerShell 7 runtime was not available |
 | 5 | Offline bundle integrity verification failed |
 
-## Project Lineage
-
-This project is a clean-room successor to [scan-python-packages](https://github.com/StevenMcGann/scan-python-packages). The earlier project remains a separate, active tool; Media Transfer Scan Tool expands the scope beyond Python while retaining Python scanning.
-
 ## License
 
 Licensed under the [MIT License](LICENSE).

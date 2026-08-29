@@ -1149,3 +1149,100 @@ Describe 'Invoke-Scan — top-level semantic-container bytes stay out of the sha
         }
     }
 }
+
+Describe 'Tarball extraction — an oversized entry does not block a later smaller one (review follow-up 5, #9)' {
+    It 'continues past a tar entry that does not individually fit and still writes a later smaller one' {
+        # The BUG: the same break-vs-continue mistake as
+        # Invoke-ArchiveMemberDispatch's per-member loop (review follow-up 5,
+        # #7), but in the tar streaming path -- a per-entry byte miss `break`ed
+        # the WHOLE remaining stream, even though a later, smaller entry would
+        # still fit within remaining headroom on its own. An attacker could
+        # place one oversized benign entry right before a small malicious
+        # script to keep it from ever being written or analyzed.
+        $tmpDir = Join-Path $env:TEMP "mts-p9r1-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $tarPath = Join-Path $tmpDir 'mixed.tgz'
+        $fileStream = [System.IO.File]::Create($tarPath)
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        $tarWriter  = [System.Formats.Tar.TarWriter]::new($gzipStream)
+        try {
+            $bigEntry = [System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile, 'big.bin')
+            $bigEntry.DataStream = [System.IO.MemoryStream]::new([byte[]]::new(5000))
+            $tarWriter.WriteEntry($bigEntry)
+
+            $smallEntry = [System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile, 'small.txt')
+            $smallEntry.DataStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes('hello'))
+            $tarWriter.WriteEntry($smallEntry)
+        } finally { $tarWriter.Dispose(); $gzipStream.Dispose(); $fileStream.Dispose() }
+
+        $stage = Join-Path $env:TEMP "mts-p9r1-stage-$(Get-Random)"
+        try {
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxBytes = 100   # big.bin (5000) alone exceeds this; small.txt's own bytes easily fit
+            $r = Expand-SubmissionArchive -InputFile $tarPath -OutputDir $stage -Budget $budget
+
+            $r.Success | Should -BeTrue   # stopping early on ONE entry is normal, not an error
+            @($r.Findings | Where-Object {
+                $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.Issue -match 'big\.bin' }).Count | Should -Be 1
+            # small.txt was STILL written -- the stream did not stop at big.bin.
+            Test-Path -LiteralPath (Join-Path $stage 'small.txt') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $stage 'big.bin')   | Should -BeFalse
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-Scan — cumulative entry cap for top-level semantic containers (review follow-up 5, #10)' {
+    It 'blocks a later top-level wheel once earlier ones have used up the semantic-container ENTRY budget, even when bytes stay near zero' {
+        # The BUG: the cumulative gate (review follow-up 5, #6) checked bytes
+        # only (-SkipCountCheck). A package built mostly from empty files or
+        # directory entries estimates near-zero bytes regardless of how many
+        # real filesystem entries it creates -- the byte gate never trips,
+        # and each package's OWN entry-count cap (Test-ZipArchiveHazards,
+        # 50,000) is per-archive, not cumulative, so many such packages could
+        # still exhaust inodes despite the run-wide byte limit.
+        $tmpDir = Join-Path $env:TEMP "mts-p9r2-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $out = Join-Path $env:TEMP "mts-p9r2-out-$(Get-Random)"
+        try {
+            # Numeric prefixes make discovery order deterministic. Every
+            # entry is zero bytes -- only entry COUNT should ever gate these.
+            foreach ($name in @('01_pkg.whl', '02_pkg.whl')) {
+                $fs = [System.IO.File]::Create((Join-Path $tmpDir $name))
+                $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+                try {
+                    foreach ($i in 1..20) { $za.CreateEntry("file$i.txt") | Out-Null }
+                } finally { $za.Dispose(); $fs.Dispose() }
+            }
+
+            $origMaxMembers = $script:ArchiveTreeMaxMembers
+            try {
+                # Room for ONE package's 20 entries, not two.
+                $script:ArchiveTreeMaxMembers = 25
+                $r = Invoke-Scan -Path $tmpDir -Profile core -AnalyzerDir $script:Analyzers `
+                    -ReportsDir $out -Mode offline
+
+                $pkgUnits = @($r.Units | Where-Object { $_.Name -like '*_pkg.whl' })
+                $pkgUnits.Count | Should -Be 2
+                $blockedUnits = @($pkgUnits | Where-Object {
+                    @($_.Findings | Where-Object {
+                        $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.Issue -match 'semantic-container budget' }).Count -gt 0
+                })
+                # Exactly one hits the cumulative entry cap -- proves the
+                # bound is enforced purely on COUNT (bytes never came close
+                # to any limit) -- but never both, since the first admitted
+                # one must never be starved by this gate on its own.
+                $blockedUnits.Count | Should -Be 1
+                $notBlockedUnits = @($pkgUnits | Where-Object { $_ -notin $blockedUnits })
+                $notBlockedUnits.Count | Should -Be 1
+            } finally {
+                $script:ArchiveTreeMaxMembers = $origMaxMembers
+            }
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

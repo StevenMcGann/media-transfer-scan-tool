@@ -202,6 +202,25 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
       from this category. The shared-budget charge for a top-level semantic
       container's expanded size is removed; only `TopLevelSemanticBytes`
       charges now.
+    - An eighth review round found two more gaps in the same area:
+      - `Expand-TarArchive`'s per-entry streaming loop had the same
+        break-vs-continue mistake as `Invoke-ArchiveMemberDispatch`'s
+        per-member loop above: a per-entry byte miss `break`ed the WHOLE
+        remaining stream, even though a later, smaller entry would still fit
+        within remaining headroom on its own. A byte miss now only skips
+        that one entry and keeps reading subsequent headers; the entry-count
+        exhaustion check (a true dead end once hit) still stops the stream
+        entirely.
+      - The cumulative top-level semantic-container gate (this round's #6)
+        checked bytes only. A package built mostly from empty files or
+        directory entries estimates near-zero bytes regardless of how many
+        real filesystem entries it creates — the byte gate never tripped,
+        and each package's own 50,000-entry cap
+        (`Test-ZipArchiveHazards`) is per-archive, not cumulative, so many
+        such packages could still exhaust inodes despite the run-wide byte
+        limit. A parallel `Budget.TopLevelSemanticEntries` counter, capped
+        against `$script:ArchiveTreeMaxMembers`, now gates alongside bytes —
+        same "first container always exempt" rule as before.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

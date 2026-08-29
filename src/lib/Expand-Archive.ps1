@@ -195,6 +195,7 @@ function Expand-TarArchive {
     )
     $findings = [System.Collections.Generic.List[object]]::new()
     $budgetStopped = $false
+    $budgetSkippedNames = [System.Collections.Generic.List[string]]::new()
     $localTotal = 0L
     $entryCount = 0
     $symlinkCount = 0
@@ -290,10 +291,27 @@ function Expand-TarArchive {
                 }
 
                 if ($null -ne $Budget) {
-                    if (($budgetLocalCount + 1) -gt $budgetRemainingCount -or
-                        ($budgetLocalBytes + $entrySize) -gt $budgetRemainingBytes) {
+                    # Count exhaustion is a true dead end: the local count
+                    # only grows, so once it hits the remaining headroom, no
+                    # LATER entry (regardless of size) can ever be admitted
+                    # either -- stop reading entirely.
+                    if (($budgetLocalCount + 1) -gt $budgetRemainingCount) {
                         $budgetStopped = $true
                         break
+                    }
+                    # Per-entry byte miss is NOT exhaustion-wide (review
+                    # follow-up 5, #9 -- the same fix as
+                    # Invoke-ArchiveMemberDispatch's per-member loop, review
+                    # follow-up 5, #7): one large entry must not block a
+                    # LATER, smaller one that would still fit within the
+                    # remaining headroom on its own. Skip only this entry --
+                    # don't write it -- and keep reading subsequent headers;
+                    # TarReader discards the unread data automatically on the
+                    # next GetNextEntry() call.
+                    if (($budgetLocalBytes + $entrySize) -gt $budgetRemainingBytes) {
+                        $budgetStopped = $true
+                        $budgetSkippedNames.Add($entryName)
+                        continue
                     }
                     $budgetLocalCount++
                     $budgetLocalBytes += $entrySize
@@ -336,9 +354,14 @@ function Expand-TarArchive {
             -Recommendation 'Nested archives are a common bomb/evasion vector — review the recursively-scanned findings for these members.'))
     }
     if ($budgetStopped) {
+        $skippedNote = if ($budgetSkippedNames.Count -gt 0) {
+            $sample = ($budgetSkippedNames | Select-Object -First 10) -join ', '
+            $more   = if ($budgetSkippedNames.Count -gt 10) { " and $($budgetSkippedNames.Count - 10) more" } else { '' }
+            " ({0} entries skipped: {1}{2})" -f $budgetSkippedNames.Count, $sample, $more
+        } else { '' }
         $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' -Confidence 'HIGH' `
             -UnitType 'archive' -File $RelPath `
-            -Issue 'Tarball extraction stopped partway through — the shared archive-tree budget for this scan was reached.' `
+            -Issue "Tarball extraction stopped partway through — the shared archive-tree budget for this scan was reached.$skippedNote" `
             -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
             -Recommendation 'Absence of findings past this point is absence of coverage, not evidence remaining content is safe.'))
     }

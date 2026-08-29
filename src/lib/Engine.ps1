@@ -82,6 +82,16 @@ function New-ArchiveTreeBudget {
         # could still exhaust disk with no run-wide limit. Capped against the
         # SAME $script:ArchiveTreeMaxBytes ceiling, tracked independently.
         TopLevelSemanticBytes = 0L
+        # Cumulative FILE-entry count extracted from top-level semantic
+        # containers, same independent tracking as TopLevelSemanticBytes
+        # above (review follow-up 5, #9). A byte-only gate never trips for a
+        # package built mostly from empty files or directory entries (each
+        # near-zero bytes) — each package's own 50,000-entry cap
+        # (Test-ZipArchiveHazards) is PER-ARCHIVE, not cumulative, so many
+        # such packages could still exhaust inodes despite the run-wide byte
+        # limit. Capped against $script:ArchiveTreeMaxMembers, same as the
+        # shared budget's own member count.
+        TopLevelSemanticEntries = 0
     }
 }
 
@@ -621,26 +631,29 @@ function Invoke-Scan {
             # wheels/eggs/.nupkg files -- each individually allowed up to the
             # 512MB per-archive decompression-bomb cap -- could cumulatively
             # exhaust disk with no run-wide limit. Gated instead against
-            # $budget.TopLevelSemanticBytes, a SEPARATE running total that
-            # only this category ever charges or is blocked by -- an
-            # unrelated generic archive elsewhere still can never starve
-            # Python/NuGet coverage, but enough top-level semantic containers
-            # in the SAME scan still hit a real ceiling.
+            # $budget.TopLevelSemanticBytes/TopLevelSemanticEntries, SEPARATE
+            # running totals that only this category ever charges or is
+            # blocked by -- an unrelated generic archive elsewhere still can
+            # never starve Python/NuGet coverage, but enough top-level
+            # semantic containers in the SAME scan still hit a real ceiling.
+            # Both bytes AND entry count are checked (review follow-up 5,
+            # #9): byte-only would never trip for a package built mostly from
+            # empty files or directory entries, each near-zero bytes but
+            # still real filesystem entries once extracted.
             #
             # The gate only ever applies from the SECOND top-level semantic
-            # container onward ($budget.TopLevelSemanticBytes -gt 0, i.e. this
-            # category has already gotten at least one guaranteed extraction
-            # in this scan) -- the FIRST one is always unconditional, exactly
-            # preserving review follow-up 2, #4's original guarantee, which is
-            # tested against a budget configured with MaxBytes/MaxMembers = 0
-            # (not just a nonzero one exhausted by prior activity): with
-            # nothing charged to this category yet, that scenario is
-            # indistinguishable from "no bound configured at all" and must
-            # still extract.
+            # container onward (this category has already gotten at least
+            # one guaranteed extraction in this scan) -- the FIRST one is
+            # always unconditional, exactly preserving review follow-up 2,
+            # #4's original guarantee, which is tested against a budget
+            # configured with MaxBytes/MaxMembers = 0 (not just a nonzero one
+            # exhausted by prior activity): with nothing charged to this
+            # category yet, that scenario is indistinguishable from "no
+            # bound configured at all" and must still extract.
             $topLevelBudgetBlocked = $false
             $topLevelSemanticBudget = [PSCustomObject]@{
                 MaxBytes = $budget.MaxBytes; ExpandedBytes = $budget.TopLevelSemanticBytes
-                MaxMembers = 0; MemberCount = 0
+                MaxMembers = $script:ArchiveTreeMaxMembers; MemberCount = $budget.TopLevelSemanticEntries
             }
             if ($unit.Type -eq 'archive' -and (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $budget)) {
                 $topLevelBudgetBlocked = $true
@@ -650,8 +663,8 @@ function Invoke-Scan {
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
             } elseif ($unit.Type -ne 'archive' -and (Test-IsArchiveUnit -Unit $unit) -and
-                      $budget.TopLevelSemanticBytes -gt 0 -and
-                      (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget -SkipCountCheck)) {
+                      ($budget.TopLevelSemanticBytes -gt 0 -or $budget.TopLevelSemanticEntries -gt 0) -and
+                      (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget)) {
                 $topLevelBudgetBlocked = $true
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
@@ -662,23 +675,25 @@ function Invoke-Scan {
                 $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
                 foreach ($f in $expansion.Findings) { $findings.Add($f) }
 
-                # A top-level semantic container's expanded size is otherwise
-                # never counted (it isn't member-dispatched, so no per-member
-                # loop charges it) -- charge its real on-disk footprint to
-                # $budget.TopLevelSemanticBytes ONLY (review follow-up 5, #8).
-                # It must NOT also count against the shared $budget.ExpandedBytes
-                # that gates GENERIC archives: this whole category is
-                # deliberately independent (review follow-up 5, #6) so a
-                # generic archive's fate never depends on whether an unrelated
-                # wheel/nupkg happened to be scanned first in this run --
-                # charging both here would have silently reintroduced exactly
-                # that enumeration-order dependence for the shared side.
+                # A top-level semantic container's expanded size/entry count
+                # is otherwise never counted (it isn't member-dispatched, so
+                # no per-member loop charges it) -- charge its real on-disk
+                # footprint to $budget.TopLevelSemanticBytes/Entries ONLY
+                # (review follow-up 5, #8/#9). It must NOT also count against
+                # the shared $budget.ExpandedBytes/MemberCount that gate
+                # GENERIC archives: this whole category is deliberately
+                # independent (review follow-up 5, #6) so a generic archive's
+                # fate never depends on whether an unrelated wheel/nupkg
+                # happened to be scanned first in this run -- charging both
+                # here would have silently reintroduced exactly that
+                # enumeration-order dependence for the shared side.
                 if ($expansion.IsArchive -and $unit.Type -ne 'archive' -and $unit.StagingPath) {
-                    $expandedSize = (Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                        Measure-Object -Property Length -Sum).Sum
-                    if ($expandedSize) {
-                        $budget.TopLevelSemanticBytes += [int64]$expandedSize
+                    $expandedMeasure = Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
+                        Measure-Object -Property Length -Sum
+                    if ($expandedMeasure.Sum) {
+                        $budget.TopLevelSemanticBytes += [int64]$expandedMeasure.Sum
                     }
+                    $budget.TopLevelSemanticEntries += $expandedMeasure.Count
                 }
             }
 

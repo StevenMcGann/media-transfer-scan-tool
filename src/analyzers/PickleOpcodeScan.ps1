@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    PickleOpcodeScan analyzer — static triage of ML/model files (PLAN §4 v0.7).
+    PickleOpcodeScan analyzer — static triage of ML/model files.
 
     Delegates to src/helpers/scan_pickle.py, which uses pickletools.genops to walk
     the pickle opcode stream WITHOUT executing it. CRITICAL invariant: a pickle is

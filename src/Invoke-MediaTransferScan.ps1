@@ -3,7 +3,7 @@
 .SYNOPSIS
     media-transfer-scan-tool - static security scanner for media-transfer review.
 .DESCRIPTION
-    Engine entry point (PLAN §3.1): discover -> classify -> dispatch -> render.
+    Engine entry point: discover -> classify -> dispatch -> render.
     Renders one finding model as canonical JSON + HTML + slim TXT.
     All analysis is STATIC. PowerShell 7.4+ only.
 .PARAMETER Path
@@ -14,8 +14,11 @@
     Per-run overrides by analyzer name.
 .PARAMETER Quiet
     Suppress human/log console output (machine/automation use).
+.PARAMETER AutoInstall
+    Compatibility switch. Online mode provisions missing pinned tools without
+    prompting; offline mode never installs them.
 .PARAMETER OutputFormat
-    'all' (default) or 'json' to also echo the JSON report path/content for capture.
+    'all' (default) or 'json' to also echo the JSON report path for capture.
 .NOTES
     Version : 0.13.0
 #>
@@ -45,7 +48,7 @@ foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Prov
     . (Join-Path $here "lib/$lib.ps1")
 }
 
-# Exit codes (PLAN §3.9 automation contract).
+# Exit codes (documented in docs/contract.md).
 $script:ExitClean   = 0
 $script:ExitFindings = 10
 $script:ExitError   = 2

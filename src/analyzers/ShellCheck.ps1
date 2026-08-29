@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    ShellCheck analyzer — static analysis of shell scripts (PLAN §4 v0.4).
+    ShellCheck analyzer — static analysis of shell scripts.
 
     Two-layer analysis on shell units (.sh/.bash/.zsh/.ksh) and on shell
     content detected via the classifier (disguised scripts, v0.2):

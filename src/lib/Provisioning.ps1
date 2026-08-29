@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Provisioning.ps1 - the Resolve-Tool layer (PLAN §3.4).
+    Provisioning.ps1 - the Resolve-Tool layer.
 
     Handles four kinds of dependency:
       pip     - Python packages into the shared scanner venv
@@ -239,7 +239,7 @@ function Install-PipPackage {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Resolve-Tool — the unified provisioning contract (PLAN §3.4)
+# Resolve-Tool — the unified provisioning contract
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Resolve-PipTool {
@@ -270,7 +270,7 @@ function Resolve-PipTool {
     }
 
     # Online mode is the convenience mode: install on demand. We do NOT prompt —
-    # the engine must run non-interactively under the bootstrapper (§3.9), where
+    # the engine must run non-interactively under the bootstrapper, where
     # Read-Host has no console. ($AutoInstall is implied online and kept only for
     # explicit callers / signature stability.)
     try {
@@ -393,7 +393,11 @@ function Invoke-Provisioning {
         $pythonCmd = Find-Python
         if (-not $pythonCmd) { throw 'Python 3 is required for the enabled pip-based analyzers but was not found on PATH.' }
         $venv = Initialize-ScannerVenv -PythonCmd $pythonCmd -VenvDir $VenvDir
-        Update-PipBootstrap -PythonExe $venv.Python
+        if ($Mode -eq 'online') {
+            Update-PipBootstrap -PythonExe $venv.Python
+        } else {
+            Write-Log -Level INFO -Message 'OFFLINE: skipping pip/setuptools/wheel bootstrap upgrade.'
+        }
     } else {
         Write-Log -Level INFO -Message 'No pip-based analyzers enabled — skipping Python venv setup.'
     }

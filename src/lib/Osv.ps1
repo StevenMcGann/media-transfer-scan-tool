@@ -10,7 +10,7 @@
     the whole batch (not once per dependency) to pull summary/severity/fixed
     versions for a first-class finding. Best-effort: a network failure at
     either stage degrades to one coverage-gap finding, never a silent empty
-    result and never a thrown exception (PLAN §3.2 "return, don't throw").
+    result and never a thrown exception (the analyzer return-don't-throw rule).
 #>
 
 Set-StrictMode -Version Latest
@@ -192,7 +192,7 @@ function Test-OsvFixNotNewerThan {
         confidently comparable — this must never hide a real fix because a
         pre-release suffix or exotic version scheme couldn't be parsed; the
         cost of an occasional over-inclusive hint is far lower than the cost of
-        silently dropping a valid one (PLAN §3.2 "return, don't throw" spirit).
+        silently dropping a valid one (consistent with the return-don't-throw rule).
     #>
     param([Parameter(Mandatory)][string]$FixVersion, [Parameter(Mandatory)][string]$CurrentVersion)
     $fTok = @($FixVersion     -split '[.\-+_]' | Where-Object { $_ -ne '' })

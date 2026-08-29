@@ -469,7 +469,7 @@ Describe 'OsvScan — NuGet (.nupkg), offline-safe' {
             param($Queries, $TimeoutSec)
             return @($Queries | ForEach-Object { [PSCustomObject]@{} })   # no-vuln shape
         }
-        $r = ScanDir 'nuget/nested_decoy' -Mode online
+        [void](ScanDir 'nuget/nested_decoy' -Mode online)
         Should -Invoke -CommandName Invoke-OsvQueryBatch -Times 1 -ParameterFilter {
             $Queries.Count -eq 1 -and
             $Queries[0].package.name -eq 'Newtonsoft.Json' -and

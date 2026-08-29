@@ -72,8 +72,8 @@ function Invoke-BoundedProcess {
             $stderr   = $errTask.GetAwaiter().GetResult()
         } else {
             $timedOut = $true
-            try { $proc.Kill($true) } catch { }          # kill the whole tree
-            try { [void]$proc.WaitForExit(5000) } catch { }
+            try { $proc.Kill($true) } catch { Write-Verbose "Process-tree termination failed: $_" }
+            try { [void]$proc.WaitForExit(5000) } catch { Write-Verbose "Timed-out process did not exit cleanly: $_" }
             if ($outTask.IsCompleted) { $stdout = $outTask.Result }   # best-effort partial
             if ($errTask.IsCompleted) { $stderr = $errTask.Result }
         }

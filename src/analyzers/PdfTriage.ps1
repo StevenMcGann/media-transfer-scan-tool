@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    PdfTriage analyzer — static keyword triage of PDF files (PLAN §4 v0.3).
+    PdfTriage analyzer — static keyword triage of PDF files.
 
     Pure PowerShell, NO third-party PDF library: it counts the suspicious PDF
     keywords that indicate active content (pdfid-style). This is deliberate —

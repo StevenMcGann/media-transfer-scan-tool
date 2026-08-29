@@ -29,7 +29,7 @@ function Write-Log {
     }
     if (-not $script:Quiet) {
         # Human/log noise goes to the information/host streams, never stdout,
-        # so -Quiet -OutputFormat json keeps stdout pure (PLAN §3.9).
+    # so -Quiet -OutputFormat json keeps stdout pure.
         $color = switch ($Level) { 'INFO' { 'Cyan' } 'WARN' { 'Yellow' } 'ERROR' { 'Red' } 'DEBUG' { 'DarkGray' } }
         Write-Host $entry -ForegroundColor $color
     }

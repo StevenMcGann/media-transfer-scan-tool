@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Engine.ps1 - the pipeline (PLAN §3.1): discover -> classify -> extract -> dispatch -> aggregate.
+    Engine.ps1 - the pipeline: discover -> classify -> extract -> dispatch -> aggregate.
     Returns a result object that the renderers (Report.ps1) consume.
 
     Recursive archive-member dispatch (issue #31): a generic 'archive' unit's
@@ -260,7 +260,7 @@ function Test-ArchiveWouldExceedBudget {
 function Invoke-UnitDispatch {
     <#
         Select analyzers for $Unit, invoke each under the "return, don't throw"
-        contract (PLAN §3.2 rule 2), and report whether any TYPE-SPECIFIC
+        analyzer contract, and report whether any TYPE-SPECIFIC
         analyzer (UnitTypes other than 'any') covered it. This is the exact
         select+invoke block the top-level scan loop used inline before issue
         #31 — factored out so archive-member dispatch (below) can reuse it
@@ -281,7 +281,7 @@ function Invoke-UnitDispatch {
 
     foreach ($analyzer in $selected) {
         try {
-            # Return, don't throw (PLAN §3.2 rule 2)
+            # Return findings; do not throw from an analyzer.
             $out = & $analyzer.Invoke $Unit $Context
             foreach ($f in @($out)) { if ($f) { $findings.Add($f) } }
         } catch {

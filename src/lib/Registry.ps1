@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Registry.ps1 - analyzer registry (PLAN §3.2). Imports self-describing
+    Registry.ps1 - analyzer registry. Imports self-describing
     descriptors from src/analyzers/*.ps1 and selects them per unit + profile.
 #>
 

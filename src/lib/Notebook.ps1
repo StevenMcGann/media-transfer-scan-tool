@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Notebook.ps1 - Jupyter notebook (.ipynb) code-cell projection (PLAN §4).
+    Notebook.ps1 - Jupyter notebook (.ipynb) code-cell projection.
 
     Ported from scan-python-packages v1.6.1. The notebook is parsed as JSON and
     NEVER executed. Only cell_type='code' cells are copied into a generated .py

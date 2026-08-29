@@ -11,11 +11,13 @@ The PE/ELF builders below are ported from scan-python-packages' fixture
 generator so native-binary triage can be tested without shipping opaque blobs.
 """
 
+import gzip
 import io
 import json
 import os
 import struct
 import random
+import tarfile as _tarfile
 import zipfile
 
 FIXTURES_DIR = os.path.dirname(__file__)
@@ -298,6 +300,25 @@ def write(path: str, data: bytes) -> None:
     print(f'  wrote {path}')
 
 
+def write_tgz(path: str, members: list[tuple[str, bytes]]) -> None:
+    """Write a reproducible gzip-compressed tar archive."""
+    with open(path, 'wb') as raw:
+        # tarfile.open(..., 'w:gz') fixes member mtimes but not the gzip-header
+        # mtime. Supplying the gzip layer explicitly keeps the entire file stable.
+        with gzip.GzipFile(filename='', mode='wb', fileobj=raw,
+                           compresslevel=9, mtime=FIXED_EPOCH) as gz:
+            with _tarfile.open(fileobj=gz, mode='w', format=_tarfile.PAX_FORMAT) as tf:
+                for name, data in members:
+                    info = _tarfile.TarInfo(name)
+                    info.size = len(data)
+                    info.mtime = FIXED_EPOCH
+                    info.mode = 0o644
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ''
+                    tf.addfile(info, io.BytesIO(data))
+    print(f'  wrote {path}')
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Python-archive hazard fixtures
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,6 +374,13 @@ clean_py = (
     '    return a + b\n'
 )
 write_text = lambda p, s: (open(p, 'w', encoding='utf-8', newline='\n').write(s), print(f'  wrote {p}'))[1]
+
+
+def write_text_checkout(path: str, text: str) -> None:
+    """Write tracked text using the checkout platform's configured newline."""
+    with open(path, 'w', encoding='utf-8', newline=None) as f:
+        f.write(text)
+    print(f'  wrote {path}')
 write_text(os.path.join(PYSRC_DIR, 'clean.py'), clean_py)
 
 # Risky code — Bandit B307 (eval, MEDIUM) + B602 (subprocess shell=True, HIGH)
@@ -620,8 +648,6 @@ write_text(os.path.join(PS_DIR, 'defender.ps1'),
 # ─────────────────────────────────────────────────────────────────────────────
 # npm fixtures (v0.6)
 # ─────────────────────────────────────────────────────────────────────────────
-import tarfile as _tarfile
-
 # Clean package.json — only normal scripts, no install hooks
 write_text(os.path.join(NPM_DIR, 'clean', 'package.json'),
     json.dumps({"name": "clean-pkg", "version": "1.0.0",
@@ -651,10 +677,7 @@ write_text(os.path.join(NPM_DIR, 'js', 'clean.js'),
 _tgz = os.path.join(NPM_DIR, 'tarball', 'evil_pkg-1.0.0.tgz')
 _pjbytes = json.dumps({"name": "evil-tarball", "version": "1.0.0",
     "scripts": {"postinstall": "node ./steal.js"}}, indent=2).encode('utf-8')
-with _tarfile.open(_tgz, 'w:gz') as tf:
-    info = _tarfile.TarInfo('package/package.json'); info.size = len(_pjbytes); info.mtime = FIXED_EPOCH
-    tf.addfile(info, io.BytesIO(_pjbytes))
-print(f'  wrote {_tgz}')
+write_tgz(_tgz, [('package/package.json', _pjbytes)])
 
 # Lockfile with a known-vulnerable exact version (for the online OSV layer).
 # lodash 4.17.4 has multiple published advisories in OSV.
@@ -671,14 +694,14 @@ write_text(os.path.join(NPM_DIR, 'locked', 'package-lock.json'),
 # ─────────────────────────────────────────────────────────────────────────────
 # Clean: exact-pinned, not (currently) vulnerable — offline/structural assertions
 # only; never asserted against live OSV results, which can change over time.
-write_text(os.path.join(PYREQ_DIR, 'clean', 'requirements.txt'),
+write_text_checkout(os.path.join(PYREQ_DIR, 'clean', 'requirements.txt'),
     "# clean, exact-pinned deps\n"
     "certifi==2024.2.2\n")
 
 # Unpinned: every line exercises a different "not an exact pin" shape. No
 # network needed — these must all be reported as OSV-PYPI-UNPINNED and never
 # reach the querybatch call.
-write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
+write_text_checkout(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
     "# range specifier\n"
     "flask>=2.0\n"
     "# no specifier at all\n"
@@ -707,7 +730,7 @@ write_text(os.path.join(PYREQ_DIR, 'unpinned', 'requirements.txt'),
 # options are appended on continuation lines. Must still be recognized as
 # pinned — offline-safe assertion: the offline coverage-gap note fires only
 # when at least one dependency was actually parsed as pinned.
-write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
+write_text_checkout(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
     "certifi==2024.2.2 \\\n"
     "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000a \\\n"
     "    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000b\n"
@@ -722,7 +745,7 @@ write_text(os.path.join(PYREQ_DIR, 'hash_pinned', 'requirements.txt'),
 
 # Vulnerable: exact-pinned to a version with well-known published advisories
 # (CVE-2023-44271 and others exist for Pillow < 10.0.1) — for the Online layer.
-write_text(os.path.join(PYREQ_DIR, 'vulnerable', 'requirements.txt'),
+write_text_checkout(os.path.join(PYREQ_DIR, 'vulnerable', 'requirements.txt'),
     "Pillow==9.5.0\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,12 +994,11 @@ write(os.path.join(ARCMEM_DIR, 'malicious_bin.zip'), buf.getvalue())
 #    returning control, a tight budget must leave LATER entries unextracted
 #    while EARLIER ones (within budget) are still written.
 _multi_tar = os.path.join(ARCMEM_DIR, 'multi_member.tgz')
-with _tarfile.open(_multi_tar, 'w:gz') as tf:
-    for _i, _size in enumerate([1000, 2000, 3000], start=1):
-        _data = (str(_i).encode() * _size)[:_size]
-        _info = _tarfile.TarInfo(f'file{_i}.bin'); _info.size = len(_data); _info.mtime = FIXED_EPOCH
-        tf.addfile(_info, io.BytesIO(_data))
-print(f'  wrote {_multi_tar}')
+_multi_members = []
+for _i, _size in enumerate([1000, 2000, 3000], start=1):
+    _data = (str(_i).encode() * _size)[:_size]
+    _multi_members.append((f'file{_i}.bin', _data))
+write_tgz(_multi_tar, _multi_members)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VB-family fixtures (issue #25) — exported VBA modules and VBScript.

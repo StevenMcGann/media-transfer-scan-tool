@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Report.ps1 - three renderers over one finding model (PLAN §3.8):
+    Report.ps1 - three renderers over one finding model:
       JSON (canonical, machine), HTML (primary human), slim TXT (summary).
     HTML encodes ALL submission-derived values and sets a strict inline CSP.
 #>
@@ -10,7 +10,7 @@
 $script:SchemaVersion = '1.0.0'
 
 function ConvertTo-HtmlEncoded {
-    # Encode untrusted submission-derived text before it enters HTML (PLAN §3.8
+# Encode untrusted submission-derived text before it enters HTML
     # mandatory anti-injection rule). Never interpolate raw submission data.
     param([string]$Text)
     if ($null -eq $Text) { return '' }
@@ -105,7 +105,7 @@ function Write-HtmlReport {
         "<p class='warn'>Not checked this run (disabled): $(ConvertTo-HtmlEncoded ($Model.DisabledAnalyzers -join ', '))</p>"
     } else { '' }
 
-    # Strict inline CSP; no external/inline scripts; self-contained. (PLAN §3.8)
+    # Strict inline CSP; no external/inline scripts; self-contained.
     $html = @"
 <!DOCTYPE html>
 <html lang="en">

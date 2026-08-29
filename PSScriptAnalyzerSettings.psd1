@@ -4,7 +4,7 @@
     # so a few default rules don't apply and are excluded to keep findings signal.
     Severity     = @('Error', 'Warning')
     ExcludeRules = @(
-        # PS 7 writes UTF-8 *without* BOM by design (PLAN §6 — leaving 5.1 behind).
+        # PS 7 writes UTF-8 without BOM by design; the engine is PS 7-only.
         'PSUseBOMForUnicodeEncodedFile',
         # Operator-facing console output is intentional (banners, status lines).
         'PSAvoidUsingWriteHost',

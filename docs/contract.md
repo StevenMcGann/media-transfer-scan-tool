@@ -1,9 +1,14 @@
-# Public contract (v1.0.0)
+# Public contract (`schemaVersion: "1.0.0"`)
 
-As of **v1.0.0**, the interfaces below are a **stable contract**. Downstream
-consumers (automation, CI, SOAR, dashboards) may depend on them. A
-backward-incompatible change requires a **major version bump** (→ 2.0.0) and a
-matching `schemaVersion` bump.
+The interfaces below have been the project's **stable contract since package
+v0.9.0**. The report schema version is already `1.0.0`; it is independent of the
+package version. Downstream consumers (automation, CI, SOAR, dashboards) may
+depend on these interfaces. A backward-incompatible change requires a major
+package-version bump and a matching `schemaVersion` bump.
+
+Package v1.0.0 remains an operational milestone: validation against real
+untrusted transfers on the isolated review host. It does not defer or re-freeze
+the contract described here.
 
 The **JSON report is the canonical machine-readable output.** The HTML and TXT
 reports are human views and are *not* contractual — their layout may change at
@@ -23,19 +28,19 @@ Written to `<scan-root>\.reports\summary_<timestamp>.json`. Top-level object:
 | `ElapsedSeconds` | number | Wall-clock scan duration. |
 | `Profile` | string | `core` \| `full`. |
 | `Mode` | string | `online` \| `offline`. |
-| `OverallRisk` | string | `CLEAN` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL` (highest finding severity; `CLEAN` if none above INFO). |
+| `OverallRisk` | string | `CLEAN` \| `INFO` \| `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`. Current behavior uses the highest non-INFO finding; an INFO-only report is `CLEAN`. `INFO` remains a reserved schema value and consumers must accept it. |
 | `Counts` | object | Keys `CRITICAL,HIGH,MEDIUM,LOW,INFO` → integer counts. |
 | `EnabledAnalyzers` | string[] | Analyzers that ran this scan. |
 | `DisabledAnalyzers` | string[] | Analyzers **not** run (so a clean report never hides "not checked"). |
 | `TotalFindings` | number | Count across all units. |
-| `Units` | object[] | One per discovered file (see below). |
+| `Units` | object[] | One per file discovered directly under the scan root. Extracted archive members do not become units; their findings are folded onto the parent archive (see below). |
 
 **Unit object:**
 
 | Field | Type | Notes |
 |---|---|---|
 | `Name` | string | File name. |
-| `Type` | string | Classified type: `python,python-requirements,npm,nuget,powershell,shell,batch,vba,office,pdf,model,disguised,archive,native-binary,unsupported`. |
+| `Type` | string | Classified type: `python,python-requirements,npm,nuget,powershell,shell,batch,vba,office,pdf,model,disguised,archive,native-binary,unsupported`. `disguised` is a reserved contract value; current disguise detection keeps the effective script type and adds a `disguised-file` finding. |
 | `Path` | string | Path relative to the scan root. |
 | `Findings` | object[] | See below. |
 
@@ -74,7 +79,7 @@ Entry points: `Scan.cmd` (bundle) and `src\Invoke-MediaTransferScan.ps1` (engine
 | `-EnableAnalyzers <names>` | analyzer names | Force-enable specific analyzers. |
 | `-DisableAnalyzers <names>` | analyzer names | Force-disable specific analyzers. |
 | `-Mode` | `online` (default) \| `offline` | `offline` skips network (no installs / live advisory feeds). |
-| `-AutoInstall` | switch | (online) install missing tools without interaction. |
+| `-AutoInstall` | switch | Compatibility switch. Online mode already installs missing pinned tools without interaction; offline mode never installs them. |
 | `-VenvDir <dir>` | path | Use a specific scanner venv (the bundle sets this). |
 | `-Quiet` | switch | Suppress console/log noise. |
 | `-OutputFormat` | `all` (default) \| `json` | `json` echoes the JSON report path to stdout. |
@@ -88,6 +93,7 @@ Entry points: `Scan.cmd` (bundle) and `src\Invoke-MediaTransferScan.ps1` (engine
 | `2` | Execution / tooling error. |
 | `3` | Bad input (no/invalid `-Path`). |
 | `4` | No usable PowerShell 7.4+ runtime (bootstrapper). |
+| `5` | Offline-bundle integrity verification failed. |
 
 ---
 

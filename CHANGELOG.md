@@ -3,12 +3,40 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
-project adheres to [Semantic Versioning](https://semver.org/). The `0.x` series predates the
-frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.md](PLAN.md) §5).
+project adheres to [Semantic Versioning](https://semver.org/). The public schema/CLI contract
+has been frozen since package v0.9.0. Package **v1.0.0 marks completion of isolated-host
+validation against real untrusted transfers**, not a second contract freeze (see [PLAN.md](PLAN.md)).
 
 ## [Unreleased]
 
+### Changed
+- Reconciled the README, operator guide, test-environment runbook, public
+  contract, maintainer guide, bundle guide, and roadmap with v0.13.0 behavior.
+- Clarified writable scan-root requirements, source archives versus operator
+  bundles, explicit offline-mode behavior, INFO-only overall-risk semantics,
+  archive coverage-gap findings, and exit code 5.
+- Updated the bundled PowerShell 7.4 LTS pin from 7.4.6 to 7.4.19.
+- Pinned the maintainer and CI test path to Pester 5.7.1 so Pester 6 is not
+  selected by an open-ended minimum-version constraint.
+- Made the documented local Pester command return a nonzero process exit code
+  on failures; XML test-result output remains specific to `-CI` runs.
+- Enforced CRLF and ASCII-safe comments for `Scan.cmd` so the Windows operator
+  entry point is parsed consistently outside GitHub Actions checkouts.
+- Corrected offline provisioning so it no longer runs the pip/setuptools/wheel
+  bootstrap upgrade before reporting unavailable tools.
+- Made generated `.tgz` fixtures byte-for-byte reproducible by fixing the gzip
+  header timestamp as well as each tar member timestamp.
+- Clarified that online mode provisions missing pinned tools automatically and
+  `-AutoInstall` remains only as a compatibility switch.
+- Removed the obsolete pre-project planning transcript and replaced the
+  pre-v0.1 roadmap with a current plan.
+
 ## [0.13.0] - 2026-08-29
+
+> This section records the final release behavior first, followed by detailed
+> engineering provenance from the review rounds. Every defect described in the
+> review chronology was fixed before the v0.13.0 tag; it is not a list of known
+> remaining defects.
 
 ### Added
 - **Recursive archive-member dispatch** ([#31](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/31)).
@@ -637,8 +665,8 @@ Document analysis — Office + PDF triage.
 Disguised-script detection — the first new file-type capability beyond Python parity.
 
 ### Added
-- **Disguised-script detection (v0.2):** content-signature classification (PLAN §3.7
-  signal #3) scores a file's text against PowerShell / Python / shell / batch
+- **Disguised-script detection (v0.2):** content-signature classification
+  scores a file's text against PowerShell / Python / shell / batch
   signatures, catching a script hidden in an innocent extension (e.g. `.txt`,
   `.log`, `.dat`) with **no shebang** — the classic media-transfer evasion. The
   router uses the detected type (content over extension), emits a `disguised-file`

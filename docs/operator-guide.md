@@ -1,7 +1,9 @@
 # Operator guide
 
-How to scan a submission and read the result. This guide assumes you received a
-**bundle** (the packaged tool) — nothing needs to be installed.
+How to scan a submission and read the result. This guide assumes you received an
+operator-ready **bundle** produced by `bundle/build-bundle.ps1`—not one of
+GitHub's automatically generated source archives. Nothing needs to be installed
+on the review host.
 
 > **Safety first.** Run untrusted submissions on an **isolated, disposable host**
 > (no network or egress-filtered, snapshot-reverted). Static analysis is lower
@@ -46,9 +48,14 @@ REM Turn specific analyzers on/off by name:
 Scan.cmd -Path "D:\incoming\sub" -EnableAnalyzers DetectSecrets
 Scan.cmd -Path "D:\incoming\sub" -DisableAnalyzers ShellCheck
 
-REM Air-gapped host (no internet): use only vendored tools/advisory data:
+REM Air-gapped host: use vendored tools and skip live advisory lookups:
 Scan.cmd -Path "D:\incoming\sub" -Mode offline
 ```
+The bundle uses its vendored tools in either mode. It does not automatically
+select offline mode. In v0.13.0 there is no vendored OSV advisory database, so
+`-Mode offline` emits explicit INFO coverage-gap findings for dependency inputs
+instead of treating them as vulnerability-free.
+
 > By default (`-Profile core`) the high-signal analyzers run and the broad,
 > false-positive-prone ones (Bandit, detect-secrets) are **off**. The report
 > always lists what was *not* checked, so a clean report never hides a gap.
@@ -67,15 +74,19 @@ Three files are written per scan (same timestamp):
 - **`summary_<ts>.txt`** — quick terminal summary (CRITICAL/HIGH only).
 - **`summary_<ts>.json`** — machine-readable (for automation).
 
-**Overall risk** is the highest finding severity: `CLEAN < INFO < LOW < MEDIUM < HIGH < CRITICAL`.
+**Overall risk** is the highest non-INFO finding severity:
+`CLEAN < LOW < MEDIUM < HIGH < CRITICAL`. INFO findings stay visible but do not
+raise overall risk; an INFO-only report is `CLEAN` and exits 0. Always review INFO
+coverage statements before accepting a clean result.
 
 **Severity guide:**
 | Severity | Treat as |
 |---|---|
-| CRITICAL | Code-execution-on-load / confirmed CVE / tampered signature — **reject pending review**. |
+| CRITICAL | Code-execution-on-load, a critical-scored confirmed vulnerability, or a tampered signature — **reject pending review**. |
 | HIGH | Strong risk indicator (install scripts, IEX/downloaders, macros, zip-slip). |
 | MEDIUM | Worth a look (obfuscation, DDE, base64 decode, symlinks). |
-| LOW / INFO | Context / inventory (hashes, signature status, nested archives). |
+| LOW | Lower-confidence or contextual risk that still raises overall risk. |
+| INFO | Inventory or coverage status. INFO can mean content was not inspected; it is not automatically benign. |
 
 The **"NOT checked"** line lists disabled analyzers — if you need that coverage,
 re-run with `-Profile full` or `-EnableAnalyzers <name>`.
@@ -87,8 +98,28 @@ uninspected file read as a reviewed-and-clean one: **absence of findings on such
 a file is absence of coverage, not evidence it is safe.** Judge those by what
 they are, not by their empty finding list.
 
+### Archive coverage findings
+
+v0.13.0 recursively classifies and dispatches ordinary members of ZIP and tar
+archives. The archive tree has run-wide limits of five nested archive levels,
+5,000 staged entries, and 1 GB of expanded file content. Review these INFO
+findings even when overall risk is CLEAN:
+
+- **`MTS-ARCHIVE-MEMBER-UNINSPECTED`** — one or more extracted members had no
+  enabled type-specific analyzer. The finding aggregates their names on the
+  parent archive.
+- **`MTS-ARCHIVE-DEPTH-CAP`** — a nested archive was not opened because the
+  depth limit was reached.
+- **`MTS-ARCHIVE-BUDGET-EXCEEDED`** — one or more members or semantic containers
+  were not staged or analyzed because the shared entry/byte budget was reached.
+
+These findings describe incomplete coverage. Inspect the named content by a
+separate controlled method or split the submission and rescan; do not interpret
+the parent archive as fully reviewed.
+
 ## 4. Exit codes (for scripted use)
-`0` clean · `10` findings present · `2` error · `3` bad input · `4` no PowerShell 7 runtime.
+`0` no non-INFO findings · `10` non-INFO findings present · `2` error · `3` bad
+input · `4` no PowerShell 7 runtime · `5` bundle integrity verification failed.
 
 ## 5. What it does and does not do
 - **Static only** — it never executes, installs, imports, or unpickles submitted

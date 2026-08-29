@@ -433,7 +433,7 @@ function Expand-SubmissionArchive {
                 return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
             }
 
-            # Safe to extract. PS 7: ZipFile directly (PLAN §6).
+        # Safe to extract. Use ZipFile directly under PS 7.
             [System.IO.Compression.ZipFile]::ExtractToDirectory($InputFile, $OutputDir, $true)
             Write-Log -Level DEBUG -Message "Extracted ZIP-family archive OK."
         }

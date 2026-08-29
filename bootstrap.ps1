@@ -9,7 +9,7 @@
     5.1-compatible PowerShell subset (no ?., ??, ternary, -AsArray, etc.) so it
     runs on a stock Windows host where only Windows PowerShell 5.1 is present.
 
-    Runtime resolution order (PLAN Sec 3.6):
+    Runtime resolution order:
       1. Bundled pwsh (tools\pwsh\pwsh.exe) -- AUTHORITATIVE. Preferred even when
          the host also has PS 7, for version determinism + supply-chain integrity.
       2. Host PATH pwsh >= 7.4 -- only when no bundled copy exists (dev/online).
@@ -44,7 +44,9 @@ function Get-PwshVersion {
     try {
         $out = & $Exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
         if ($out) { return [version]([string]$out).Trim() }
-    } catch { }
+    } catch {
+        Write-Verbose "PowerShell version probe failed for '$Exe': $_"
+    }
     return $null
 }
 

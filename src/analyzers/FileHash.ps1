@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 <#
     FileHash analyzer - real, working. Records a SHA-256 for every file as an
-    INFO finding, seeding the audit manifest (PLAN §4 cross-cutting). Demonstrates
+    INFO finding, seeding the audit manifest. Demonstrates
     the descriptor contract end-to-end with genuine output.
 #>
 @{

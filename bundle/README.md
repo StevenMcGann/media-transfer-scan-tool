@@ -1,16 +1,17 @@
 # Offline bundle
 
 `build-bundle.ps1` assembles a self-contained bundle that runs the scanner on an
-air-gapped operator host with nothing pre-installed (PLAN §3.5/§3.6).
+air-gapped operator host with nothing pre-installed. See the runtime and release
+requirements in [../PLAN.md](../PLAN.md).
 
 ## Build (on a connected dev host)
 
 ```powershell
-# Full, operator-ready bundle (downloads pwsh 7.4 LTS, builds the scanner venv):
-pwsh ./bundle/build-bundle.ps1 -Version 0.1.0 -Zip
+# Full v0.13.0 operator bundle (downloads the pinned pwsh 7.4 LTS patch and builds the scanner venv):
+pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -Zip
 
 # Using a pre-downloaded portable pwsh zip instead of fetching it:
-pwsh ./bundle/build-bundle.ps1 -PwshZip C:\downloads\PowerShell-7.4.6-win-x64.zip -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -PwshZip C:\downloads\PowerShell-7.4.19-win-x64.zip -Zip
 
 # Skeleton (layout only — NOT operator-ready; for testing the build itself):
 pwsh ./bundle/build-bundle.ps1 -SkipPwsh -SkipVenv
@@ -25,12 +26,17 @@ media-transfer-scan-tool-<version>/
   src/                  engine + lib + analyzers + helpers
   tools/pwsh/           vendored portable PowerShell 7.4 (Windows x64)
   tools/venv/           vendored scanner venv (bandit, pip-audit, detect-secrets, pefile, pyelftools)
-  manifest.json         bundle + tool versions, build date, completeness flag
+  manifest.json         bundle/tool versions, build date, completeness flag, sealed-file hashes
 ```
 
 `manifest.json` has `complete: true` only when both the runtime and venv are
-vendored. The bootstrapper prefers `tools/pwsh` (authoritative) and, seeing
-`tools/venv`, runs the engine in **offline** mode against the vendored venv.
+vendored. The bootstrapper verifies its sealed-file SHA-256 values and prefers
+`tools/pwsh` (authoritative). When `tools/venv` exists, the engine uses those
+vendored tools but keeps the requested mode: online by default, or offline only
+when the operator passes `-Mode offline`.
+
+GitHub's automatically generated source archives are not operator bundles. A
+release is operator-ready only when its assets include the ZIP produced here.
 
 ## Delivery + use
 
@@ -42,9 +48,11 @@ operator runs:
 Scan.cmd -Path "D:\incoming\submission"
 ```
 
-## TODO (later)
+## Remaining bundle work
 
 - Vendored CVE/OSV advisory cache so pip-audit runs fully offline (currently the
   advisory lookup needs connectivity; `manifest.advisoryDb.date` will record the
   cache snapshot once added).
-- Bundle integrity hash / signature.
+- Cryptographic signing of the manifest or bundle. Per-file SHA-256 integrity
+  verification is already implemented, but hashes stored in the same unsigned
+  bundle do not establish publisher authenticity.

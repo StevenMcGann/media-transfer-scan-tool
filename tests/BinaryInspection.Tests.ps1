@@ -35,9 +35,9 @@ Describe 'BinaryInspection — unavailable path' {
         $desc = & (Join-Path $Root 'src/analyzers/BinaryInspection.ps1')
         # Stage a native binary by extracting a fixture
         $stage = Join-Path $env:TEMP "mts-bin-unavail-$(Get-Random)"
-        $r = Expand-SubmissionArchive `
+        [void](Expand-SubmissionArchive `
             -InputFile (Join-Path $script:Native 'native_clean_pkg-1.0-py3-none-any.whl') `
-            -OutputDir $stage
+            -OutputDir $stage)
         $unit = [PSCustomObject]@{
             Type='python'; Name='native_clean_pkg-1.0-py3-none-any.whl'
             Path='x'; RelativePath='native_clean_pkg-1.0-py3-none-any.whl'; StagingPath=$stage

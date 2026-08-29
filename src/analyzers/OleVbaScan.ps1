@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    OleVbaScan analyzer — static triage of Office documents (PLAN §4 v0.3).
+    OleVbaScan analyzer — static triage of Office documents.
 
     Delegates to src/helpers/scan_office.py: VBA macro presence + auto-exec /
     suspicious keywords (oletools), DDE/DDEAUTO fields, and remote-template

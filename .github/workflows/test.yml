@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: $PSVersionTable.PSVersion.ToString()
 
-      - name: Install Pester 5
+      - name: Install Pester 5.7.1
         shell: pwsh
         run: |
           # PSGallery is occasionally unregistered on fresh runner images — register it first.
@@ -28,7 +28,7 @@ jobs:
             Register-PSRepository -Default -ErrorAction SilentlyContinue
           }
           Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-          Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
 
       - name: Generate synthetic fixtures
         shell: pwsh

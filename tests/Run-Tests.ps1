@@ -6,11 +6,11 @@ param([switch]$CI)
 
 Set-StrictMode -Version Latest
 
-# Pester 5 is cross-edition. If it isn't on pwsh 7's module path, fall back to
-# the Windows PowerShell user/global module locations (dev convenience only;
-# the offline bundle will vendor its own copy).
+# The suite targets Pester 5.7.1. Pester 6 has behavioral changes that are not
+# part of the tested contract. If Pester 5 isn't on pwsh 7's module path, fall
+# back to Windows PowerShell user/global module locations.
 $pesterPath = $null
-$mod = Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 } |
+$mod = Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -eq 5 } |
        Sort-Object Version -Descending | Select-Object -First 1
 if ($mod) {
     $pesterPath = $mod.Path
@@ -19,19 +19,19 @@ if ($mod) {
         "$env:USERPROFILE\Documents\WindowsPowerShell\Modules\Pester",
         "$env:ProgramFiles\WindowsPowerShell\Modules\Pester")) {
         $cand = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
-                Where-Object { [version]($_.Name) -ge [version]'5.0' } |
+                Where-Object { ([version]($_.Name)).Major -eq 5 } |
                 Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
         if ($cand) { $pesterPath = Join-Path $cand.FullName 'Pester.psd1'; break }
     }
 }
-if (-not $pesterPath) { throw 'Pester 5+ not found. Install with: Install-Module Pester -Scope CurrentUser' }
-Import-Module $pesterPath -MinimumVersion 5.0 -ErrorAction Stop
+if (-not $pesterPath) { throw 'Pester 5.7.1 not found. Install with: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser' }
+Import-Module $pesterPath -RequiredVersion 5.7.1 -ErrorAction Stop
 
 $config = New-PesterConfiguration
 $config.Run.Path = $PSScriptRoot
+$config.Run.Exit = $true
 $config.Output.Verbosity = 'Detailed'
 if ($CI) {
-    $config.Run.Exit = $true
     $config.TestResult.Enabled = $true
     $config.TestResult.OutputPath = Join-Path $PSScriptRoot 'test-results.xml'
 }

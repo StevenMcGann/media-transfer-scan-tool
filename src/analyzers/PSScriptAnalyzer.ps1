@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    PSScriptAnalyzer analyzer — static analysis of PowerShell scripts (PLAN §4 v0.5).
+    PSScriptAnalyzer analyzer — static analysis of PowerShell scripts.
 
     Three layers on powershell units (.ps1/.psm1/.psd1) and PowerShell content
     detected via the classifier (v0.2 disguised scripts):

@@ -13,17 +13,18 @@ This project is run against **untrusted files**. There are **two distinct enviro
 
 ## Isolated test host — setup checklist
 
-Recommended on this workstation: a **Hyper-V VM** (Windows 11 Pro for Workstations includes Hyper-V). A throwaway VM gives snapshots + network isolation cleanly.
+Recommended on a Windows development workstation: a **Hyper-V VM** or an
+equivalent disposable VM with checkpoints and network isolation.
 
 **Provisioning (manual — must be done by the operator; cannot be scripted from the dev host):**
 
 1. **Create a dedicated VM** (Hyper-V / VirtualBox / VMware). Generation 2 Hyper-V, Windows x64 guest to match the bundle target.
 2. **Network: isolated.** Attach to a Hyper-V **Internal/Private virtual switch** with no uplink, or disable the vNIC entirely. If advisory-DB refresh is ever needed inside, do it via a *temporary* connection, then revert to isolated. Default state = no egress.
 3. **Snapshot / checkpoint baseline.** Take a clean checkpoint *before* any untrusted file touches the VM. **Revert to it after each sample set** (or at minimum daily). This is the disposability that makes a parser exploit non-persistent.
-4. **Least privilege.** Run the scanner under a **standard (non-admin) account**. The bundled `pwsh` + tools run from the user profile (no install needed — that's the §3.6 design).
+4. **Least privilege.** Run the scanner under a **standard (non-admin) account**. The bundled `pwsh` and tools require no system installation.
 5. **Disable convenience bridges to the host:** turn off clipboard sharing, drive/folder redirection, and shared folders in the VM integration settings. These are exfil/escape paths.
-6. **Resource caps.** Cap vCPU/RAM and disk so a decompression bomb or runaway parser can't exhaust the *host*. Pair with the engine's own caps (§4 archive hardening, per-analyzer timeouts §3.2).
-7. **File ingress (one-way).** Move submissions in via a **read-only** channel — a mounted read-only ISO/VHD built on the dev host, or a one-way copy. Avoid writable shared folders. Reports come *out* the same controlled way (copy the `.reports\` folder, or read it over the read-only mount after the run).
+6. **Resource caps.** Cap vCPU/RAM and disk so a decompression bomb or runaway parser can't exhaust the *host*. Pair those controls with the engine's archive budgets and per-analyzer timeouts.
+7. **File ingress and working copy.** Deliver submissions through a **read-only** channel, such as a read-only ISO/VHD built on the dev host. Copy them inside the disposable VM to a writable working directory such as `D:\scan-work\submission`; the scanner writes `.reports\` inside the scan root and therefore cannot scan directly from read-only media. Avoid writable host shares. Export only the completed `.reports\` directory through a separate controlled channel.
 
 **Per-run workflow:**
 
@@ -31,13 +32,17 @@ Recommended on this workstation: a **Hyper-V VM** (Windows 11 Pro for Workstatio
 1. (host)  Build read-only media containing the submission set.
 2. (VM)    Revert to clean checkpoint.
 3. (VM)    Mount submission media read-only.
-4. (VM)    Run the scanner -> .reports\  (JSON + HTML + slim TXT).
-5. (VM)    Copy reports out via the controlled channel.
-6. (host)  Review reports. Triage findings.
-7. (VM)    Revert to clean checkpoint (discard the VM state).
+4. (VM)    Copy the submission to a writable directory inside the disposable VM.
+5. (VM)    Scan that working copy -> <scan-root>\.reports\ (JSON + HTML + slim TXT).
+6. (VM)    Export only .reports\ through a separate controlled channel.
+7. (host)  Review reports and AV/EDR alerts; triage findings.
+8. (VM)    Revert to the clean checkpoint (discard the VM state).
 ```
 
-**Patching.** Keep the bundled `pwsh`/.NET and every analyzer current (ties to the §3.6 / §3.4 refresh cadence). An out-of-date parser is the most likely thing a hostile file would target. Rebuild the bundle on the dev host, re-deliver to the VM via read-only media.
+**Patching.** Keep the bundled `pwsh`/.NET and every analyzer current. An
+out-of-date parser is the most likely thing a hostile file would target. Rebuild
+the bundle on the development host and re-deliver it to the VM via read-only
+media.
 
 ---
 
@@ -121,8 +126,8 @@ on hosts and CI runners where the tools are expected to run.
 
 For building and running the **trusted fixture** suite (no untrusted files here):
 
-- **PowerShell 7.4+** (`pwsh`) — the tool is PS 7-only. *(Currently missing on this machine — install before running the engine.)*
+- **PowerShell 7.4+** (`pwsh`) — the tool is PS 7-only.
 - **Python 3.x** (for `build_fixtures.py` and the analyzer helpers' venv).
-- **Pester 5.x** (present: 5.7.1) and **git** (present).
+- **Pester 5.7.1** and **git**.
 
 The dev host never sees real untrusted transfers — only the deterministic synthetic corpus under `tests/fixtures/`, which is safe by construction.

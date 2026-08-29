@@ -5,7 +5,7 @@ For building, testing, and shipping the tool. The engine targets **PowerShell
 
 ## Dev setup
 - PowerShell 7.4+ (`pwsh`), Python 3.x, git.
-- Pester 5 (`Install-Module Pester -Scope CurrentUser`).
+- Pester 5.7.1 (`Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser`).
 
 ## Run from source (dev / online host)
 ```powershell
@@ -15,8 +15,8 @@ Online, analyzers self-provision into a venv beside the engine (`src/.scan-venv`
 
 ## Tests
 ```powershell
-pwsh ./tests/Run-Tests.ps1            # full Pester suite
 python ./tests/fixtures/build_fixtures.py   # (re)generate synthetic fixtures
+pwsh ./tests/Run-Tests.ps1                  # full Pester suite
 ```
 - Fixtures under `tests/fixtures/corpus/` are **generated** (gitignored); CI
   regenerates them. Committed wheels with real metadata are the exception.
@@ -47,12 +47,17 @@ fails if any new detection appears. Run it after touching analyzer signatures.
 ## Build the offline bundle
 On a **connected** host:
 ```powershell
-pwsh ./bundle/build-bundle.ps1 -Version 1.0.0 -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -Zip
 ```
-Produces `bundle/out/media-transfer-scan-tool-1.0.0/` (+ `.zip`) containing the
+Produces `bundle/out/media-transfer-scan-tool-0.13.0/` (+ `.zip`) containing the
 engine, a vendored portable **PowerShell 7.4 LTS**, the scanner **venv**, and
 `manifest.json`. Flags: `-PwshZip <path>` to use a pre-downloaded pwsh,
 `-SkipPwsh`/`-SkipVenv` for layout-only test builds.
+
+Use the current project version and current PowerShell 7.4 LTS patch for each
+release. The version values above describe v0.13.0; the release checklist below
+requires updating them for later releases. GitHub's automatically generated
+source archives are not operator-ready bundles.
 
 Deliver the bundle to the operator host via the controlled read-only channel
 (see [test-environment.md](test-environment.md)).
@@ -69,19 +74,27 @@ words inside strings/comments are **not** flagged.
 ## Adding an analyzer
 1. Drop a descriptor in `src/analyzers/<Name>.ps1` returning a hashtable with
    `Name, Version, UnitTypes, RequiredTools, Offline, Tier, DefaultEnabled, Invoke`
-   (see [PLAN.md](../PLAN.md) §3.2). The engine auto-registers it.
+   (see the current architecture in [PLAN.md](../PLAN.md)). The engine
+   auto-registers it.
 2. `Invoke { param($Unit,$Context) }` must **return `Finding[]`** (never throw),
    be **static** (never execute submitted content), and use `New-Finding`.
 3. Add fixtures to `build_fixtures.py` and a `*.Tests.ps1` suite.
 
 ## Releasing
-1. Bump `$script:ToolVersion` (entry script `.NOTES` + the constant) and the
-   `[x.y.z]` heading in `CHANGELOG.md`.
-2. If the JSON/CLI contract changed incompatibly, bump `SchemaVersion` in
+1. Bump `$script:ToolVersion` (entry script `.NOTES` + the constant), the
+   `[x.y.z]` heading in `CHANGELOG.md`, the README status, and the bundle build
+   version examples/default.
+2. Check the current PowerShell 7.4 LTS patch, update `build-bundle.ps1` and the
+   bundle examples together, and rebuild the operator ZIP.
+3. If the JSON/CLI contract changed incompatibly, bump `SchemaVersion` in
    `Report.ps1` and update [contract.md](contract.md) — that's a **major** bump.
-3. Commit, ensure CI green, then `git tag -a vX.Y.Z` + push + `gh release create vX.Y.Z`.
+4. Run the fixture generator, full Pester suite, operator-entry-point smoke test,
+   relative-link check, and documentation consistency checks.
+5. Commit, ensure CI is green, create the annotated tag and GitHub release, and
+   attach the operator-ready `media-transfer-scan-tool-X.Y.Z.zip` asset.
 
 ## Versioning
-`0.x` predated the frozen contract. **1.0.0 freezes the contract** (see
-[contract.md](contract.md)); incompatible changes to the JSON schema, CLI flags,
-or exit codes require a major bump.
+The contract has been frozen since package v0.9.0 even though the package remains
+on the 0.x line pending isolated-host validation. See [contract.md](contract.md).
+Incompatible changes to the JSON schema, CLI flags, or exit codes require a
+major package-version and schema-version bump.

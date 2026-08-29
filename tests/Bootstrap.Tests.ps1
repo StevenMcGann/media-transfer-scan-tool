@@ -150,12 +150,17 @@ Describe 'Invoke-Provisioning — full path (regression: non-interactive crash)'
     }
 
     It 'offline mode does not install and marks unavailable tools as a coverage gap' {
+        Mock Update-PipBootstrap { throw 'Offline mode must not call pip bootstrap.' }
         $reg = Import-AnalyzerRegistry -AnalyzerDir (Join-Path $Root 'src/analyzers')
         $sel = Resolve-EnabledAnalyzers -Registry $reg -Profile core
         $freshVenv = Join-Path $env:TEMP "mts-prov-offline-$(Get-Random)"
-        $prov = Invoke-Provisioning -EnabledAnalyzers $sel.Enabled -VenvDir $freshVenv -Mode offline
-        # Fresh venv, offline → pip tools cannot be installed, so unavailable (not a crash)
-        $prov.Tools['pip-audit'].Available | Should -BeFalse
-        Remove-Item $freshVenv -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            $prov = Invoke-Provisioning -EnabledAnalyzers $sel.Enabled -VenvDir $freshVenv -Mode offline
+            # Fresh venv, offline → pip tools cannot be installed, so unavailable (not a crash)
+            $prov.Tools['pip-audit'].Available | Should -BeFalse
+            Should -Invoke Update-PipBootstrap -Times 0 -Exactly
+        } finally {
+            Remove-Item $freshVenv -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

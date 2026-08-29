@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    NpmScan analyzer — static analysis of npm packages and JavaScript (PLAN §4 v0.6).
+    NpmScan analyzer — static analysis of npm packages and JavaScript.
 
     Pure PowerShell, NO Node.js required:
       1. package.json lifecycle scripts — preinstall/install/postinstall run

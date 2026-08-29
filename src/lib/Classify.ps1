@@ -1,10 +1,10 @@
 #Requires -Version 7.4
 <#
-    Classify.ps1 - the router (PLAN §3.7). Decides each file's effective Type by
+    Classify.ps1 - the router. Decides each file's effective Type by
     CONTENT over extension, and emits a disguised-file finding when the declared
     extension disagrees with detected content.
 
-    Signals, strongest first (PLAN §3.7):
+    Signals, strongest first:
       1. Magic bytes / format signature  (binary formats)
       2. Shebang (#! on line 1)          (scripts that declare their interpreter)
       3. Language content signatures      (scored heuristics — catches a script

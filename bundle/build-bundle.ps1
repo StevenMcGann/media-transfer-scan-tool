@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-    Build a self-contained offline bundle of media-transfer-scan-tool (PLAN §3.5/§3.6).
+    Build a self-contained offline bundle of media-transfer-scan-tool.
 
 .DESCRIPTION
     Assembles a directory (and optional .zip) that runs the scanner on an
@@ -15,8 +15,9 @@
           tools/venv/               vendored scanner venv (bandit, pip-audit, ...)
           manifest.json             versions + build date + SHA-256 file seals
 
-    The bootstrapper prefers tools/pwsh (authoritative) and, seeing tools/venv,
-    runs the engine in offline mode against the vendored venv.
+    The bootstrapper prefers tools/pwsh (authoritative) and points the engine at
+    tools/venv. Mode remains explicit: online by default, or offline only when
+    the operator passes -Mode offline.
 
     Run this on a CONNECTED dev host; deliver the result to the operator host via
     the controlled read-only channel (see docs/test-environment.md).
@@ -32,8 +33,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDir   = (Join-Path $PSScriptRoot 'out'),
-    [string]$Version     = '0.1.0-dev',
-    [string]$PwshVersion = '7.4.6',          # PS 7.4 LTS line (PLAN §3.6)
+    [string]$Version     = '0.13.0-dev',
+    [string]$PwshVersion = '7.4.19',         # pinned PS 7.4 LTS patch
     [string]$PwshZip     = '',
     [string]$BuiltUtc    = '',               # ISO timestamp; defaults to now if empty
     [switch]$SkipPwsh,

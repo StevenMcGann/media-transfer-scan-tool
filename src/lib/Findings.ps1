@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 <#
-    Findings.ps1 - normalized finding schema (PLAN §3.3) + risk roll-up.
+    Findings.ps1 - normalized finding schema + risk roll-up.
 #>
 
 # Severity ordering, highest first. Used for risk roll-up and report sorting.

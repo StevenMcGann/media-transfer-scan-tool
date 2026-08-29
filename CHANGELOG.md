@@ -18,6 +18,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
 - Updated the bundled PowerShell 7.4 LTS pin from 7.4.6 to 7.4.19.
 - Pinned the maintainer and CI test path to Pester 5.7.1 so Pester 6 is not
   selected by an open-ended minimum-version constraint.
+- Corrected the test runner to select Pester 5.7.1 exactly when a GitHub-hosted
+  runner also exposes a newer Pester 5 release.
 - Made the documented local Pester command return a nonzero process exit code
   on failures; XML test-result output remains specific to `-CI` runs.
 - Enforced CRLF and ASCII-safe comments for `Scan.cmd` so the Windows operator

@@ -123,12 +123,6 @@ Describe 'Archive-member dispatch — nested archive within limits' {
 
 Describe 'Archive-member dispatch — depth cap and cumulative budget (direct)' {
     BeforeAll {
-        $script:StageOut = Join-Path $env:TEMP "mts-arcmem-stage-$(Get-Random)"
-        $script:Extraction = Expand-SubmissionArchive `
-            -InputFile (Join-Path $script:ArcMemDir 'no_dupes.zip') -OutputDir $script:StageOut
-        $script:NestedStageOut = Join-Path $env:TEMP "mts-arcmem-nested-stage-$(Get-Random)"
-        $script:NestedExtraction = Expand-SubmissionArchive `
-            -InputFile (Join-Path $script:ArcMemDir 'two_level_nested.zip') -OutputDir $script:NestedStageOut
         $script:TestContext = [PSCustomObject]@{
             Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $env:TEMP
             ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
@@ -136,7 +130,21 @@ Describe 'Archive-member dispatch — depth cap and cumulative budget (direct)' 
         $script:TestEnabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) |
             Where-Object { $_.DefaultEnabled })
     }
-    AfterAll {
+    # Re-extracted per test, NOT once for the whole block:
+    # Invoke-ArchiveMemberDispatch DELETES members it refuses on budget
+    # grounds (review follow-up 5, #11 -- refused content must not stay on
+    # disk uncharged), so a staging dir shared across It blocks would carry
+    # one test's deletions into the next. Production never hits this: each
+    # staging dir belongs to exactly one unit and is walked exactly once.
+    BeforeEach {
+        $script:StageOut = Join-Path $env:TEMP "mts-arcmem-stage-$(Get-Random)"
+        $script:Extraction = Expand-SubmissionArchive `
+            -InputFile (Join-Path $script:ArcMemDir 'no_dupes.zip') -OutputDir $script:StageOut
+        $script:NestedStageOut = Join-Path $env:TEMP "mts-arcmem-nested-stage-$(Get-Random)"
+        $script:NestedExtraction = Expand-SubmissionArchive `
+            -InputFile (Join-Path $script:ArcMemDir 'two_level_nested.zip') -OutputDir $script:NestedStageOut
+    }
+    AfterEach {
         Remove-Item $script:StageOut -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $script:NestedStageOut -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -1237,6 +1245,103 @@ Describe 'Invoke-Scan — cumulative entry cap for top-level semantic containers
                 $blockedUnits.Count | Should -Be 1
                 $notBlockedUnits = @($pkgUnits | Where-Object { $_ -notin $blockedUnits })
                 $notBlockedUnits.Count | Should -Be 1
+            } finally {
+                $script:ArchiveTreeMaxMembers = $origMaxMembers
+            }
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Archive-member dispatch — a budget-refused member is removed from staging (review follow-up 5, #11)' {
+    It 'deletes an already-extracted member it refuses, so disk never holds uncharged content' {
+        # The BUG: extraction writes the WHOLE archive at once, so every
+        # member is already on disk before the member loop runs -- only
+        # ANALYSIS is per-member. A member the budget refused was left in
+        # place: uncharged bytes still occupying disk. Combined with a
+        # nested semantic container's own expansion (charged separately),
+        # the retained parent siblings could push real disk usage past the
+        # run-wide cap by nearly a full per-archive allowance.
+        $stage = Join-Path $env:TEMP "mts-p10r1-$(Get-Random)"
+        $workDir = Join-Path $env:TEMP "mts-p10r1-work-$(Get-Random)"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllBytes((Join-Path $stage 'big.bin'), [byte[]]::new(5000))
+            [System.IO.File]::WriteAllText((Join-Path $stage 'small.txt'), 'hi')
+
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $workDir
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) | Where-Object { $_.DefaultEnabled })
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'container.zip'; Path = 'container.zip'
+                                        RelativePath = 'container.zip'; StagingPath = $stage }
+            $budget = New-ArchiveTreeBudget
+            $budget.MaxBytes = 100   # big.bin (5000) is refused; small.txt (2) fits
+
+            Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
+                -Enabled $enabled -Budget $budget -Depth 1 | Out-Null
+
+            # The refused member is GONE from staging -- not merely skipped.
+            Test-Path -LiteralPath (Join-Path $stage 'big.bin')   | Should -BeFalse
+            # ...and the admitted one is untouched.
+            Test-Path -LiteralPath (Join-Path $stage 'small.txt') | Should -BeTrue
+            # Everything still on disk has been charged: the staging tree's
+            # real size never exceeds what the budget was told about.
+            $onDisk = (Get-ChildItem -LiteralPath $stage -Recurse -File | Measure-Object -Property Length -Sum).Sum
+            $onDisk | Should -BeLessOrEqual $budget.ExpandedBytes
+        } finally {
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-Scan — directory-only semantic containers still hit the cumulative entry cap (review follow-up 5, #12)' {
+    It 'counts extracted directories toward the semantic-container entry budget' {
+        # The BUG: both the pre-extraction estimate and the post-extraction
+        # charge counted FILES only. A wheel/egg/.nupkg built purely from
+        # explicit directory entries therefore measured zero bytes AND zero
+        # entries -- neither the byte gate nor the entry gate ever activated,
+        # so arbitrarily many such packages could still exhaust inodes with
+        # up to 50,000 directories each (that per-archive cap does not
+        # accumulate across packages).
+        $tmpDir = Join-Path $env:TEMP "mts-p10r2-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $out = Join-Path $env:TEMP "mts-p10r2-out-$(Get-Random)"
+        try {
+            # Every entry is a DIRECTORY -- zero files, zero bytes.
+            foreach ($name in @('01_pkg.whl', '02_pkg.whl')) {
+                $fs = [System.IO.File]::Create((Join-Path $tmpDir $name))
+                $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+                try {
+                    foreach ($i in 1..20) { $za.CreateEntry("dir$i/") | Out-Null }
+                } finally { $za.Dispose(); $fs.Dispose() }
+            }
+
+            # Confirm the fixture really is byte-free and file-free -- so a
+            # gate that fires can only be firing on the directory count.
+            $est = Get-ArchiveExpansionEstimate -Path (Join-Path $tmpDir '01_pkg.whl')
+            $est.Bytes        | Should -Be 0
+            $est.Count        | Should -Be 0
+            $est.TotalEntries | Should -Be 20
+
+            $origMaxMembers = $script:ArchiveTreeMaxMembers
+            try {
+                $script:ArchiveTreeMaxMembers = 25   # room for ONE package's 20 directories, not two
+                $r = Invoke-Scan -Path $tmpDir -Profile core -AnalyzerDir $script:Analyzers `
+                    -ReportsDir $out -Mode offline
+
+                $pkgUnits = @($r.Units | Where-Object { $_.Name -like '*_pkg.whl' })
+                $pkgUnits.Count | Should -Be 2
+                $blockedUnits = @($pkgUnits | Where-Object {
+                    @($_.Findings | Where-Object {
+                        $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.Issue -match 'semantic-container budget' }).Count -gt 0
+                })
+                $blockedUnits.Count | Should -Be 1
             } finally {
                 $script:ArchiveTreeMaxMembers = $origMaxMembers
             }

@@ -128,6 +128,14 @@ function Get-ArchiveExpansionEstimate {
         actually be charged (a review follow-up: a ZIP with 2,501 files and
         2,501 matching directory entries estimated 5,002 and was rejected,
         even though only 2,501 members would ever be charged).
+
+        TotalEntries counts EVERY entry, directories included — what
+        extraction actually creates on the filesystem, rather than what
+        member dispatch would charge. The top-level semantic-container gate
+        uses this (review follow-up 5, #12): those containers are never
+        member-dispatched, so their bound is about real inodes consumed, and
+        a package built purely from directory entries has Count = 0 while
+        still creating arbitrarily many directories.
     #>
     param([Parameter(Mandatory)][string]$Path)
     $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
@@ -137,11 +145,13 @@ function Get-ArchiveExpansionEstimate {
         try {
             $bytes = 0L
             $count = 0
+            $totalEntries = 0
             foreach ($e in $zip.Entries) {
+                $totalEntries++
                 if ($e.FullName.EndsWith('/')) { continue }
                 $bytes += [int64]$e.Length; $count++
             }
-            return @{ Bytes = $bytes; Count = $count }
+            return @{ Bytes = $bytes; Count = $count; TotalEntries = $totalEntries }
         } finally { $zip.Dispose() }
     } catch {
         return $null
@@ -173,8 +183,18 @@ function Test-ArchiveWouldExceedBudget {
         byte budget. Callers pass this for a semantic-container child only; a
         generic archive child still needs the count check, since ITS members
         really will be walked and charged one by one.
+
+        -CountAllEntries (review follow-up 5, #12): compare the count against
+        the estimate's TotalEntries (directories included) rather than Count
+        (files only). The TOP-LEVEL semantic-container gate uses this: those
+        containers are never member-dispatched, so their count bound exists
+        to limit real inodes created by extraction, not dispatchable members
+        — a package built purely from directory entries has Count = 0 and
+        Bytes = 0, so neither the byte nor the file-count check would ever
+        trip while it still creates arbitrarily many directories.
     #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][PSCustomObject]$Budget, [switch]$SkipCountCheck)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][PSCustomObject]$Budget,
+          [switch]$SkipCountCheck, [switch]$CountAllEntries)
 
     $remainingBytes = $Budget.MaxBytes - $Budget.ExpandedBytes
     $remainingCount = $Budget.MaxMembers - $Budget.MemberCount
@@ -183,7 +203,8 @@ function Test-ArchiveWouldExceedBudget {
     $estimate = Get-ArchiveExpansionEstimate -Path $Path
     if ($null -ne $estimate) {
         if ($SkipCountCheck) { return $estimate.Bytes -gt $remainingBytes }
-        return ($estimate.Bytes -gt $remainingBytes) -or ($estimate.Count -gt $remainingCount)
+        $estimateCount = if ($CountAllEntries) { $estimate.TotalEntries } else { $estimate.Count }
+        return ($estimate.Bytes -gt $remainingBytes) -or ($estimateCount -gt $remainingCount)
     }
     return $remainingBytes -lt $script:ArchiveTreeSafeHeadroomBytes
 }
@@ -346,6 +367,23 @@ function Invoke-ArchiveMemberDispatch {
     $uninspected   = [System.Collections.Generic.List[string]]::new()
     $budgetSkipped = [System.Collections.Generic.List[string]]::new()
 
+    # Extraction writes the WHOLE archive at once (ZipFile::ExtractToDirectory),
+    # so every member below is already on disk before this loop starts -- only
+    # its ANALYSIS is per-member. A member the budget refuses is therefore
+    # uncharged content still occupying disk: the parent's retained siblings
+    # plus a nested container's own expansion could together overshoot the
+    # run-wide cap by nearly a full per-archive allowance (review follow-up 5,
+    # #11). Deleting a refused member restores the invariant this budget
+    # exists to enforce -- everything still staged has been charged for. Safe
+    # here: the parent unit's own analyzers already ran against StagingPath
+    # (Invoke-Scan dispatches BEFORE member dispatch), and a refused member is
+    # by definition never dispatched or recursed into.
+    $skipMember = {
+        param($File)
+        $budgetSkipped.Add($File.FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/'))
+        Remove-Item -LiteralPath $File.FullName -Force -ErrorAction SilentlyContinue
+    }
+
     for ($i = 0; $i -lt $members.Count; $i++) {
         $file = $members[$i]
         # MemberCount exhaustion is a true dead end: the count only grows, so
@@ -353,9 +391,7 @@ function Invoke-ArchiveMemberDispatch {
         # can never be admitted either. Skip the whole rest of the loop in one
         # go rather than testing each remaining member individually.
         if ($Budget.MemberCount -ge $Budget.MaxMembers) {
-            for ($j = $i; $j -lt $members.Count; $j++) {
-                $budgetSkipped.Add($members[$j].FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/'))
-            }
+            for ($j = $i; $j -lt $members.Count; $j++) { & $skipMember $members[$j] }
             break
         }
         # Byte look-ahead: would ACCEPTING this member push the cumulative
@@ -370,7 +406,7 @@ function Invoke-ArchiveMemberDispatch {
         # keep that script from ever being analyzed while budget remains.
         # Skip only THIS member and keep evaluating the rest.
         if (($Budget.ExpandedBytes + [int64]$file.Length) -gt $Budget.MaxBytes) {
-            $budgetSkipped.Add($file.FullName.Substring($ArchiveUnit.StagingPath.Length).TrimStart('\', '/'))
+            & $skipMember $file
             continue
         }
         $Budget.MemberCount++
@@ -664,7 +700,7 @@ function Invoke-Scan {
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
             } elseif ($unit.Type -ne 'archive' -and (Test-IsArchiveUnit -Unit $unit) -and
                       ($budget.TopLevelSemanticBytes -gt 0 -or $budget.TopLevelSemanticEntries -gt 0) -and
-                      (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget)) {
+                      (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget -CountAllEntries)) {
                 $topLevelBudgetBlocked = $true
                 $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                     -Confidence 'HIGH' -UnitType $unit.Type -File $unit.RelativePath `
@@ -687,13 +723,25 @@ function Invoke-Scan {
                 # happened to be scanned first in this run -- charging both
                 # here would have silently reintroduced exactly that
                 # enumeration-order dependence for the shared side.
+                # The entry tally counts DIRECTORIES too (no -File), matching
+                # the -CountAllEntries look-ahead above (review follow-up 5,
+                # #12): this bound exists to limit real inodes created by
+                # extraction, and a package built purely from directory
+                # entries creates plenty while measuring zero files and zero
+                # bytes. The byte tally is naturally files-only -- a
+                # directory contributes no length.
                 if ($expansion.IsArchive -and $unit.Type -ne 'archive' -and $unit.StagingPath) {
-                    $expandedMeasure = Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                        Measure-Object -Property Length -Sum
-                    if ($expandedMeasure.Sum) {
-                        $budget.TopLevelSemanticBytes += [int64]$expandedMeasure.Sum
+                    $expandedEntries = @(Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -Force -ErrorAction SilentlyContinue)
+                    # @() + explicit .Count guard: Measure-Object over an EMPTY
+                    # set returns $null outright (not a zero-sum object), and
+                    # reading .Sum off it throws under Set-StrictMode -Latest.
+                    # A directory-only package is exactly that case.
+                    $expandedFiles = @($expandedEntries | Where-Object { -not $_.PSIsContainer })
+                    if ($expandedFiles.Count -gt 0) {
+                        $expandedSize = ($expandedFiles | Measure-Object -Property Length -Sum).Sum
+                        if ($expandedSize) { $budget.TopLevelSemanticBytes += [int64]$expandedSize }
                     }
-                    $budget.TopLevelSemanticEntries += $expandedMeasure.Count
+                    $budget.TopLevelSemanticEntries += $expandedEntries.Count
                 }
             }
 

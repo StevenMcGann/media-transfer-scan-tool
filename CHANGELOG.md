@@ -221,6 +221,31 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
         limit. A parallel `Budget.TopLevelSemanticEntries` counter, capped
         against `$script:ArchiveTreeMaxMembers`, now gates alongside bytes —
         same "first container always exempt" rule as before.
+    - A ninth review round found the two remaining holes in that accounting:
+      - Extraction writes a whole archive at once, so every member is
+        already on disk before the member loop runs — only ANALYSIS is
+        per-member. A member the budget refused was left in place:
+        uncharged content still occupying disk. Combined with a nested
+        semantic container's separately-charged expansion, the retained
+        parent siblings could push real disk usage past the run-wide cap by
+        nearly a full per-archive allowance. A refused member is now deleted
+        from staging, restoring the invariant the budget exists to enforce —
+        everything still staged has been charged for. (Safe: the parent
+        unit's own analyzers run against `StagingPath` before member
+        dispatch, and a refused member is by definition never dispatched or
+        recursed into.)
+      - The cumulative semantic-container entry cap counted FILES only, on
+        both sides — `Get-ArchiveExpansionEstimate` excludes directory
+        entries (correct for the generic-archive member count, which walks
+        `Get-ChildItem -File`) and the post-extraction charge used `-File`
+        too. A wheel/egg/`.nupkg` built purely from explicit directory
+        entries therefore measured zero bytes AND zero entries, so neither
+        gate ever activated while it still created arbitrarily many
+        directories. The estimate now also reports `TotalEntries` (every
+        entry, directories included), the top-level semantic gate compares
+        against that via a new `-CountAllEntries` switch, and the charge
+        counts extracted directories too — an inode bound measured in
+        inodes, not in dispatchable files.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

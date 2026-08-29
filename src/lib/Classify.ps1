@@ -28,6 +28,16 @@ $script:ExtTypeMap = @{
     '.xlsx' = 'office'; '.xlsm' = 'office'; '.ppt' = 'office'; '.pptx' = 'office'; '.rtf' = 'office'
     '.pkl' = 'model'; '.pickle' = 'model'; '.pt' = 'model'; '.pth' = 'model'
     '.joblib' = 'model'; '.safetensors' = 'model'; '.gguf' = 'model'
+    # Model-adjacent formats PickleOpcodeScan has always scanned (a malicious
+    # pickle stored under any of these extensions is exactly as executable —
+    # scan_pickle.py's own suffix list already includes '.bin'). Recognizing
+    # them here (rather than only inside PickleOpcodeScan's own archive walk,
+    # which issue #31's recursive archive-member dispatch removed) means a
+    # loose top-level file OR an archive member gets the same 'model' routing
+    # either way — one classification decision, not two different code paths
+    # that can silently drift apart.
+    '.bin' = 'model'; '.h5' = 'model'; '.hdf5' = 'model'; '.pb' = 'model'
+    '.onnx' = 'model'; '.npy' = 'model'; '.npz' = 'model'
     '.zip' = 'archive'; '.tgz' = 'archive'; '.tar' = 'archive'; '.gz' = 'archive'
     '.js' = 'npm'; '.mjs' = 'npm'; '.cjs' = 'npm'; '.ts' = 'npm'
     # NuGet package archive (issue #32 — OSV lookup). ZIP-based; id/version live in

@@ -8,6 +8,279 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
 
 ## [Unreleased]
 
+### Added
+- **Recursive archive-member dispatch** ([#31](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/31)).
+  Contents of a generic `archive` unit (`.zip`, `.tgz`/`.tar.gz`) were previously
+  only inspected for npm content (`NpmScan`) and model content
+  (`PickleOpcodeScan`) — anything else extracted from a ZIP was never analyzed,
+  and nothing said so. Every extracted member is now classified by content
+  (`New-Unit`, reused as-is — a disguised script hiding behind an innocent
+  extension, e.g. `payload.txt`, is caught for free) and dispatched through the
+  full analyzer set (`Invoke-UnitDispatch`, factored out of the top-level scan
+  loop for reuse), with findings folded onto the PARENT archive using the
+  existing `archive!inner/path` label — members are never added as new
+  top-level `Units`, so the v1 JSON schema and unit counts are unchanged.
+  - A nested archive is extracted the same hardened way (zip-slip/
+    decompression-bomb/symlink guards run before every extraction, at every
+    depth) and recursed into, subject to a depth cap (default 5) and a
+    cumulative member-count/byte budget (default 5000 members / 1GB) **shared
+    across the whole scan run**, not reset per archive — many individually-small
+    archives can't bypass the cap by splitting content across them. Exceeding
+    either produces an explicit `MTS-ARCHIVE-DEPTH-CAP` /
+    `MTS-ARCHIVE-BUDGET-EXCEEDED` finding naming the skipped member(s).
+  - A member with no type-specific analyzer coverage is not given its own
+    finding (that would be one warning per README/data file in a large
+    archive) — uncovered members are aggregated into one
+    `MTS-ARCHIVE-MEMBER-UNINSPECTED` INFO finding per parent archive, so a
+    disabled or unsupported type never silently reads as "reviewed and clean".
+  - Semantic containers (wheels/eggs, `.nupkg`, PyTorch `.pt/.pth`) are
+    extracted but NOT member-dispatched — their existing whole-staging-tree
+    analyzer (PythonRules/PipAudit/OsvScan/PickleOpcodeScan) already covers
+    them, and recursing further would duplicate those findings. `NpmScan`,
+    `PickleOpcodeScan`, and `OsvScan`'s old generic-`archive` whole-tree walks
+    are removed (now redundant with, and would have duplicated, member
+    dispatch's own per-member findings for the same files).
+  - `MTS-EXTRACT-NESTED`'s wording no longer claims nested content is "scanned
+    at top level only" — it now is opened and scanned, recursively.
+  - Four rounds of independent review on the initial implementation found the
+    budget/depth enforcement above checked too LATE, after the disk cost it
+    was meant to prevent had already been paid, plus two coverage gaps and a
+    double-counting bug:
+    - The depth cap and shared byte budget are now checked **before**
+      extracting a nested archive, not after — a would-be-too-deep or
+      would-overflow archive is hashed but never decompressed.
+    - The per-member byte check is now look-ahead
+      (`ExpandedBytes + memberSize > MaxBytes`, checked before acceptance)
+      instead of post-hoc, so the one member that crosses the cap can no
+      longer slip through.
+    - The top-level pre-extraction budget check is now also look-ahead — it
+      estimates an archive's uncompressed size from its ZIP central
+      directory (no extraction needed) and blocks it if that estimate
+      exceeds remaining headroom, rather than only blocking once the budget
+      was already fully exhausted. Falls back to a conservative 10MB
+      safe-headroom threshold for tar/tgz, which has no equivalent cheap
+      index.
+    - A nested semantic container's (wheel/`.nupkg`) EXPANDED size is
+      estimated from its own ZIP central directory and weighed against
+      remaining headroom BEFORE it is extracted — not measured and charged
+      after the fact, which let a zip bundling large wheels finish over
+      budget (once by up to the compressed member's own size, and again
+      when the earliest version of this fix still measured post-extraction)
+      with no finding to show for it.
+    - The budget/depth gates now key on the classified unit `Type ==
+      'archive'` specifically, not "is a ZIP-format file" — a semantic
+      container (wheel/egg/`.nupkg`) is never member-dispatched and does not
+      itself consume this budget, so a TOP-LEVEL one must always be allowed
+      to extract regardless of budget state (it's the unit's entire content,
+      not one member among many). Gating on the broader check had silently
+      broken `PythonRules`/`PipAudit` and NuGet `.nuspec` parsing for any
+      submission after an earlier, unrelated generic archive had already
+      used up the shared budget. A NESTED semantic container (one member
+      inside an already budget-constrained parent archive) is still subject
+      to the same look-ahead gate as a nested generic archive — see above.
+    - `.bin`, `.h5`, `.hdf5`, `.pb`, `.onnx`, `.npy`, and `.npz` are now
+      recognized as `model` type in `Classify.ps1`'s extension map.
+      `PickleOpcodeScan`'s removed whole-archive walk used to cover these
+      extensions; member dispatch only routes what the classifier recognizes
+      as `model`, so a malicious pickle stored under e.g. `model.bin` inside
+      a ZIP was silently missed until this was added.
+    - Tarball (`.tgz`/`.tar.gz`) extraction is now streamed entry-by-entry via
+      .NET's `System.Formats.Tar` — no external `tar` binary or Python
+      fallback — checking the shared budget before writing EACH entry and
+      stopping partway through (with an explicit `MTS-ARCHIVE-BUDGET-EXCEEDED`
+      finding) rather than writing everything before any accounting could
+      run. A tar's uncompressed size can't be read upfront the way a ZIP's
+      central directory allows, so bulk extraction (the previous `tar -xzf`/
+      Python `tarfile.extractall()` approach) was the one remaining path
+      where a highly-compressible nested tarball could consume unbounded
+      disk regardless of how tight the budget was. Also closes a pre-existing
+      gap the ZIP path already had: a per-archive aggregate size cap and
+      entry-count cap now apply to tarballs too (no per-entry compression
+      ratio exists for a tar — the whole stream is one continuous gzip, not
+      independently-compressed entries like ZIP).
+    - The tar streaming extraction above and `Invoke-ArchiveMemberDispatch`'s
+      per-member loop were both charging the shared budget for the same
+      extracted files — once as each tar entry was written to disk, and again
+      when dispatch walked those same files afterward. A tarball at or near
+      the member/byte cap could have its budget exhausted by the extraction-
+      time charge alone, so dispatch's own look-ahead check then skipped
+      members that were already safely on disk — under-analyzing content the
+      configured limits were meant to allow, not enforcing them correctly.
+      Tar streaming now only *reads* the budget (a snapshot of remaining
+      headroom, to decide when to stop writing) and never mutates it;
+      `Invoke-ArchiveMemberDispatch` remains the sole point that charges
+      `MemberCount`/`ExpandedBytes`, exactly as it already does for
+      ZIP-extracted members.
+    - A fifth review round found two more gaps and a mis-scoped budget check:
+      - Streamed tar extraction (round 3) could leave partially-extracted
+        content behind in the staging directory when a HARD-block (traversal,
+        the aggregate size/entry-count caps) or a stream-read error fired
+        after earlier entries in the SAME tarball had already been written —
+        `StagingPath` is never set on failure, so those bytes were never
+        charged and the leftovers sat until the whole scan's staging root was
+        removed. Every early-failure path in `Expand-TarArchive` now deletes
+        any partial content before returning.
+      - A semantic container (wheel/egg/`.nupkg`) that happened to be the
+        LAST admitted member of its parent archive (`MemberCount` already at
+        `MaxMembers`) was blocked by the nested-container look-ahead gate's
+        member-COUNT check, even though semantic containers are never
+        member-dispatched and their entries never consume `MemberCount` —
+        only their estimated bytes do. Order-dependent loss of Python/NuGet
+        coverage for content that would easily have fit the byte budget.
+        `Test-ArchiveWouldExceedBudget` now takes a `-SkipCountCheck` switch,
+        applied only for a semantic-container child.
+      - `Get-ArchiveExpansionEstimate`'s ZIP central-directory read counted
+        explicit directory entries alongside file entries, but
+        `Invoke-ArchiveMemberDispatch`'s member loop walks
+        `Get-ChildItem -File`, which never charges a directory to
+        `MemberCount` — a ZIP with 2,501 files and 2,501 matching directory
+        entries estimated 5,002 and could be rejected even though only 2,501
+        members would ever actually be charged. The estimate now excludes
+        entries whose name ends in `/`.
+      - A nested semantic container's pre-extraction byte estimate (round 3)
+        is precharged to the shared budget BEFORE `Expand-UnitInPlace` runs.
+        If extraction then failed (zip-slip guard, bomb/ratio guard, a
+        corrupt archive), nothing was written to disk but the precharge
+        stayed — a crafted, always-rejected container could exhaust the
+        shared byte budget with phantom bytes and no content to show for it.
+        The precharge is now a reservation, rolled back if `StagingPath`
+        never gets set.
+    - Also root-caused a CI-only Pester failure (9 tests in
+      `ArchiveMemberDispatch.Tests.ps1`, never reproduced across several
+      earlier attempts on identical pwsh/fixtures): `$stagingRoot`
+      (`Invoke-Scan`) was built directly from `$env:TEMP` and used verbatim
+      as the prefix for `$file.FullName.Substring(...)` throughout
+      `Invoke-ArchiveMemberDispatch`. On a host where `$env:TEMP` resolves
+      through an 8.3 short name (confirmed on GitHub Actions
+      `windows-latest` runners: `C:\Users\RUNNER~1\...` for
+      `C:\Users\runneradmin\...`), `Get-ChildItem`'s `FullName` — always the
+      long form when it enumerates — no longer shares a character-for-
+      character prefix with `StagingPath`, silently truncating every
+      archive-member inner path by the length difference and swallowing the
+      tail of the archive's own staging-dir name (e.g. `zip`, `tgz`) into
+      what should have been the member's inner path alone. `$stagingRoot` is
+      now canonicalized once, right after creation, via
+      `(Get-Item -LiteralPath $stagingRoot).FullName` (which expands an 8.3
+      alias; `Resolve-Path` does not) — a regression test reproduces the
+      exact failure by pointing `$env:TEMP` at a deliberately long-named
+      directory for one `Invoke-Scan` call, verified failing against the
+      pre-fix code.
+    - A sixth review round found two more gaps, both in how the shared
+      budget's blocking decisions were scoped:
+      - A top-level semantic container (wheel/egg/`.nupkg`) always extracts
+        regardless of the shared archive-tree budget — by design, since
+        blocking it because an unrelated earlier generic archive used up the
+        budget would silently break Python/NuGet coverage (round 2). But
+        with nothing else gating this category, many top-level wheels/eggs/
+        `.nupkg` files — each individually allowed up to the 512MB
+        per-archive decompression-bomb cap — could cumulatively exhaust disk
+        with no run-wide limit at all. Now bounded by a genuinely SEPARATE
+        cumulative counter (`Budget.TopLevelSemanticBytes`) that only this
+        category ever charges or is blocked by, so an unrelated archive
+        elsewhere still can never starve this coverage — but the FIRST
+        top-level semantic container in a scan is always exempt from this
+        new gate too, unconditionally, preserving the exact original
+        guarantee (tested against a budget configured with `MaxBytes`/
+        `MaxMembers = 0`, not just one exhausted by prior activity).
+      - `Invoke-ArchiveMemberDispatch`'s per-member loop `break`ed out of the
+        ENTIRE remaining walk the moment one member's own size didn't fit
+        the remaining byte headroom, treating every member after it as
+        skipped too — even a much smaller one that would easily have fit on
+        its own. An attacker could place one oversized benign member right
+        before a small malicious script to keep that script from ever being
+        analyzed while budget remained. The member-count exhaustion check
+        (once hit, truly a dead end — count only grows) still skips the
+        whole remaining suffix in one go; an individual byte-budget miss now
+        `continue`s past just that one member instead.
+    - A seventh review round, on the sixth's own fix: the new
+      `Budget.TopLevelSemanticBytes` tracking was added ALONGSIDE the
+      pre-existing charge to the SHARED `Budget.ExpandedBytes`, not instead
+      of it — so a top-level wheel/egg/`.nupkg` scanned before a generic
+      archive still consumed the shared budget that gates GENERIC archives,
+      making a later archive's coverage depend on filesystem enumeration
+      order despite the whole point of the new counter being independence
+      from this category. The shared-budget charge for a top-level semantic
+      container's expanded size is removed; only `TopLevelSemanticBytes`
+      charges now.
+    - An eighth review round found two more gaps in the same area:
+      - `Expand-TarArchive`'s per-entry streaming loop had the same
+        break-vs-continue mistake as `Invoke-ArchiveMemberDispatch`'s
+        per-member loop above: a per-entry byte miss `break`ed the WHOLE
+        remaining stream, even though a later, smaller entry would still fit
+        within remaining headroom on its own. A byte miss now only skips
+        that one entry and keeps reading subsequent headers; the entry-count
+        exhaustion check (a true dead end once hit) still stops the stream
+        entirely.
+      - The cumulative top-level semantic-container gate (this round's #6)
+        checked bytes only. A package built mostly from empty files or
+        directory entries estimates near-zero bytes regardless of how many
+        real filesystem entries it creates — the byte gate never tripped,
+        and each package's own 50,000-entry cap
+        (`Test-ZipArchiveHazards`) is per-archive, not cumulative, so many
+        such packages could still exhaust inodes despite the run-wide byte
+        limit. A parallel `Budget.TopLevelSemanticEntries` counter, capped
+        against `$script:ArchiveTreeMaxMembers`, now gates alongside bytes —
+        same "first container always exempt" rule as before.
+    - A ninth review round found the two remaining holes in that accounting:
+      - Extraction writes a whole archive at once, so every member is
+        already on disk before the member loop runs — only ANALYSIS is
+        per-member. A member the budget refused was left in place:
+        uncharged content still occupying disk. Combined with a nested
+        semantic container's separately-charged expansion, the retained
+        parent siblings could push real disk usage past the run-wide cap by
+        nearly a full per-archive allowance. A refused member is now deleted
+        from staging, restoring the invariant the budget exists to enforce —
+        everything still staged has been charged for. (Safe: the parent
+        unit's own analyzers run against `StagingPath` before member
+        dispatch, and a refused member is by definition never dispatched or
+        recursed into.)
+      - The cumulative semantic-container entry cap counted FILES only, on
+        both sides — `Get-ArchiveExpansionEstimate` excludes directory
+        entries (correct for the generic-archive member count, which walks
+        `Get-ChildItem -File`) and the post-extraction charge used `-File`
+        too. A wheel/egg/`.nupkg` built purely from explicit directory
+        entries therefore measured zero bytes AND zero entries, so neither
+        gate ever activated while it still created arbitrarily many
+        directories. The estimate now also reports `TotalEntries` (every
+        entry, directories included), the top-level semantic gate compares
+        against that via a new `-CountAllEntries` switch, and the charge
+        counts extracted directories too — an inode bound measured in
+        inodes, not in dispatchable files.
+    - A tenth review round closed the same inode gap for NESTED semantic
+      containers (a wheel/egg/`.nupkg` found as a member of a generic
+      archive). Those charge their expanded bytes to the shared budget, but
+      their internal entries were counted nowhere: the outer member loop
+      charges the container as exactly ONE member however many entries it
+      holds, and `Test-ZipArchiveHazards`' 50,000-entry limit resets per
+      package — so a submission comfortably inside the byte cap could still
+      stage millions of inodes. A `Budget.NestedSemanticEntries` pool now
+      gates and charges them (`TotalEntries`, directories included, reserved
+      before extraction and rolled back if it fails), kept separate from
+      `MemberCount` so a semantic container is still never blocked merely
+      because the dispatchable-member count is exhausted.
+    - An eleventh review round closed the last two ways staged inodes could
+      go uncounted — both cases where the entry accounting measured archive
+      RECORDS rather than the filesystem entries extraction actually
+      creates:
+      - `Get-ArchiveExpansionEstimate`'s `TotalEntries` counted
+        central-directory records, but `ExtractToDirectory` materializes
+        every missing parent directory: one record for `a/b/c/payload.py`
+        creates four inodes. A handful of deep paths could reserve one entry
+        each while staging hundreds of directories. `TotalEntries` now
+        counts files plus every distinct directory in their paths (implicit
+        ancestors included, each shared ancestor counted once).
+      - `Expand-TarArchive` incremented its budget counters for FILE entries
+        only, while still creating every directory entry — and nothing
+        downstream charged those either, since `MemberCount` counts
+        dispatchable members and member dispatch enumerates
+        `Get-ChildItem -File`. A directory-only tarball consumed no budget
+        at all, and the per-archive 50,000-entry cap resets per tarball.
+        Directory entries now consume the tar entry budget, and a new
+        run-wide `Budget.StagedDirectories` counter — charged after every
+        successful extraction and subtracted from the count headroom
+        wherever an extraction is gated — makes the bound cumulative across
+        archives rather than resetting for each one.
+
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV
   endpoint** — the 0.12.0 fix above bounded `Get-OsvDependencyFindings`'s

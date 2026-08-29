@@ -7,17 +7,27 @@
     NEVER unpickled (unpickling runs arbitrary code). Flags GLOBAL/STACK_GLOBAL
     (arbitrary imports), REDUCE (the code-exec primitive), and dangerous modules
     (os/subprocess/builtins/...). Recognizes safe-by-design formats (safetensors,
-    GGUF) and scans pickles embedded in PyTorch ZIP containers (.pt/.pth).
+    GGUF) and scans pickles embedded in PyTorch ZIP containers (.pt/.pth) — the
+    helper opens those as a ZIP internally; .pt/.pth are never engine-extracted
+    (not in Engine.ps1's Test-IsArchiveUnit list), so the unit's own file path is
+    always passed straight through, whole.
 
-    The helper is stdlib-only, so it needs a Python interpreter but NO pip package:
-    it uses the provisioned venv python when present, else a system Python.
-
-    Tier: core. Runs on `model` units and on model files inside extracted archives.
+    Tier: core. Runs on `model` units only. A model file inside a GENERIC archive
+    is classified as its own 'model' unit by recursive archive-member dispatch
+    (issue #31) and reaches this analyzer through the exact same path as a loose
+    model file — this used to ALSO walk a generic archive's StagingPath itself
+    (UnitTypes included 'archive'); removed, since that would now duplicate
+    every finding member dispatch already produces for the same file. The full
+    set of extensions routed to 'model' (.pkl/.pickle/.pt/.pth/.joblib/
+    .safetensors/.gguf/.bin/.h5/.hdf5/.pb/.onnx/.npy/.npz) lives in
+    Classify.ps1's ExtTypeMap — one classification decision shared by loose
+    top-level files and archive members alike, not a separate list here that
+    could silently drift out of sync with what New-Unit actually classifies.
 #>
 @{
     Name           = 'PickleOpcodeScan'
-    Version        = '0.1.0'
-    UnitTypes      = @('model', 'archive')
+    Version        = '0.2.0'
+    UnitTypes      = @('model')
     RequiredTools  = @()           # stdlib-only helper; needs Python, no pip package
     Offline        = $true
     Tier           = 'core'
@@ -25,20 +35,8 @@
     Invoke         = {
         param($Unit, $Context)
 
-        $modelExts = @('.pkl', '.pickle', '.pt', '.pth', '.bin', '.joblib',
-                       '.h5', '.hdf5', '.pb', '.onnx', '.safetensors', '.gguf', '.npy', '.npz')
-
-        # Collect target model files.
         $targets = [System.Collections.Generic.List[string]]::new()
-        if ($Unit.Type -eq 'model') {
-            $targets.Add($Unit.Path)
-        } elseif ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
-                  (Test-Path -LiteralPath $Unit.StagingPath -PathType Container)) {
-            Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension.ToLowerInvariant() -in $modelExts } |
-                Select-Object -First 100 | ForEach-Object { $targets.Add($_.FullName) }
-        }
-        if ($targets.Count -eq 0) { return @() }
+        $targets.Add($Unit.Path)
 
         # Resolve Python: provisioned venv first, else system Python.
         $pythonExe = if ($null -ne $Context.Venv) { $Context.Venv.Python } else { Find-Python }
@@ -54,8 +52,7 @@
 
         $findings = [System.Collections.Generic.List[object]]::new()
         foreach ($binPath in $targets) {
-            $rel = if ($Unit.Type -eq 'model') { $Unit.RelativePath }
-                   else { "$($Unit.RelativePath)!" + $binPath.Substring($Unit.StagingPath.Length).TrimStart('\','/') }
+            $rel = $Unit.RelativePath
             $tmpJson = Join-Path $env:TEMP "mts_pickle_$([IO.Path]::GetRandomFileName()).json"
             try {
                 $r = Invoke-BoundedProcess -FilePath $pythonExe -Arguments @($helper, $binPath, $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds

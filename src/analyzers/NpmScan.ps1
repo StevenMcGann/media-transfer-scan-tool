@@ -14,14 +14,20 @@
     which owns package-lock.json for all ecosystems and fetches full advisory
     detail (severity/references/fixed versions), not just IDs.
 
-    Runs on `npm` units (loose package.json / *.js) and `archive` units (extracted
-    .tgz tarballs — only acts if a package.json is present in the staging tree).
+    Runs on loose `npm` units only — package.json, or a standalone *.js/.mjs/
+    .cjs/.ts file (no package.json required; see issue #31 acceptance). A
+    package.json or .js/.ts file found inside a GENERIC archive is classified
+    as its own 'npm' unit by recursive archive-member dispatch (issue #31) and
+    reaches this analyzer through the exact same loose-unit path below — this
+    used to ALSO walk a whole npm tarball's StagingPath itself (UnitTypes
+    included 'archive'); removed, since that would now duplicate every finding
+    member dispatch already produces for the same files.
     All analysis is STATIC — nothing is installed or executed. Tier: core.
 #>
 @{
     Name           = 'NpmScan'
-    Version        = '0.2.0'
-    UnitTypes      = @('npm', 'archive')
+    Version        = '0.3.0'
+    UnitTypes      = @('npm')
     RequiredTools  = @()
     Offline        = $true
     Tier           = 'core'
@@ -32,35 +38,13 @@
         $findings = [System.Collections.Generic.List[object]]::new()
         $jsExts   = @('.js', '.mjs', '.cjs', '.ts')
 
-        # ── Resolve targets by unit shape ────────────────────────────────────
         $pkgJsonFiles = [System.Collections.Generic.List[string]]::new()
         $jsFiles      = [System.Collections.Generic.List[string]]::new()
 
-        if ($Unit.Type -eq 'archive') {
-            if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
-                      (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return @() }
-            $pj = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'package.json' -ErrorAction SilentlyContinue)
-            if ($pj.Count -eq 0) { return @() }   # not an npm package — leave for other analyzers
-            $pj | ForEach-Object { $pkgJsonFiles.Add($_.FullName) }
-            # Cap JS scan; npm-packed tarballs don't ship node_modules.
-            @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension.ToLowerInvariant() -in $jsExts -and $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
-                Select-Object -First 200) | ForEach-Object { $jsFiles.Add($_.FullName) }
-        }
-        else {
-            # Loose npm unit
-            $name = $Unit.Name.ToLowerInvariant()
-            if ($name -eq 'package.json')           { $pkgJsonFiles.Add($Unit.Path) }
-            elseif ([IO.Path]::GetExtension($name) -in $jsExts) { $jsFiles.Add($Unit.Path) }
-            else { return @() }   # e.g. a loose package-lock.json — OsvScan owns that
-        }
-
-        $relOf = {
-            param($full)
-            if ($Unit.Type -eq 'archive' -and $Unit.StagingPath -and $full.StartsWith($Unit.StagingPath)) {
-                "$($Unit.RelativePath)!" + $full.Substring($Unit.StagingPath.Length).TrimStart('\','/')
-            } else { $Unit.RelativePath }
-        }
+        $name = $Unit.Name.ToLowerInvariant()
+        if ($name -eq 'package.json')                       { $pkgJsonFiles.Add($Unit.Path) }
+        elseif ([IO.Path]::GetExtension($name) -in $jsExts)  { $jsFiles.Add($Unit.Path) }
+        else { return @() }   # e.g. a loose package-lock.json — OsvScan owns that
 
         # ── Layer 1: package.json lifecycle + manifest ──────────────────────
         $autoExec = @('preinstall', 'install', 'postinstall')
@@ -68,7 +52,7 @@
         $riskyCmd = '(?i)(curl|wget|\|\s*(bash|sh)\b|node\s+-e|child_process|base64|powershell|certutil|bitsadmin|eval\()'
 
         foreach ($pj in $pkgJsonFiles) {
-            $rel = & $relOf $pj
+            $rel = $Unit.RelativePath
             try {
                 $pkg = Get-Content -LiteralPath $pj -Raw | ConvertFrom-Json
             } catch {
@@ -113,7 +97,7 @@
                Sev='MEDIUM'; TID='NPM-JS-OBFUSCATION'; Msg='Long hex-escape sequence — possible obfuscated payload' }
         )
         foreach ($js in $jsFiles) {
-            $rel = & $relOf $js
+            $rel = $Unit.RelativePath
             try { $text = [IO.File]::ReadAllText($js, [System.Text.Encoding]::UTF8) } catch { continue }
             foreach ($rule in $jsRules) {
                 $m = [regex]::Match($text, $rule.Re)

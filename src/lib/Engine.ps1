@@ -664,13 +664,19 @@ function Invoke-Scan {
 
                 # A top-level semantic container's expanded size is otherwise
                 # never counted (it isn't member-dispatched, so no per-member
-                # loop charges it) -- charge its real on-disk footprint so
-                # later archives in this scan see accurate remaining headroom.
+                # loop charges it) -- charge its real on-disk footprint to
+                # $budget.TopLevelSemanticBytes ONLY (review follow-up 5, #8).
+                # It must NOT also count against the shared $budget.ExpandedBytes
+                # that gates GENERIC archives: this whole category is
+                # deliberately independent (review follow-up 5, #6) so a
+                # generic archive's fate never depends on whether an unrelated
+                # wheel/nupkg happened to be scanned first in this run --
+                # charging both here would have silently reintroduced exactly
+                # that enumeration-order dependence for the shared side.
                 if ($expansion.IsArchive -and $unit.Type -ne 'archive' -and $unit.StagingPath) {
                     $expandedSize = (Get-ChildItem -LiteralPath $unit.StagingPath -Recurse -File -ErrorAction SilentlyContinue |
                         Measure-Object -Property Length -Sum).Sum
                     if ($expandedSize) {
-                        $budget.ExpandedBytes += [int64]$expandedSize
                         $budget.TopLevelSemanticBytes += [int64]$expandedSize
                     }
                 }

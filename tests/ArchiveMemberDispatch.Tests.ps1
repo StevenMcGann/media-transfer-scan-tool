@@ -1096,3 +1096,56 @@ Describe 'Archive-member dispatch — an oversized member does not block a later
         }
     }
 }
+
+Describe 'Invoke-Scan — top-level semantic-container bytes stay out of the shared archive budget (review follow-up 5, #8)' {
+    It 'does not let a preceding top-level wheel starve a later generic archive of shared budget' {
+        # The BUG: $budget.TopLevelSemanticBytes (review follow-up 5, #6) was
+        # added ALONGSIDE the pre-existing charge to the SHARED
+        # $budget.ExpandedBytes, not instead of it -- so a top-level wheel
+        # scanned before a generic archive still consumed the shared budget
+        # that gates GENERIC archives, making a later archive's coverage
+        # depend on filesystem enumeration order despite the whole point of
+        # the new counter being independence from this category.
+        $tmpDir = Join-Path $env:TEMP "mts-p8r3-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $out = Join-Path $env:TEMP "mts-p8r3-out-$(Get-Random)"
+        try {
+            # Numeric prefixes make discovery/enumeration order deterministic:
+            # the wheel is always seen before the generic archive.
+            Copy-Item -LiteralPath (Join-Path $script:Corpus 'python/clean_pkg-1.0-py3-none-any.whl') `
+                -Destination (Join-Path $tmpDir '01_pkg.whl')
+            $zipPath = Join-Path $tmpDir '02_container.zip'
+            $fs = [System.IO.File]::Create($zipPath)
+            $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $e = $za.CreateEntry('note.txt')
+                $sw = [System.IO.StreamWriter]::new($e.Open())
+                try { $sw.Write('hello') } finally { $sw.Close() }
+            } finally { $za.Dispose(); $fs.Dispose() }
+
+            $wheelEstimate = Get-ArchiveExpansionEstimate -Path (Join-Path $tmpDir '01_pkg.whl')
+            $zipEstimate   = Get-ArchiveExpansionEstimate -Path $zipPath
+            $wheelEstimate | Should -Not -BeNullOrEmpty
+            $zipEstimate   | Should -Not -BeNullOrEmpty
+
+            $origMaxBytes = $script:ArchiveTreeMaxBytes
+            try {
+                # Comfortable room for the tiny zip alone; nowhere near enough
+                # for the wheel's real expanded content on top of it -- proves
+                # the wheel's bytes never touch this shared cap.
+                $script:ArchiveTreeMaxBytes = $zipEstimate.Bytes + 100
+                $r = Invoke-Scan -Path $tmpDir -Profile core -AnalyzerDir $script:Analyzers `
+                    -ReportsDir $out -Mode offline
+
+                $zipUnit = $r.Units | Where-Object { $_.Name -eq '02_container.zip' }
+                $zipUnit | Should -Not -BeNullOrEmpty
+                @($zipUnit.Findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' }).Count | Should -Be 0
+            } finally {
+                $script:ArchiveTreeMaxBytes = $origMaxBytes
+            }
+        } finally {
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

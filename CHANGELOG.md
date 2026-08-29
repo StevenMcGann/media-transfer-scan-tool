@@ -192,6 +192,16 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
         (once hit, truly a dead end — count only grows) still skips the
         whole remaining suffix in one go; an individual byte-budget miss now
         `continue`s past just that one member instead.
+    - A seventh review round, on the sixth's own fix: the new
+      `Budget.TopLevelSemanticBytes` tracking was added ALONGSIDE the
+      pre-existing charge to the SHARED `Budget.ExpandedBytes`, not instead
+      of it — so a top-level wheel/egg/`.nupkg` scanned before a generic
+      archive still consumed the shared budget that gates GENERIC archives,
+      making a later archive's coverage depend on filesystem enumeration
+      order despite the whole point of the new counter being independence
+      from this category. The shared-budget charge for a top-level semantic
+      container's expanded size is removed; only `TopLevelSemanticBytes`
+      charges now.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

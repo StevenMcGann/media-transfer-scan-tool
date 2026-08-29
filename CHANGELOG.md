@@ -246,6 +246,18 @@ frozen public contract; **1.0.0 marks the full-coverage milestone** (see [PLAN.m
         against that via a new `-CountAllEntries` switch, and the charge
         counts extracted directories too — an inode bound measured in
         inodes, not in dispatchable files.
+    - A tenth review round closed the same inode gap for NESTED semantic
+      containers (a wheel/egg/`.nupkg` found as a member of a generic
+      archive). Those charge their expanded bytes to the shared budget, but
+      their internal entries were counted nowhere: the outer member loop
+      charges the container as exactly ONE member however many entries it
+      holds, and `Test-ZipArchiveHazards`' 50,000-entry limit resets per
+      package — so a submission comfortably inside the byte cap could still
+      stage millions of inodes. A `Budget.NestedSemanticEntries` pool now
+      gates and charges them (`TotalEntries`, directories included, reserved
+      before extraction and rolled back if it fails), kept separate from
+      `MemberCount` so a semantic container is still never blocked merely
+      because the dispatchable-member count is exhausted.
 
 ### Security
 - **Detail-fetch loop could out-stall a flapping (not fully down) OSV

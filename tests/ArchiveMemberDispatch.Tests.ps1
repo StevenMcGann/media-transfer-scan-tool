@@ -1351,3 +1351,61 @@ Describe 'Invoke-Scan — directory-only semantic containers still hit the cumul
         }
     }
 }
+
+Describe 'Archive-member dispatch — cumulative entry cap for NESTED semantic containers (review follow-up 5, #13)' {
+    It 'blocks a later nested wheel once earlier ones have used up the nested semantic ENTRY budget' {
+        # The BUG: a nested wheel/egg/.nupkg charged its expanded BYTES to
+        # the shared budget, but its internal entries were counted nowhere --
+        # the outer member loop charges the container as exactly ONE member
+        # no matter how many entries it holds, and Test-ZipArchiveHazards'
+        # 50,000-entry limit resets per package. A generic archive holding
+        # many directory-only wheels therefore stayed comfortably inside the
+        # byte cap while staging arbitrarily many inodes.
+        $stage = Join-Path $env:TEMP "mts-p11r1-$(Get-Random)"
+        $workDir = Join-Path $env:TEMP "mts-p11r1-work-$(Get-Random)"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        try {
+            # Two nested wheels, every entry a DIRECTORY -- zero files, zero
+            # bytes, so only an ENTRY-based bound can ever gate these.
+            foreach ($name in @('01_bundled.whl', '02_bundled.whl')) {
+                $fs = [System.IO.File]::Create((Join-Path $stage $name))
+                $za = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+                try {
+                    foreach ($i in 1..20) { $za.CreateEntry("dir$i/") | Out-Null }
+                } finally { $za.Dispose(); $fs.Dispose() }
+            }
+
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = $null; Mode = 'offline'; WorkDir = $workDir
+                ReportsDir = $script:Out; HelperDir = ''; TimeoutSeconds = 60; AdvisoryDbDate = $null
+            }
+            $enabled = @((Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers) | Where-Object { $_.DefaultEnabled })
+            $unit = [PSCustomObject]@{ Type = 'archive'; Name = 'container.zip'; Path = 'container.zip'
+                                        RelativePath = 'container.zip'; StagingPath = $stage }
+
+            $origMaxMembers = $script:ArchiveTreeMaxMembers
+            try {
+                $script:ArchiveTreeMaxMembers = 25   # room for ONE wheel's 20 directories, not two
+                $budget = New-ArchiveTreeBudget
+                $findings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
+                    -Enabled $enabled -Budget $budget -Depth 1
+
+                # Exactly one of the two nested wheels is refused on the
+                # entry budget -- bytes never came close to any limit.
+                $blocked = @($findings | Where-Object {
+                    $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.File -like 'container.zip!*bundled.whl' })
+                $blocked.Count | Should -Be 1
+                # ...and the admitted one really did extract (one staging
+                # slot claimed), so this is a genuine cap, not a blanket block.
+                $budget.NextStageIndex | Should -Be 1
+                $budget.NestedSemanticEntries | Should -Be 20
+            } finally {
+                $script:ArchiveTreeMaxMembers = $origMaxMembers
+            }
+        } finally {
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

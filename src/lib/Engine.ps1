@@ -92,6 +92,20 @@ function New-ArchiveTreeBudget {
         # limit. Capped against $script:ArchiveTreeMaxMembers, same as the
         # shared budget's own member count.
         TopLevelSemanticEntries = 0
+        # The same inode bound for NESTED semantic containers — a wheel/egg/
+        # .nupkg found as a member of a generic archive (review follow-up 5,
+        # #13). Those charge their expanded BYTES to the shared ExpandedBytes
+        # above, but their internal entries were counted nowhere: the outer
+        # member loop charges the container as exactly ONE member no matter
+        # how many entries it holds, and Test-ZipArchiveHazards' 50,000-entry
+        # limit resets per package. A submission comfortably within the byte
+        # cap could therefore stage millions of inodes. Tracked separately
+        # from MemberCount so review follow-up 5, #2's guarantee still holds
+        # (a semantic container is never blocked merely because the
+        # dispatchable-member count is exhausted — its entries never consume
+        # that), and separately from the top-level counter above, which has
+        # its own always-allow-the-first rule that must not apply here.
+        NestedSemanticEntries = 0
     }
 }
 
@@ -490,7 +504,18 @@ function Invoke-ArchiveMemberDispatch {
         # the top-level gate, this one is allowed to block: it's one member
         # among many in an already budget-constrained parent, not a whole
         # submission's only content.
-        elseif ($isSemanticContainerChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName -Budget $Budget -SkipCountCheck)) {
+        #
+        # Bytes are weighed against the SHARED budget (a nested container is
+        # one member of an already-constrained parent, so it legitimately
+        # consumes that), but the ENTRY count is weighed against the separate
+        # $Budget.NestedSemanticEntries pool (review follow-up 5, #13) --
+        # never against MemberCount, which review follow-up 5, #2 established
+        # a semantic container's internal entries do not consume.
+        elseif ($isSemanticContainerChild -and (Test-ArchiveWouldExceedBudget -Path $file.FullName `
+                    -Budget ([PSCustomObject]@{
+                        MaxBytes   = $Budget.MaxBytes;                 ExpandedBytes = $Budget.ExpandedBytes
+                        MaxMembers = $script:ArchiveTreeMaxMembers;    MemberCount   = $Budget.NestedSemanticEntries
+                    }) -CountAllEntries)) {
             $budgetBlocked = $true
             $findings.Add((New-Finding -Tool 'Engine' -Category 'archive-hazard' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType $childUnit.Type -File $childRel `
@@ -515,7 +540,13 @@ function Invoke-ArchiveMemberDispatch {
             $preEstimate = $null
             if ($isSemanticContainerChild) {
                 $preEstimate = Get-ArchiveExpansionEstimate -Path $file.FullName
-                if ($null -ne $preEstimate) { $Budget.ExpandedBytes += $preEstimate.Bytes }
+                if ($null -ne $preEstimate) {
+                    $Budget.ExpandedBytes += $preEstimate.Bytes
+                    # TotalEntries, not Count: this pool bounds real inodes
+                    # created by extraction, and directory entries create
+                    # those too (review follow-up 5, #12/#13).
+                    $Budget.NestedSemanticEntries += $preEstimate.TotalEntries
+                }
             }
 
             $expansion = Expand-UnitInPlace -Unit $childUnit -Context $Context -Budget $Budget
@@ -532,6 +563,7 @@ function Invoke-ArchiveMemberDispatch {
             # the charge above and here).
             if ($null -ne $preEstimate -and -not $childUnit.StagingPath) {
                 $Budget.ExpandedBytes -= $preEstimate.Bytes
+                $Budget.NestedSemanticEntries -= $preEstimate.TotalEntries
             }
 
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled

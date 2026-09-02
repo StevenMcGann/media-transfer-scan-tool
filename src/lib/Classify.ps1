@@ -57,11 +57,16 @@ $script:ExtTypeMap = @{
 $script:FilenameTypeMap = @{
     'package.json'      = 'npm'
     'package-lock.json' = 'npm'
+    'npm-shrinkwrap.json' = 'npm'
     # PyPI dependency manifest (issue #32 — OSV lookup). Its own unit type, NOT
     # 'python': it's a list of `name==version` lines, not Python source, and
     # 'python' is claimed by PythonRules/Bandit/DetectSecrets, which would try
     # (and fail/misfire) to parse it as source. Only OsvScan claims this type.
     'requirements.txt'  = 'python-requirements'
+    'pipfile.lock'      = 'python-requirements'
+    'pyproject.toml'    = 'python-requirements'
+    'poetry.lock'       = 'python-requirements'
+    'uv.lock'           = 'python-requirements'
 }
 
 # ZIP-based formats whose magic bytes (PK) legitimately don't match their declared type.
@@ -146,6 +151,14 @@ function Get-DeclaredType {
     param([System.IO.FileInfo]$File)
     $name = $File.Name.ToLowerInvariant()
     if ($script:FilenameTypeMap.ContainsKey($name)) { return $script:FilenameTypeMap[$name] }
+    if ($name -match '^requirements[^\\/]*\.txt$') { return 'python-requirements' }
+    if ($name.EndsWith('.nuspec')) { return 'nuget' }
+    if ($name -eq 'metadata' -and $File.Directory -and $File.Directory.Name.ToLowerInvariant().EndsWith('.dist-info')) {
+        return 'python-requirements'
+    }
+    if ($name -eq 'pkg-info' -and $File.Directory -and $File.Directory.Name.ToLowerInvariant().EndsWith('.egg-info')) {
+        return 'python-requirements'
+    }
     if ($name.EndsWith('.tar.gz')) { return 'archive' }
     $ext = $File.Extension.ToLowerInvariant()
     return $script:ExtTypeMap[$ext]   # $null if unknown

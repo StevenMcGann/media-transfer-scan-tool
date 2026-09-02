@@ -37,6 +37,7 @@ NUGET_DIR  = os.path.join(CORPUS_DIR, 'nuget')
 MODEL_DIR  = os.path.join(CORPUS_DIR, 'model')
 ARCHIVE_DIR = os.path.join(CORPUS_DIR, 'archive')
 ARCMEM_DIR  = os.path.join(CORPUS_DIR, 'archive_member')
+ARCMETA_DIR = os.path.join(CORPUS_DIR, 'archive_metadata')
 PYRULES_DIR = os.path.join(CORPUS_DIR, 'python_rules')
 VBA_DIR     = os.path.join(CORPUS_DIR, 'vba')
 os.makedirs(PYTHON_DIR, exist_ok=True)
@@ -58,6 +59,7 @@ for sub in ('clean', 'vulnerable', 'collide/a', 'collide/b', 'ambiguous', 'neste
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(ARCMEM_DIR, exist_ok=True)
+os.makedirs(ARCMETA_DIR, exist_ok=True)
 os.makedirs(PYRULES_DIR, exist_ok=True)
 os.makedirs(VBA_DIR, exist_ok=True)
 
@@ -188,7 +190,8 @@ def make_packed_pe() -> bytes:
                                      (".packed", seeded_bytes("packed-pe", 1024))])
 
 
-def make_wheel(pkg: str, version: str, internal: dict) -> bytes:
+def make_wheel(pkg: str, version: str, internal: dict,
+               requires: list[str] | None = None) -> bytes:
     """Build a .whl (zip) containing the given internal files + a dist-info METADATA."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -196,6 +199,8 @@ def make_wheel(pkg: str, version: str, internal: dict) -> bytes:
             zi = zipfile.ZipInfo(arcname, date_time=FIXED_ZIP_DT)
             z.writestr(zi, data)
         meta = f"Metadata-Version: 2.1\nName: {pkg}\nVersion: {version}\n"
+        for requirement in requires or []:
+            meta += f"Requires-Dist: {requirement}\n"
         zi = zipfile.ZipInfo(f"{pkg}-{version}.dist-info/METADATA", date_time=FIXED_ZIP_DT)
         z.writestr(zi, meta)
     return buf.getvalue()
@@ -316,6 +321,20 @@ def write_tgz(path: str, members: list[tuple[str, bytes]]) -> None:
                     info.uid = info.gid = 0
                     info.uname = info.gname = ''
                     tf.addfile(info, io.BytesIO(data))
+    print(f'  wrote {path}')
+
+
+def write_tar(path: str, members: list[tuple[str, bytes]]) -> None:
+    """Write a reproducible uncompressed tar archive."""
+    with _tarfile.open(path, mode='w', format=_tarfile.PAX_FORMAT) as tf:
+        for name, data in members:
+            info = _tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = FIXED_EPOCH
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ''
+            tf.addfile(info, io.BytesIO(data))
     print(f'  wrote {path}')
 
 
@@ -999,6 +1018,107 @@ for _i, _size in enumerate([1000, 2000, 3000], start=1):
     _data = (str(_i).encode() * _size)[:_size]
     _multi_members.append((f'file{_i}.bin', _data))
 write_tgz(_multi_tar, _multi_members)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata-only archive fallback fixtures (issue #39 / v0.14).
+# ─────────────────────────────────────────────────────────────────────────────
+_vulnerable_wheel = make_wheel(
+    'Pillow', '9.5.0', {'PIL/__init__.py': b'__version__ = "9.5.0"\n'},
+    requires=['urllib3 (==1.26.5)', 'requests (>=2)'])
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('packages/Pillow-9.5.0-py3-none-any.whl', FIXED_ZIP_DT),
+               _vulnerable_wheel)
+    z.writestr(zipfile.ZipInfo('payload/large.bin', FIXED_ZIP_DT),
+               seeded_bytes('archive-metadata-payload', 4096))
+write(os.path.join(ARCMETA_DIR, 'nested_vulnerable_wheel.zip'), buf.getvalue())
+
+# The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
+# the wheel's own central directory declares a much larger expanded payload.
+# This drives Engine.ps1's NESTED semantic-container budget-blocked branch.
+_large_wheel_buf = io.BytesIO()
+with zipfile.ZipFile(_large_wheel_buf, 'w', zipfile.ZIP_DEFLATED) as _wheel_zip:
+    _large_entry = zipfile.ZipInfo('PIL/large.dat', FIXED_ZIP_DT)
+    _large_entry.compress_type = zipfile.ZIP_DEFLATED
+    _wheel_zip.writestr(_large_entry, b'0' * (2 * 1024 * 1024))
+    _large_metadata = zipfile.ZipInfo('Pillow-9.5.0.dist-info/METADATA', FIXED_ZIP_DT)
+    _large_metadata.compress_type = zipfile.ZIP_DEFLATED
+    _wheel_zip.writestr(_large_metadata,
+                        'Metadata-Version: 2.1\nName: Pillow\nVersion: 9.5.0\n')
+_large_inner_wheel = _large_wheel_buf.getvalue()
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('packages/Pillow-large.whl', FIXED_ZIP_DT),
+               _large_inner_wheel)
+write(os.path.join(ARCMETA_DIR, 'nested_budget_blocked_wheel.zip'), buf.getvalue())
+
+_meta = (b'Metadata-Version: 2.1\nName: Pillow\nVersion: 9.5.0\n'
+         b'Requires-Dist: urllib3 (==1.26.5)\n')
+write_tgz(os.path.join(ARCMETA_DIR, 'metadata.tgz'),
+          [('Pillow-9.5.0.dist-info/METADATA', _meta),
+           ('payload.bin', seeded_bytes('archive-metadata-tgz-payload', 2048))])
+write_tar(os.path.join(ARCMETA_DIR, 'metadata.tar'),
+          [('Pillow-9.5.0.dist-info/METADATA', _meta)])
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('requirements-prod.txt', FIXED_ZIP_DT),
+               'Pillow==9.5.0\nrequests>=2\n')
+    z.writestr(zipfile.ZipInfo('package-lock.json', FIXED_ZIP_DT),
+               json.dumps({'lockfileVersion': 3,
+                           'packages': {'': {}, 'node_modules/lodash': {'version': '4.17.4'}}}))
+    z.writestr(zipfile.ZipInfo('Pipfile.lock', FIXED_ZIP_DT),
+               json.dumps({'default': {'urllib3': {'version': '==1.26.5'}}}))
+    z.writestr(zipfile.ZipInfo('poetry.lock', FIXED_ZIP_DT),
+               '[[package]]\nname = "Pillow"\nversion = "9.5.0"\n')
+    z.writestr(zipfile.ZipInfo('uv.lock', FIXED_ZIP_DT),
+               '[[package]]\nname = "urllib3"\nversion = "1.26.5"\n')
+    z.writestr(zipfile.ZipInfo('pyproject.toml', FIXED_ZIP_DT),
+               '[project]\ndependencies = ["Pillow==9.5.0", "requests>=2"]\n')
+    z.writestr(zipfile.ZipInfo('Example.nuspec', FIXED_ZIP_DT),
+               '<?xml version="1.0"?><package><metadata><id>Newtonsoft.Json</id>'
+               '<version>12.0.1</version><dependencies>'
+               '<dependency id="Example.Exact" version="[1.2.3]" />'
+               '<dependency id="Example.Range" version="[1.0,2.0)" />'
+               '</dependencies></metadata></package>')
+write(os.path.join(ARCMETA_DIR, 'supported_manifests.zip'), buf.getvalue())
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('../requirements.txt', FIXED_ZIP_DT), 'Pillow==9.5.0\n')
+write(os.path.join(ARCMETA_DIR, 'traversal_metadata.zip'), buf.getvalue())
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    link = zipfile.ZipInfo('Pillow-9.5.0.dist-info/METADATA', FIXED_ZIP_DT)
+    link.create_system = 3
+    link.external_attr = (0o120777 << 16)
+    z.writestr(link, '../real-metadata')
+write(os.path.join(ARCMETA_DIR, 'symlink_metadata.zip'), buf.getvalue())
+
+_special_tar = os.path.join(ARCMETA_DIR, 'special_metadata.tar')
+with _tarfile.open(_special_tar, mode='w', format=_tarfile.PAX_FORMAT) as tf:
+    link = _tarfile.TarInfo('Pillow-9.5.0.dist-info/METADATA')
+    link.type = _tarfile.SYMTYPE
+    link.linkname = '../real-metadata'
+    link.mtime = FIXED_EPOCH
+    tf.addfile(link)
+print(f'  wrote {_special_tar}')
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('requirements.txt', FIXED_ZIP_DT), 'Pillow==9.5.0\n')
+    z.writestr(zipfile.ZipInfo('requirements.txt', FIXED_ZIP_DT), 'urllib3==1.26.5\n')
+write(os.path.join(ARCMETA_DIR, 'duplicate_metadata.zip'), buf.getvalue())
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    oversized_metadata = zipfile.ZipInfo('requirements-big.txt', FIXED_ZIP_DT)
+    oversized_metadata.compress_type = zipfile.ZIP_DEFLATED
+    z.writestr(oversized_metadata, ('Pillow==9.5.0\n' + '# padding\n' * 140000))
+write(os.path.join(ARCMETA_DIR, 'oversized_metadata.zip'), buf.getvalue())
+
+write(os.path.join(ARCMETA_DIR, 'corrupt.zip'), b'PK\x03\x04truncated')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VB-family fixtures (issue #25) — exported VBA modules and VBScript.

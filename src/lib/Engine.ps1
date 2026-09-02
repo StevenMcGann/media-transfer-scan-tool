@@ -116,6 +116,10 @@ function New-ArchiveTreeBudget {
         # every cumulative counter stayed at zero. Subtracted from the count
         # headroom alongside MemberCount wherever an extraction is gated.
         StagedDirectories = 0
+        # Independent, scan-wide budget for issue #39's metadata-only archive
+        # fallback.  It is deliberately shared by every blocked archive so a
+        # submission cannot reset the limits by supplying many containers.
+        Metadata = New-ArchiveMetadataBudget
     }
 }
 
@@ -532,6 +536,10 @@ function Invoke-ArchiveMemberDispatch {
                 -Issue 'Nested archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                 -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                 -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+            if (@($Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $file.FullName -RelativePath $childRel `
+                        -Context $Context -Budget $Budget.Metadata)) { $findings.Add($f) }
+            }
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
         }
@@ -567,6 +575,10 @@ function Invoke-ArchiveMemberDispatch {
                 -Issue 'Semantic container not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                 -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                 -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
+            if (@($Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $file.FullName -RelativePath $childRel `
+                        -Context $Context -Budget $Budget.Metadata)) { $findings.Add($f) }
+            }
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
         }
@@ -776,6 +788,10 @@ function Invoke-Scan {
                     -Issue 'Archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+                if (@($sel.Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                    foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $unit.Path -RelativePath $unit.RelativePath `
+                            -Context $context -Budget $budget.Metadata)) { $findings.Add($f) }
+                }
             } elseif ($unit.Type -ne 'archive' -and (Test-IsArchiveUnit -Unit $unit) -and
                       ($budget.TopLevelSemanticBytes -gt 0 -or $budget.TopLevelSemanticEntries -gt 0) -and
                       (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget -CountAllEntries)) {
@@ -785,6 +801,10 @@ function Invoke-Scan {
                     -Issue 'Semantic container not opened — extracting it would exceed the cumulative top-level semantic-container budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
+                if (@($sel.Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                    foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $unit.Path -RelativePath $unit.RelativePath `
+                            -Context $context -Budget $budget.Metadata)) { $findings.Add($f) }
+                }
             } else {
                 $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
                 foreach ($f in $expansion.Findings) { $findings.Add($f) }

@@ -3,6 +3,8 @@
 ## Status
 
 - **Current package release:** v0.13.0
+- **Development target:** v0.14.0 metadata-only dependency auditing for
+  archive content blocked from normal extraction
 - **Report schema:** `1.0.0`, frozen since package v0.9.0
 - **Runtime:** PowerShell 7.4+ on Windows; the operator bundle vendors a pinned
   PowerShell 7.4 LTS patch and scanner environment
@@ -45,7 +47,8 @@ the isolated host defined in [docs/test-environment.md](docs/test-environment.md
 4. `src/lib/Classify.ps1` classifies by filename, extension, magic bytes,
    shebang, and content signatures.
 5. `src/lib/Engine.ps1` dispatches units and archive members through enabled
-   analyzers and aggregates normalized findings.
+   analyzers, invokes the bounded metadata-only fallback for budget-blocked
+   archives, and aggregates normalized findings.
 6. `src/lib/Report.ps1` renders the same model as canonical JSON, HTML, and slim
    text reports.
 

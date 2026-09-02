@@ -112,6 +112,12 @@ findings even when overall risk is CLEAN:
   depth limit was reached.
 - **`MTS-ARCHIVE-BUDGET-EXCEEDED`** — one or more members or semantic containers
   were not staged or analyzed because the shared entry/byte budget was reached.
+- **`MTS-ARCHIVE-METADATA-PARTIAL`** — the v0.14 development path inspected
+  recognized dependency metadata without extracting the blocked archive. This
+  can identify a compressed wheel's own name/version and exact dependencies,
+  but it does not mean the archive payload received full static analysis.
+- **`MTS-ARCHIVE-METADATA-LIMIT` / `MTS-ARCHIVE-METADATA-ERROR`** — the bounded
+  fallback itself reached a safety limit or could not safely read some metadata.
 
 These findings describe incomplete coverage. Inspect the named content by a
 separate controlled method or split the submission and rescan; do not interpret

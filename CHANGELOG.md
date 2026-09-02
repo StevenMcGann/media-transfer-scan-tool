@@ -9,6 +9,21 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+### Added
+- Added a scan-wide, resource-bounded metadata-only dependency fallback for
+  ZIP, wheel, NuGet, TAR, and TGZ containers that cannot be normally extracted
+  without exceeding the shared archive-tree budget ([#39](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/39)).
+- The fallback reads recognized dependency manifests without writing payloads
+  to the staging tree, recursively inspects bounded nested containers, audits
+  exact wheel/package identities and dependencies through the shared OSV client,
+  and reports partial, limited, malformed, encrypted/unreadable, duplicate, and
+  otherwise skipped coverage explicitly.
+- Added shared parsers for wheel `METADATA`/`PKG-INFO`, `requirements*.txt`, npm
+  lock/shrinkwrap files, `Pipfile.lock`, `pyproject.toml`, `poetry.lock`,
+  `uv.lock`, and `.nuspec` metadata. The normal and fallback paths use the same
+  parser semantics, and non-exact dependency declarations remain visible as
+  unaudited rather than being guessed.
+
 ### Changed
 - Reconciled the README, operator guide, test-environment runbook, public
   contract, maintainer guide, bundle guide, and roadmap with v0.13.0 behavior.

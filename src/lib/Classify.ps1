@@ -264,7 +264,11 @@ function New-Unit {
 
     # Known ZIP-container formats (.whl, .docx, npm) — extension carries the
     # semantic type; PK magic only confirms "this is a ZIP". Route by extension.
-    $isKnownContainer = $declared -and $script:KnownZipContainerTypes -contains $declared
+    # A loose .nuspec is NuGet metadata, not a NuGet ZIP container: only .nupkg
+    # is allowed to use the nuget semantic-container exception. Otherwise a ZIP
+    # renamed to .nuspec could bypass generic archive-member dispatch.
+    $isKnownContainer = $declared -and $script:KnownZipContainerTypes -contains $declared -and
+                        ($declared -ne 'nuget' -or $File.Extension.Equals('.nupkg', [StringComparison]::OrdinalIgnoreCase))
     $isZipContainer   = $det -and $det.Type -eq 'archive' -and $isKnownContainer
 
     $detected = if ($isZipContainer) { $declared }

@@ -10,6 +10,11 @@
     only recognized manifests into bounded byte arrays; nested ZIP/TAR
     containers are spooled to a dedicated temporary directory under a separate,
     scan-wide byte budget and are always removed by the caller.
+
+    Keep this fallback only at Engine.ps1's four pre-extraction budget gates.
+    Do not add it to mid-member or mid-TAR budget exhaustion paths: those paths
+    have already dispatched members and would create duplicate dependency
+    findings for metadata that was successfully reached before the stop.
 #>
 
 Set-StrictMode -Version Latest
@@ -22,6 +27,9 @@ function New-ArchiveMetadataBudget {
         MaxManifestBytes       = 1MB
         MaxDecodedBytes        = 16MB
         MaxDepth               = 3
+        # Aggregate spool work across the scan, not current/peak disk usage.
+        # Failed spools stay charged after deletion so repeated malformed
+        # containers cannot buy unlimited write/delete I/O under one scan.
         MaxTempBytes           = 64MB
         MaxStreamBytes         = 256MB
         MaxDependencies        = 5000
@@ -59,7 +67,7 @@ function Get-DependencyMetadataKind {
 function Get-ArchiveMetadataContainerKind {
     param([Parameter(Mandatory)][string]$EntryName)
     $name = ($EntryName -replace '\\', '/').ToLowerInvariant()
-    if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return 'tar' }
+    if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return 'tar-gzip' }
     $ext = [IO.Path]::GetExtension($name)
     if ($ext -in @('.zip', '.whl', '.egg', '.nupkg')) { return 'zip' }
     if ($ext -eq '.tar') { return 'tar' }
@@ -409,15 +417,26 @@ function Convert-DependencyMetadataContent {
 }
 
 function Read-ArchiveMetadataStreamBytes {
-    param([Parameter(Mandatory)][IO.Stream]$Stream, [Parameter(Mandatory)][long]$Limit)
+    param(
+        [Parameter(Mandatory)][IO.Stream]$Stream,
+        [Parameter(Mandatory)][long]$Limit,
+        [Parameter(Mandatory)][PSCustomObject]$Budget
+    )
     $ms = [IO.MemoryStream]::new()
     try {
         $buffer = [byte[]]::new(65536)
         while ($true) {
-            $remaining = $Limit - $ms.Length
-            if ($remaining -le 0) { throw "stream exceeds the $Limit-byte limit" }
-            $read = $Stream.Read($buffer, 0, [int][Math]::Min($buffer.Length, $remaining))
+            $manifestRemaining = $Limit - $ms.Length
+            if ($manifestRemaining -le 0) { throw "stream exceeds the $Limit-byte limit" }
+            $budgetRemaining = $Budget.MaxDecodedBytes - $Budget.DecodedBytes
+            if ($budgetRemaining -le 0) { throw 'decoded metadata byte budget reached while reading stream' }
+            $readLimit = [Math]::Min($buffer.Length, [Math]::Min($manifestRemaining, $budgetRemaining))
+            $read = $Stream.Read($buffer, 0, [int]$readLimit)
             if ($read -le 0) { break }
+            # Charge bytes as they are read, including on a later exception.
+            # A lying archive header therefore cannot repeatedly consume decode
+            # work without advancing the scan-wide budget.
+            $Budget.DecodedBytes += $read
             $ms.Write($buffer, 0, $read)
         }
         return $ms.ToArray()
@@ -428,21 +447,32 @@ function Save-ArchiveMetadataNestedStream {
     param([IO.Stream]$Stream, [string]$Destination, [long]$Length, [PSCustomObject]$Budget)
     if ($Length -gt ($Budget.MaxTempBytes - $Budget.TempBytes)) { throw 'metadata temporary-byte budget would be exceeded' }
     $out = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $saved = $false
     try {
         $buffer = [byte[]]::new(65536); $written = 0L
         while ($true) {
-            $remaining = $Budget.MaxTempBytes - $Budget.TempBytes - $written
+            if ($Length -ge 0 -and $written -eq $Length) { break }
+            $remaining = $Budget.MaxTempBytes - $Budget.TempBytes
             if ($remaining -le 0) { throw 'metadata temporary-byte budget reached' }
-            $read = $Stream.Read($buffer, 0, [int][Math]::Min($buffer.Length, $remaining))
+            $readLimit = [Math]::Min($buffer.Length, $remaining)
+            if ($Length -ge 0) { $readLimit = [Math]::Min($readLimit, $Length - $written) }
+            $read = $Stream.Read($buffer, 0, [int]$readLimit)
             if ($read -le 0) { break }
-            $out.Write($buffer, 0, $read); $written += $read
+            # Charge before writing so an I/O failure or declared-length
+            # mismatch cannot leave bytes on disk outside the scan-wide cap.
+            $Budget.TempBytes += $read
+            $written += $read
+            $out.Write($buffer, 0, $read)
         }
         if ($Length -ge 0 -and $written -ne $Length) {
             throw "nested container was truncated (declared $Length bytes, read $written)"
         }
-        $Budget.TempBytes += $written
+        $saved = $true
         return $written
-    } finally { $out.Dispose() }
+    } finally {
+        $out.Dispose()
+        if (-not $saved) { [IO.File]::Delete($Destination) }
+    }
 }
 
 function Invoke-ArchiveMetadataDependencyScan {
@@ -485,10 +515,10 @@ function Invoke-ArchiveMetadataDependencyScan {
         return $true
     }
 
-    function Read-Container([string]$containerPath, [string]$logicalContainer, [int]$depth) {
+    function Read-Container([string]$containerPath, [string]$logicalContainer, [int]$depth, [string]$knownKind = '') {
         if (Test-LimitTime) { Add-Limit $logicalContainer "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; return }
         if ($depth -gt $Budget.MaxDepth) { Add-Limit $logicalContainer "nested-container depth cap ($($Budget.MaxDepth)) reached"; return }
-        $containerKind = Get-ArchiveMetadataContainerKind -EntryName $containerPath
+        $containerKind = if ($knownKind) { $knownKind } else { Get-ArchiveMetadataContainerKind -EntryName $containerPath }
         if (-not $containerKind) { Add-Error $logicalContainer 'unsupported nested container format'; return }
 
         $localCandidates = [Collections.Generic.List[object]]::new()
@@ -515,6 +545,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                         }
                         $zipMode = (([int64]$entry.ExternalAttributes -band 0xFFFFFFFF) -shr 16) -band 0xF000
                         if ($zipMode -eq 0xA000) { Add-Error $logical 'ZIP symlink entry is never followed'; continue }
+                        if ($entry.IsEncrypted) { Add-Error $logical 'encrypted ZIP entry cannot be read'; continue }
                         $kind = Get-DependencyMetadataKind -EntryName $name
                         $nestedKind = Get-ArchiveMetadataContainerKind -EntryName $name
                         if (-not $kind -and -not $nestedKind) { continue }
@@ -529,14 +560,15 @@ function Invoke-ArchiveMetadataDependencyScan {
                             try {
                                 if ($kind) {
                                     if ($Budget.Candidates -ge $Budget.MaxCandidates) { Add-Limit $logical "candidate cap ($($Budget.MaxCandidates)) reached"; break }
-                                    if (($Budget.DecodedBytes + $entry.Length) -gt $Budget.MaxDecodedBytes) { Add-Limit $logical "decoded metadata byte cap ($($Budget.MaxDecodedBytes)) reached"; break }
-                                    $bytes = Read-ArchiveMetadataStreamBytes -Stream $stream -Limit ($Budget.MaxManifestBytes + 1L)
-                                    $Budget.Candidates++; $Budget.DecodedBytes += $bytes.LongLength
+                                    if (($Budget.DecodedBytes + $entry.Length) -gt $Budget.MaxDecodedBytes) { Add-Limit $logical "decoded metadata byte cap ($($Budget.MaxDecodedBytes)) reached"; continue }
+                                    $bytes = Read-ArchiveMetadataStreamBytes -Stream $stream `
+                                        -Limit ($Budget.MaxManifestBytes + 1L) -Budget $Budget
+                                    $Budget.Candidates++
                                     $localCandidates.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Kind=$kind; Bytes=$bytes })
                                 } elseif ($depth -lt $Budget.MaxDepth) {
-                                    $tmp = Join-Path $tempRoot "$([guid]::NewGuid().ToString('N'))$([IO.Path]::GetExtension($name))"
+                                    $tmp = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
                                     [void](Save-ArchiveMetadataNestedStream -Stream $stream -Destination $tmp -Length $entry.Length -Budget $Budget)
-                                    $localNested.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Path=$tmp })
+                                    $localNested.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Path=$tmp; Kind=$nestedKind })
                                 } else { Add-Limit $logical "nested-container depth cap ($($Budget.MaxDepth)) reached" }
                             } finally { $stream.Dispose() }
                         } catch { Add-Error $logical $_.Exception.Message }
@@ -545,7 +577,7 @@ function Invoke-ArchiveMetadataDependencyScan {
             } else {
                 $file = [IO.File]::OpenRead($containerPath); $gzip = $null; $reader = $null
                 try {
-                    $isGzip = $containerPath.ToLowerInvariant().EndsWith('.tgz') -or $containerPath.ToLowerInvariant().EndsWith('.tar.gz')
+                    $isGzip = $containerKind -eq 'tar-gzip'
                     $source = if ($isGzip) { $gzip = [IO.Compression.GZipStream]::new($file, [IO.Compression.CompressionMode]::Decompress); $gzip } else { $file }
                     $reader = [System.Formats.Tar.TarReader]::new($source, $true)
                     $containerStreamBytes = 0L
@@ -584,14 +616,15 @@ function Invoke-ArchiveMetadataDependencyScan {
                         try {
                             if ($kind) {
                                 if ($Budget.Candidates -ge $Budget.MaxCandidates) { Add-Limit $logical "candidate cap ($($Budget.MaxCandidates)) reached"; break }
-                                if (($Budget.DecodedBytes + $entryLength) -gt $Budget.MaxDecodedBytes) { Add-Limit $logical "decoded metadata byte cap ($($Budget.MaxDecodedBytes)) reached"; break }
-                                $bytes = Read-ArchiveMetadataStreamBytes -Stream $entry.DataStream -Limit ($Budget.MaxManifestBytes + 1L)
-                                $Budget.Candidates++; $Budget.DecodedBytes += $bytes.LongLength
+                                if (($Budget.DecodedBytes + $entryLength) -gt $Budget.MaxDecodedBytes) { Add-Limit $logical "decoded metadata byte cap ($($Budget.MaxDecodedBytes)) reached"; continue }
+                                $bytes = Read-ArchiveMetadataStreamBytes -Stream $entry.DataStream `
+                                    -Limit ($Budget.MaxManifestBytes + 1L) -Budget $Budget
+                                $Budget.Candidates++
                                 $localCandidates.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Kind=$kind; Bytes=$bytes })
                             } elseif ($depth -lt $Budget.MaxDepth) {
-                                $tmp = Join-Path $tempRoot "$([guid]::NewGuid().ToString('N'))$([IO.Path]::GetExtension($name))"
+                                $tmp = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
                                 [void](Save-ArchiveMetadataNestedStream -Stream $entry.DataStream -Destination $tmp -Length $entryLength -Budget $Budget)
-                                $localNested.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Path=$tmp })
+                                $localNested.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Path=$tmp; Kind=$nestedKind })
                             } else { Add-Limit $logical "nested-container depth cap ($($Budget.MaxDepth)) reached" }
                         } catch { Add-Error $logical $_.Exception.Message }
                     }
@@ -612,7 +645,7 @@ function Invoke-ArchiveMetadataDependencyScan {
         }
         foreach ($nested in $localNested) {
             if ($duplicates.Contains($nested.Key)) { Remove-Item -LiteralPath $nested.Path -Force -ErrorAction SilentlyContinue; continue }
-            Read-Container $nested.Path $nested.Logical ($depth + 1)
+            Read-Container $nested.Path $nested.Logical ($depth + 1) $nested.Kind
         }
     }
 

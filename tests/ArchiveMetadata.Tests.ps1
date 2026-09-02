@@ -93,6 +93,16 @@ Describe 'Archive metadata fallback - ZIP, TAR, and manifest formats' {
         @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 1
     }
 
+    It 'carries the known gzip-TAR kind through extensionless nested spools' -ForEach @(
+        @{ Name = 'nested_targz.zip' }, @{ Name = 'nested_targz.tar' }
+    ) {
+        $findings = RunMetadata $Name
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE' |
+            Where-Object File -Match 'dependencies\.tar\.gz!Pillow-9\.5\.0\.dist-info/METADATA$').Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+    }
+
     It 'parses every supported manifest family and reports non-exact declarations' {
         $budget = New-ArchiveMetadataBudget
         $findings = RunMetadata 'supported_manifests.zip' $budget
@@ -120,6 +130,14 @@ Describe 'Archive metadata fallback - ZIP, TAR, and manifest formats' {
             (New-Unit -File (Get-Item $path) -ScanRoot $dir).Unit.Type | Should -Be $Type
         } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    It 'does not let ZIP magic under a .nuspec suffix take the NuGet semantic-container exception' {
+        $file = Get-Item -LiteralPath (Join-Path $script:MetaDir 'renamed_archive.nuspec')
+        $classified = New-Unit -File $file -ScanRoot $script:MetaDir
+        $classified.Unit.Type | Should -Be 'archive'
+        @($classified.Findings | Where-Object TestID -eq 'MTS-DISGUISE-001').Count | Should -Be 1
+        Test-IsArchiveUnit -Unit $classified.Unit | Should -BeTrue
+    }
 }
 
 Describe 'Archive metadata fallback - fail-closed limits and malformed containers' {
@@ -144,6 +162,13 @@ Describe 'Archive metadata fallback - fail-closed limits and malformed container
         $findings = RunMetadata $Name
         @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR' |
             Where-Object Issue -Match $Expected).Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be 0
+    }
+
+    It 'reports encrypted ZIP metadata explicitly without trying to read it' {
+        $findings = RunMetadata 'encrypted_metadata.zip'
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR' |
+            Where-Object Issue -Match 'encrypted ZIP entry').Count | Should -Be 1
         @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be 0
     }
 
@@ -179,6 +204,62 @@ Describe 'Archive metadata fallback - fail-closed limits and malformed container
         @($second | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT' | Where-Object Issue -Match 'candidate cap').Count | Should -Be 1
     }
 
+    It 'continues past a candidate that cannot fit the remaining decoded-byte budget' -ForEach @(
+        @{ Name = 'decoded_skip.zip' }, @{ Name = 'decoded_skip.tar' }
+    ) {
+        $budget = New-ArchiveMetadataBudget; $budget.MaxDecodedBytes = 32
+        $findings = RunMetadata $Name $budget
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT' |
+            Where-Object Issue -Match 'decoded metadata byte cap').Count | Should -Be 1
+        $budget.Candidates | Should -Be 1
+        $budget.Dependencies | Should -Be 1
+        @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE' |
+            Where-Object File -Match 'requirements-z\.txt$').Count | Should -Be 1
+    }
+
+    It 'charges bytes incrementally and deletes a rejected nested spool' {
+        $budget = New-ArchiveMetadataBudget
+        $destination = Join-Path $script:Out "failed-spool-$(Get-Random)"
+        $bytes = [Text.Encoding]::UTF8.GetBytes('truncated-stream')
+        $stream = [IO.MemoryStream]::new($bytes, $false)
+        try {
+            { Save-ArchiveMetadataNestedStream -Stream $stream -Destination $destination `
+                    -Length ($bytes.LongLength + 10) -Budget $budget } | Should -Throw '*was truncated*'
+            $budget.TempBytes | Should -Be $bytes.LongLength
+            Test-Path -LiteralPath $destination | Should -BeFalse
+        } finally {
+            $stream.Dispose()
+            [IO.File]::Delete($destination)
+        }
+    }
+
+    It 'accepts a valid nested spool that exactly fills the temporary-byte budget' {
+        $bytes = [Text.Encoding]::UTF8.GetBytes('exact-budget')
+        $budget = New-ArchiveMetadataBudget; $budget.MaxTempBytes = $bytes.LongLength
+        $destination = Join-Path $script:Out "exact-spool-$(Get-Random)"
+        $stream = [IO.MemoryStream]::new($bytes, $false)
+        try {
+            Save-ArchiveMetadataNestedStream -Stream $stream -Destination $destination `
+                -Length $bytes.LongLength -Budget $budget | Should -Be $bytes.LongLength
+            $budget.TempBytes | Should -Be $bytes.LongLength
+            Test-Path -LiteralPath $destination | Should -BeTrue
+        } finally {
+            $stream.Dispose()
+            [IO.File]::Delete($destination)
+        }
+    }
+
+    It 'charges actual decoded bytes when a stream exceeds the remaining scan-wide budget' {
+        $bytes = [Text.Encoding]::UTF8.GetBytes('lying-stream-payload')
+        $budget = New-ArchiveMetadataBudget; $budget.MaxDecodedBytes = 8
+        $stream = [IO.MemoryStream]::new($bytes, $false)
+        try {
+            { Read-ArchiveMetadataStreamBytes -Stream $stream -Limit 64 -Budget $budget } |
+                Should -Throw '*decoded metadata byte budget*'
+            $budget.DecodedBytes | Should -Be 8
+        } finally { $stream.Dispose() }
+    }
+
     It 'removes every dedicated nested-container spool directory' {
         $before = @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'mts-metadata-*' -ErrorAction SilentlyContinue).Count
         RunMetadata 'nested_vulnerable_wheel.zip' | Out-Null
@@ -188,6 +269,39 @@ Describe 'Archive metadata fallback - fail-closed limits and malformed container
 }
 
 Describe 'Archive metadata fallback - engine integration' {
+    It 'does not stage a bare gzip stream that is not a TAR container' {
+        $file = Get-Item -LiteralPath (Join-Path $script:MetaDir 'bare_payload.gz')
+        $unit = (New-Unit -File $file -ScanRoot $script:MetaDir).Unit
+        $unit.Type | Should -Be 'archive'
+        Test-IsArchiveUnit -Unit $unit | Should -BeFalse
+
+        $budget = New-ArchiveTreeBudget
+        $context = [PSCustomObject]@{ WorkDir = $script:Out }
+        $expanded = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
+        $expanded.IsArchive | Should -BeFalse
+        $budget.NextStageIndex | Should -Be 0
+
+        $directOutput = Join-Path $script:Out "bare-gzip-$(Get-Random)"
+        $direct = Expand-SubmissionArchive -InputFile $file.FullName -OutputDir $directOutput
+        $direct.Success | Should -BeFalse
+        Test-Path -LiteralPath $directOutput | Should -BeFalse
+    }
+
+    It 'member-dispatches ZIP payloads renamed with a .nuspec suffix' {
+        $scanDir = Join-Path $script:Out "renamed-nuspec-$(Get-Random)"
+        New-Item -ItemType Directory -Path $scanDir -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir 'renamed_archive.nuspec') -Destination $scanDir
+        try {
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers `
+                -ReportsDir $script:Out -Mode offline
+            $unit = $result.Units | Select-Object -First 1
+            $unit.Type | Should -Be 'archive'
+            @($unit.Findings | Where-Object TestID -eq 'MTS-DISGUISE-001').Count | Should -Be 1
+            @($unit.Findings | Where-Object TestID -eq 'SHELL-REMOTE-EXEC' |
+                Where-Object File -Match 'renamed_archive\.nuspec!payload[\\/]risky\.sh$').Count | Should -BeGreaterThan 0
+        } finally { Remove-Item -LiteralPath $scanDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
     It 'runs after a top-level archive is budget-blocked and never invokes normal extraction' {
         $scanDir = Join-Path $script:Out "blocked-$(Get-Random)"
         New-Item -ItemType Directory -Path $scanDir -Force | Out-Null

@@ -135,7 +135,11 @@ function Test-IsArchiveUnit {
     $name = $Unit.Name.ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
     $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
-    return $ext -in @('.whl', '.egg', '.zip', '.nupkg')
+    if ($ext -in @('.whl', '.egg', '.zip', '.nupkg')) { return $true }
+    # Content detection wins only for PK ZIP magic hidden behind a misleading
+    # extension (for example, a ZIP renamed .nuspec). Do not widen this to every
+    # generic archive classification: a bare .gz is not an extractable tarball.
+    return $Unit.Type -eq 'archive' -and (Test-ZipFileMagic -Path $Unit.Path)
 }
 
 function Get-ArchiveExpansionEstimate {

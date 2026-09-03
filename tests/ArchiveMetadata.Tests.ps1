@@ -213,6 +213,29 @@ Describe 'Shared pyproject parser - quoted dependency arrays' {
 }
 
 Describe 'OsvScan - normally extracted egg identity' {
+    It 'retains exact egg dependencies while leaving wheel dependency lookups to PipAudit' -ForEach @(
+        @{ Extension='egg'; MetadataPath='EGG-INFO/PKG-INFO'; Expected=2 },
+        @{ Extension='whl'; MetadataPath='Example.dist-info/METADATA'; Expected=1 }
+    ) {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $stage = Join-Path $TestDrive "package-deps-$Extension"
+        $metadata = Join-Path $stage $MetadataPath
+        New-Item -ItemType Directory -Path (Split-Path $metadata) -Force | Out-Null
+        Set-Content -LiteralPath $metadata -Value "Name: Example`nVersion: 1.0`nRequires-Dist: urllib3 (==1.26.5)`nRequires-Dist: requests (>=2)"
+        $unit = [PSCustomObject]@{ Type='python'; Name="Example.$Extension"; RelativePath="Example.$Extension"; StagingPath=$stage }
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        $findings = @(& $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }))
+        $script:CapturedQueries.Count | Should -Be $Expected
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'example' -and $_.version -eq '1.0' }).Count | Should -Be 1
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'urllib3' -and $_.version -eq '1.26.5' }).Count | Should -Be ($Expected - 1)
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 1
+    }
+
     It 'selects OsvScan for package identities but not Python source variants' -ForEach @(
         @{ Name='example.py'; Type='python'; Expected=0 },
         @{ Name='notebook.ipynb'; Type='python'; Expected=0 },
@@ -309,6 +332,106 @@ Describe 'OsvScan - normally extracted egg identity' {
 }
 
 Describe 'TOML coverage - optional groups and mixed-validity locks' {
+    It 'reads actual package fields instead of decoys inside strings and nested structures' -ForEach @(
+        @{ Kind='poetry-lock'; Quote='"""' }, @{ Kind='uv-lock'; Quote='"""' },
+        @{ Kind='poetry-lock'; Quote="'''" }, @{ Kind='uv-lock'; Quote="'''" }
+    ) {
+        $text = @'
+[[package]] # a real block
+description = TRIPLE
+name = "benign"
+version = "999"
+[[package]]
+name = "fake-block"
+version = "999"
+TRIPLE
+"name" = "Pillow" # the actual identity
+'version' = "9.5.0" # the actual version
+files = [
+  { name = "array-decoy", version = "999" },
+]
+[package.source]
+name = "source-decoy"
+version = "999"
+[[ "package" ]]
+name = "urllib3"
+version = '1.26.5'
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text.Replace('TRIPLE', $Quote) -ManifestFile 'lock' -UnitType python-requirements -Kind $Kind
+        @($parsed.Dependencies.Name) | Should -Be @('pillow', 'urllib3')
+        @($parsed.Dependencies.Version) | Should -Be @('9.5.0', '1.26.5')
+        @($parsed.Findings).Count | Should -Be 0
+    }
+
+    It 'reports ambiguous or unsupported root fields without borrowing values from subtables' -ForEach @(
+        @{ Kind='poetry-lock' }, @{ Kind='uv-lock' }
+    ) {
+        $text = @'
+[[package]]
+name = "duplicate"
+name = "decoy"
+version = "1"
+[[package]]
+name = "numeric-version"
+version = 1
+[[package]]
+name = "missing-version"
+[package.source]
+version = "999"
+[[package]]
+name = "Pillow"
+version = "9.5.0"
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'lock' -UnitType python-requirements -Kind $Kind
+        @($parsed.Dependencies.Name) | Should -Be @('pillow')
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 3
+    }
+
+    It 'does not accept identity fields inside an unterminated string' -ForEach @(
+        @{ Kind='poetry-lock' }, @{ Kind='uv-lock' }
+    ) {
+        $text = @'
+[[package]]
+description = """
+name = "benign"
+version = "999"
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'lock' -UnitType python-requirements -Kind $Kind
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 1
+    }
+
+    It 'queries the same real lock identity from ordinary files and archive fallback' -ForEach @(
+        @{ File='poetry.lock' }, @{ File='uv.lock' }
+    ) {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $text = @'
+[[package]]
+description = """
+name = "benign"
+version = "999"
+"""
+name = "Pillow"
+version = "9.5.0"
+'@
+        $path = Join-Path $TestDrive $File
+        Set-Content -LiteralPath $path -Value $text
+        $unit = (New-Unit -File (Get-Item $path) -ScanRoot $TestDrive).Unit
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        @(& $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' })) | Out-Null
+        $zipPath = Join-Path $TestDrive "$File.zip"
+        $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+        try { [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $path, $File) } finally { $zip.Dispose() }
+        @(Invoke-ArchiveMetadataDependencyScan -Path $zipPath -RelativePath 'lock.zip' -Context ([PSCustomObject]@{ Mode='online' }) -Budget (New-ArchiveMetadataBudget)) | Out-Null
+        $script:CapturedQueries.Count | Should -Be 2
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'pillow' -and $_.version -eq '9.5.0' }).Count | Should -Be 2
+    }
+
     It 'tracks optional tables and ignores dependency examples and unrelated tool tables' {
         $text = @'
 [project]
@@ -703,6 +826,39 @@ Describe 'Archive metadata fallback - engine integration' {
             @($unit.Findings | Where-Object TestID -eq 'SHELL-REMOTE-EXEC' |
                 Where-Object File -Match 'renamed_archive\.nuspec!payload[\\/]risky\.sh$').Count | Should -BeGreaterThan 0
         } finally { Remove-Item -LiteralPath $scanDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'recovers metadata from a budget-blocked ZIP with a misleading suffix' -ForEach @(
+        @{ Suffix='.nuspec' }, @{ Suffix='.dat' }, @{ Suffix='.tgz' }
+    ) {
+        $scanDir = Join-Path $TestDrive "renamed-fallback$Suffix"
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir 'nested_vulnerable_wheel.zip') -Destination (Join-Path $scanDir "renamed$Suffix")
+        $oldBytes = $script:ArchiveTreeMaxBytes
+        try {
+            $script:ArchiveTreeMaxBytes = 1
+            Mock Expand-SubmissionArchive { throw 'Blocked archive payload must not be extracted' }
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline
+            $unit = $result.Units | Select-Object -First 1
+            @($unit.Findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be 1
+            @($unit.Findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 1
+            @($unit.Findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+            $unit.PSObject.Properties.Name | Should -Not -Contain 'StagingPath'
+            Should -Invoke Expand-SubmissionArchive -Times 0 -Exactly
+        } finally { $script:ArchiveTreeMaxBytes = $oldBytes }
+    }
+
+    It 'recognizes a ZIP nested under a TAR suffix without losing its spool budget' {
+        $zipPath = Join-Path $TestDrive 'renamed-nested.zip'
+        $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Join-Path $script:MetaDir 'Pillow-9.5.0-py3.egg'), 'renamed.tgz')
+        } finally { $zip.Dispose() }
+        $budget = New-ArchiveMetadataBudget
+        $findings = @(Invoke-ArchiveMetadataDependencyScan -Path $zipPath -RelativePath 'renamed-nested.zip' -Context ([PSCustomObject]@{ Mode='offline' }) -Budget $budget)
+        @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+        $budget.TempBytes | Should -BeGreaterThan 0
     }
 
     It 'runs after a top-level archive is budget-blocked and never invokes normal extraction' {

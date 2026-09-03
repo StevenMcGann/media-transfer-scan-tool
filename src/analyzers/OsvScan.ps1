@@ -10,6 +10,8 @@
     extraction path, avoiding duplicate findings; the metadata-only fallback
     queries both identity and exact Requires-Dist records because PipAudit
     cannot operate without a staging tree.
+    Eggs retain their exact dependencies here because PipAudit only consumes
+    wheel METADATA, not the canonical egg PKG-INFO file.
 #>
 @{
     Name           = 'OsvScan'
@@ -109,7 +111,7 @@
 
         foreach ($f in @($parsed.Findings)) { $findings.Add($f) }
         $deps = @($parsed.Dependencies)
-        if ($Unit.Type -eq 'python') {
+        if ($Unit.Type -eq 'python' -and -not $isEgg) {
             $deps = @($deps | Where-Object { $_.SourceRole -eq 'package' })
         }
         if ($deps.Count -eq 0) { return $findings.ToArray() }

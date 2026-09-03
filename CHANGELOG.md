@@ -25,6 +25,10 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Parse Poetry/uv identities only from actual package-table fields, excluding
+  decoys in multiline strings, comments, arrays, and child tables.
+- Recognize PK ZIP magic in the budget-limited fallback even when the container
+  has a misleading suffix, and retain exact egg dependencies for OSV lookup.
 - Restricted OsvScan's Python-unit selection to wheels and eggs so it cannot
   suppress coverage warnings for loose Python source or notebooks.
 - Enforced metadata record limits inside every shared parser, counting both

@@ -65,7 +65,12 @@ function Get-DependencyMetadataKind {
 }
 
 function Get-ArchiveMetadataContainerKind {
-    param([Parameter(Mandatory)][string]$EntryName)
+    param([Parameter(Mandatory)][string]$EntryName, [string]$Path, [string]$KnownKind)
+    # Actual containers may have misleading suffixes. Match normal extraction's
+    # bounded PK probe when a filesystem path is available; nested entry names
+    # alone still use the allowlisted formats before their streams are opened.
+    if ($Path -and (Test-ZipFileMagic -Path $Path)) { return 'zip' }
+    if ($KnownKind) { return $KnownKind }
     $name = ($EntryName -replace '\\', '/').ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return 'tar-gzip' }
     $ext = [IO.Path]::GetExtension($name)
@@ -444,17 +449,48 @@ function Convert-TomlLockMetadata {
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     if ($Kind -in @('poetry-lock','uv-lock')) {
-        $blocks = @([regex]::Split($Text, '(?m)^\s*\[\[package\]\]\s*$') | Select-Object -Skip 1)
+        try { $statements = @(Get-TomlMetadataStatements -Text $Text) }
+        catch {
+            $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                -Issue "Malformed lock TOML: $($_.Exception.Message)" -TestID 'OSV-PYPI-MALFORMED'))
+            return [PSCustomObject]@{ Dependencies = @(); Findings = $findings.ToArray() }
+        }
+        $blocks = [Collections.Generic.List[object]]::new()
+        $current = $null; $inPackage = $false
+        foreach ($statement in $statements) {
+            if ($statement.StartsWith('[')) {
+                $inPackage = $statement -cmatch '^\[\[\s*(?:package|"package"|''package'')\s*\]\]\s*(?:#.*)?$'
+                if ($inPackage) {
+                    if ($blocks.Count -ge $MaxRecords) { break }
+                    $current = @{ Fields = @{}; Invalid = $false }
+                    $blocks.Add($current)
+                }
+                continue
+            }
+            if (-not $inPackage) { continue }
+            # Statements preserve quoted descriptions/arrays as single values.
+            # Only root package fields count, never examples or child tables.
+            $assignment = [regex]::Match($statement, '(?s)^(?<key>name|version|"name"|"version"|''name''|''version'')\s*=\s*(?<value>.*)$')
+            if (-not $assignment.Success) { continue }
+            $field = $assignment.Groups['key'].Value.Trim([char[]]@('"', "'"))
+            $value = [regex]::Match($assignment.Groups['value'].Value, '^(?:"(?<basic>(?:[^"\\\r\n]|\\.)*)"|''(?<literal>[^''\r\n]*)'')\s*(?:#.*)?$')
+            if (-not $value.Success -or $current.Fields.ContainsKey($field)) { $current.Invalid = $true; continue }
+            try {
+                $decoded = if ($value.Groups['basic'].Success) {
+                    ConvertFrom-Json -InputObject ('"' + $value.Groups['basic'].Value + '"') -ErrorAction Stop
+                } else { $value.Groups['literal'].Value }
+                if ([string]::IsNullOrWhiteSpace($decoded)) { $current.Invalid = $true }
+                $current.Fields[$field] = $decoded
+            } catch { $current.Invalid = $true }
+        }
         $blockNumber = 0
         foreach ($block in $blocks) {
             if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             $blockNumber++
-            $nm = [regex]::Match($block, '(?m)^\s*name\s*=\s*["'']([^"'']+)["'']\s*$')
-            $vm = [regex]::Match($block, '(?m)^\s*version\s*=\s*["'']([^"'']+)["'']\s*$')
-            if ($nm.Success -and $vm.Success) {
-                $deps.Add((New-ParsedDependency -Name (Get-Pep503NormalizedName -Name $nm.Groups[1].Value) `
-                    -Version $vm.Groups[1].Value -Ecosystem PyPI -ManifestFile $ManifestFile `
-                    -DepLabel "$($nm.Groups[1].Value) $($vm.Groups[1].Value)"))
+            if (-not $block.Invalid -and $block.Fields.ContainsKey('name') -and $block.Fields.ContainsKey('version')) {
+                $deps.Add((New-ParsedDependency -Name (Get-Pep503NormalizedName -Name $block.Fields.name) `
+                    -Version $block.Fields.version -Ecosystem PyPI -ManifestFile $ManifestFile `
+                    -DepLabel "$($block.Fields.name) $($block.Fields.version)"))
             } else {
                 $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
                     -Issue "TOML lock package block $blockNumber could not be resolved to an exact name/version pair." `
@@ -663,7 +699,7 @@ function Invoke-ArchiveMetadataDependencyScan {
     function Read-Container([string]$containerPath, [string]$logicalContainer, [int]$depth, [string]$knownKind = '') {
         if (Test-LimitTime) { Add-Limit $logicalContainer "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; return }
         if ($depth -gt $Budget.MaxDepth) { Add-Limit $logicalContainer "nested-container depth cap ($($Budget.MaxDepth)) reached"; return }
-        $containerKind = if ($knownKind) { $knownKind } else { Get-ArchiveMetadataContainerKind -EntryName $containerPath }
+        $containerKind = Get-ArchiveMetadataContainerKind -EntryName $containerPath -Path $containerPath -KnownKind $knownKind
         if (-not $containerKind) { Add-Error $logicalContainer 'unsupported nested container format'; return }
 
         $localCandidates = [Collections.Generic.List[object]]::new()

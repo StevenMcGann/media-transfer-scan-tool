@@ -175,7 +175,8 @@ function Get-ArchiveExpansionEstimate {
     #>
     param([Parameter(Mandatory)][string]$Path)
     $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
-    if ($ext -notin @('.zip', '.whl', '.egg', '.nupkg')) { return $null }
+    # Match extraction's content-based routing for renamed ZIPs as well.
+    if ($ext -notin @('.zip', '.whl', '.egg', '.nupkg') -and -not (Test-ZipFileMagic -Path $Path)) { return $null }
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
         try {

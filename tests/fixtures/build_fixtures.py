@@ -1128,6 +1128,14 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
     z.writestr(zipfile.ZipInfo('packages/decoy.tar', FIXED_ZIP_DT), _pk_tar.getvalue())
 write(os.path.join(ARCMETA_DIR, 'nested_pk_prefix.zip'), buf.getvalue())
 
+# A metadata-looking name must not hide a small nested ZIP from the fallback.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+    z.writestr(zipfile.ZipInfo('payload.nuspec', FIXED_ZIP_DT), _metadata_egg)
+write(os.path.join(ARCMETA_DIR, 'metadata_named_zip.zip'), buf.getvalue())
+write(os.path.join(ARCMETA_DIR, 'metadata_named_zip.tgz'),
+      make_tgz_bytes([('payload.nuspec', _metadata_egg)]))
+
 # The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
 # the wheel's own central directory declares a much larger expanded payload.
 # This drives Engine.ps1's NESTED semantic-container budget-blocked branch.

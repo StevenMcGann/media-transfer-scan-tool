@@ -20,6 +20,18 @@ BeforeAll {
         } finally { $zip.Dispose() }
         return $path
     }
+    function New-ReviewZipEntries([Collections.IDictionary]$Entries) {
+        $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.zip')
+        $zip = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($name in $Entries.Keys) {
+                $bytes = if ($Entries[$name] -is [byte[]]) { ,$Entries[$name] } else { ,[Text.Encoding]::UTF8.GetBytes([string]$Entries[$name]) }
+                $stream = $zip.CreateEntry($name).Open()
+                try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+            }
+        } finally { $zip.Dispose() }
+        return $path
+    }
     $script:V1Lock = @'
 {"lockfileVersion":1,"dependencies":{"parent":{"version":"1.0.0","dependencies":{"lodash":{"version":"4.17.4","dependencies":{"@scope/leaf":{"version":"2.0.0"}}}}}}}
 '@
@@ -160,6 +172,45 @@ Describe 'TOML equivalent dotted dependency keys' {
 }
 
 Describe 'Container identity and recovery work accounting' {
+    It 'recovers a ZIP hidden behind a metadata name in ZIP and TAR containers' -ForEach @(
+        @{ File='metadata_named_zip.zip' }, @{ File='metadata_named_zip.tgz' }
+    ) {
+        $budget = New-ArchiveMetadataBudget
+        $findings = @(Invoke-ArchiveMetadataDependencyScan -Path (Join-Path $script:MetaDir $File) -RelativePath $File -Context ([PSCustomObject]@{ Mode='offline' }) -Budget $budget)
+        $budget.Dependencies | Should -Be 1
+        $budget.Candidates | Should -Be 2 # one bounded probe plus one real manifest
+        $budget.DecodedBytes | Should -BeGreaterThan 0
+        $budget.TempBytes | Should -BeGreaterThan 0
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+        ($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').File | Should -Match 'payload\.nuspec!EGG-INFO/PKG-INFO$'
+    }
+
+    It 'submits the identity hidden inside a metadata-named ZIP to OSV' {
+        $script:Queries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:Queries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        @(Invoke-ArchiveMetadataDependencyScan -Path (Join-Path $script:MetaDir 'metadata_named_zip.zip') -RelativePath 'outer.zip' -Context ([PSCustomObject]@{ Mode='online' }) -Budget (New-ArchiveMetadataBudget)) | Out-Null
+        $script:Queries.Count | Should -Be 1
+        $script:Queries[0].package.name | Should -Be 'pillow'
+        $script:Queries[0].version | Should -Be '9.5.0'
+    }
+
+    It 'does not enlarge safety limits when a metadata probe turns out to be a ZIP' -ForEach @(
+        @{ Limit='MaxDepth'; Value=1 }, @{ Limit='MaxTempBytes'; Value=1 },
+        @{ Limit='MaxManifestBytes'; Value=4 }, @{ Limit='MaxDecodedBytes'; Value=4 },
+        @{ Limit='MaxCandidates'; Value=1 }
+    ) {
+        $budget = New-ArchiveMetadataBudget; $budget.$Limit = $Value
+        $findings = @(Invoke-ArchiveMetadataDependencyScan -Path (Join-Path $script:MetaDir 'metadata_named_zip.zip') -RelativePath 'outer.zip' -Context ([PSCustomObject]@{ Mode='offline' }) -Budget $budget)
+        $budget.Dependencies | Should -Be 0
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -BeGreaterThan 0
+        $budget.TempBytes | Should -BeLessOrEqual $budget.MaxTempBytes
+        $budget.DecodedBytes | Should -BeLessOrEqual $budget.MaxDecodedBytes
+    }
+
     It 'preserves the TAR format despite its PK filename prefix' {
         $path = Join-Path $script:MetaDir 'pk_prefix.tar'
         Test-ZipFileMagic -Path $path | Should -BeTrue
@@ -195,5 +246,87 @@ Describe 'Container identity and recovery work accounting' {
         @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -BeGreaterThan 0
         $budget.Entries | Should -Be 1
         $budget.Candidates | Should -Be 0
+    }
+}
+
+Describe 'Parser failure isolation' {
+    It 'reports a malformed v2 entry while retaining valid packages in the same lockfile' {
+        $parsed = Invoke-ReviewParser npm-lock '{"packages":{"node_modules/decoy":"bad","node_modules/lodash":{"version":"4.17.4"}}}'
+        @($parsed.Dependencies.Name) | Should -Be @('lodash')
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-NPM-MALFORMED').Count | Should -Be 1
+        $parsed.RecordCount | Should -Be 2
+    }
+
+    It 'retains earlier and later sibling audits after an unexpected parser exception' {
+        $script:Queries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:Queries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        Mock Convert-DependencyMetadataContent { throw 'synthetic parser exception' } -ParameterFilter { $Kind -eq 'npm-lock' }
+        $path = New-ReviewZipEntries ([ordered]@{
+            'requirements-a.txt' = 'Pillow==9.5.0'
+            'package-lock.json' = '{"packages":{"node_modules/decoy":"bad"}}'
+            'requirements-z.txt' = 'urllib3==1.26.5'
+        })
+        $budget = New-ArchiveMetadataBudget
+        $findings = @(Invoke-ArchiveMetadataDependencyScan -Path $path -RelativePath 'siblings.zip' -Context ([PSCustomObject]@{ Mode='online' }) -Budget $budget)
+        @($script:Queries.package.name | Sort-Object) | Should -Be @('pillow', 'urllib3')
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR' | Where-Object File -eq 'siblings.zip!package-lock.json').Count | Should -Be 1
+        $budget.ParseRecords | Should -Be 3
+        Should -Invoke Convert-DependencyMetadataContent -Times 1 -Exactly -ParameterFilter { $Kind -eq 'npm-lock' }
+    }
+
+    It 'does not let repeated parser exceptions evade the shared record cap' {
+        Mock Convert-DependencyMetadataContent { throw 'synthetic parser exception' }
+        $path = New-ReviewZipEntries ([ordered]@{ 'requirements-a.txt'='a==1'; 'requirements-b.txt'='b==1'; 'requirements-c.txt'='c==1' })
+        $budget = New-ArchiveMetadataBudget; $budget.MaxDependencies = 2
+        $findings = @(Invoke-ArchiveMetadataDependencyScan -Path $path -RelativePath 'errors.zip' -Context ([PSCustomObject]@{ Mode='offline' }) -Budget $budget)
+        $budget.ParseRecords | Should -Be 2
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 2
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -Be 1
+        Should -Invoke Convert-DependencyMetadataContent -Times 2 -Exactly
+    }
+}
+
+Describe 'Renamed ZIP pre-extraction estimates' {
+    It 'retains byte, member, and directory estimates for magic-detected ZIPs' -ForEach @(
+        @{ Suffix='.nuspec' }, @{ Suffix='.dat' }
+    ) {
+        $zip = New-ReviewZipEntries ([ordered]@{ 'a/b/requirements.txt'='Pillow==9.5.0'; 'payload.bin'=[byte[]]::new(12MB) })
+        $path = Join-Path $TestDrive "estimate$Suffix"
+        Copy-Item -LiteralPath $zip -Destination $path
+        $estimate = Get-ArchiveExpansionEstimate -Path $path
+        $estimate.Bytes | Should -BeGreaterThan 12MB
+        $estimate.Count | Should -Be 2
+        $estimate.TotalEntries | Should -Be 4
+        $budget = New-ArchiveTreeBudget
+        $budget.ExpandedBytes = $budget.MaxBytes - 11MB # exceeds the unknown-format heuristic
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $budget | Should -BeTrue
+        $budget = New-ArchiveTreeBudget
+        $budget.MemberCount = $budget.MaxMembers - 1
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $budget | Should -BeTrue
+        $budget.MemberCount = $budget.MaxMembers - 3
+        Test-ArchiveWouldExceedBudget -Path $path -Budget $budget -CountAllEntries | Should -BeTrue
+    }
+
+    It 'blocks renamed ZIP payload extraction with eleven MiB of remaining headroom' -ForEach @(
+        @{ Suffix='.nuspec' }, @{ Suffix='.dat' }
+    ) {
+        $zip = New-ReviewZipEntries ([ordered]@{ 'requirements.txt'='Pillow==9.5.0'; 'payload.bin'=[byte[]]::new(12MB) })
+        $scanDir = Join-Path $TestDrive "scan$Suffix"
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath $zip -Destination (Join-Path $scanDir "payload$Suffix")
+        $oldBytes = $script:ArchiveTreeMaxBytes
+        try {
+            $script:ArchiveTreeMaxBytes = 11MB
+            Mock Expand-SubmissionArchive { throw 'Payload extraction must be refused by the precheck' }
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir (Join-Path $TestDrive 'reports') -Mode offline
+            $unit = $result.Units | Select-Object -First 1
+            @($unit.Findings | Where-Object TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED').Count | Should -Be 1
+            @($unit.Findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 1
+            Should -Invoke Expand-SubmissionArchive -Times 0 -Exactly
+        } finally { $script:ArchiveTreeMaxBytes = $oldBytes }
     }
 }

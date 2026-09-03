@@ -211,7 +211,12 @@ function Convert-NpmLockMetadata {
             if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             if ([string]::IsNullOrEmpty($key)) { continue }
             $entry = $lock.packages[$key]
-            if (-not $entry -or -not $entry.ContainsKey('version') -or -not $entry.version) { continue }
+            if ($entry -isnot [Collections.IDictionary]) {
+                $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                    -Issue "npm package '$key' is not a package object." -TestID 'OSV-NPM-MALFORMED'))
+                continue
+            }
+            if (-not $entry.ContainsKey('version') -or -not $entry.version) { continue }
             $name = if ($entry.ContainsKey('name') -and $entry.name) { $entry.name } else { ($key -replace '.*node_modules/', '') }
             $deps.Add((New-ParsedDependency -Name $name -Version ([string]$entry.version) -Ecosystem npm -ManifestFile $ManifestFile))
         }
@@ -747,6 +752,25 @@ function Invoke-ArchiveMetadataDependencyScan {
         $candidates.Add([PSCustomObject]@{ LogicalPath = $logical; Kind = $kind; Bytes = $bytes })
         return $true
     }
+    function Add-BufferedCandidate([string]$key, [string]$logical, [string]$kind, [byte[]]$bytes, [int]$depth,
+                                  [Collections.Generic.List[object]]$manifests, [Collections.Generic.List[object]]$nested) {
+        # Metadata-named entries are already bounded by MaxManifestBytes and
+        # charged to DecodedBytes/Candidates. Detect a disguised ZIP before
+        # handing its bytes to a text parser, without enlarging those limits.
+        $isZip = $bytes.Length -ge 4 -and $bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B -and
+            (($bytes[2] -eq 0x03 -and $bytes[3] -eq 0x04) -or ($bytes[2] -eq 0x05 -and $bytes[3] -eq 0x06))
+        if (-not $isZip) {
+            $manifests.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Kind=$kind; Bytes=$bytes })
+            return
+        }
+        if ($depth -ge $Budget.MaxDepth) { Add-Limit $logical "nested-container depth cap ($($Budget.MaxDepth)) reached"; return }
+        if ($bytes.Length -gt ($Budget.MaxTempBytes - $Budget.TempBytes)) { Add-Limit $logical "temporary-byte cap ($($Budget.MaxTempBytes)) reached"; return }
+        $tmp = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
+        $source = [IO.MemoryStream]::new($bytes, $false)
+        try { [void](Save-ArchiveMetadataNestedStream -Stream $source -Destination $tmp -Length $bytes.Length -Budget $Budget) }
+        finally { $source.Dispose() }
+        $nested.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Path=$tmp; Kind='zip' })
+    }
 
     function Read-Container([string]$containerPath, [string]$logicalContainer, [int]$depth, [string]$knownKind = '') {
         if (Test-LimitTime) { Add-Limit $logicalContainer "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; return }
@@ -800,7 +824,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                                     $bytes = Read-ArchiveMetadataStreamBytes -Stream $stream `
                                         -Limit ($Budget.MaxManifestBytes + 1L) -Budget $Budget
                                     $Budget.Candidates++
-                                    $localCandidates.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Kind=$kind; Bytes=$bytes })
+                                    Add-BufferedCandidate $key $logical $kind $bytes $depth $localCandidates $localNested
                                 } elseif ($depth -lt $Budget.MaxDepth) {
                                     $tmp = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
                                     [void](Save-ArchiveMetadataNestedStream -Stream $stream -Destination $tmp -Length $entry.Length -Budget $Budget)
@@ -857,7 +881,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                                 $bytes = Read-ArchiveMetadataStreamBytes -Stream $entry.DataStream `
                                     -Limit ($Budget.MaxManifestBytes + 1L) -Budget $Budget
                                 $Budget.Candidates++
-                                $localCandidates.Add([PSCustomObject]@{ Key=$key; Logical=$logical; Kind=$kind; Bytes=$bytes })
+                                Add-BufferedCandidate $key $logical $kind $bytes $depth $localCandidates $localNested
                             } elseif ($depth -lt $Budget.MaxDepth) {
                                 $tmp = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
                                 [void](Save-ArchiveMetadataNestedStream -Stream $entry.DataStream -Destination $tmp -Length $entryLength -Budget $Budget)
@@ -895,9 +919,17 @@ function Invoke-ArchiveMetadataDependencyScan {
         foreach ($candidate in $candidates) {
             if (Test-LimitTime) { Add-Limit $candidate.LogicalPath "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; break }
             if ($Budget.ParseRecords -ge $Budget.MaxDependencies) { Add-Limit $candidate.LogicalPath "dependency/parser record cap ($($Budget.MaxDependencies)) reached"; break }
-            $parsed = Convert-DependencyMetadataContent -Kind $candidate.Kind -Bytes $candidate.Bytes `
-                -ManifestFile $candidate.LogicalPath -UnitType archive `
-                -MaxRecords ([Math]::Min(5000, $Budget.MaxDependencies - $Budget.ParseRecords))
+            try {
+                $parsed = Convert-DependencyMetadataContent -Kind $candidate.Kind -Bytes $candidate.Bytes `
+                    -ManifestFile $candidate.LogicalPath -UnitType archive `
+                    -MaxRecords ([Math]::Min(5000, $Budget.MaxDependencies - $Budget.ParseRecords))
+            } catch {
+                # One malformed manifest must not discard dependencies already
+                # collected or prevent later sibling manifests being audited.
+                $Budget.ParseRecords++
+                Add-Error $candidate.LogicalPath $_.Exception.Message
+                continue
+            }
             $Budget.ParseRecords += $parsed.RecordCount
             foreach ($f in @($parsed.Findings)) { $findings.Add($f) }
             foreach ($dep in @($parsed.Dependencies)) {

@@ -25,6 +25,10 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Recover nested ZIPs disguised as metadata within the existing manifest,
+  decoded-byte, spool, and depth limits; isolate parser failures per manifest.
+- Apply ZIP expansion estimates to magic-detected renamed archives before
+  extracting any payload bytes or filesystem entries.
 - Traverse nested npm v1 lock dependencies under the existing record cap, stop
   Python package-header parsing before the description body, and recognize
   dotted-key forms of pyproject optional dependencies.

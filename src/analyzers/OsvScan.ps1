@@ -15,6 +15,9 @@
     Name           = 'OsvScan'
     Version        = '0.3.0'
     UnitTypes      = @('python-requirements', 'npm', 'nuget', 'python')
+    # Package-identity lookups do not inspect loose Python source/notebooks.
+    # Selection must know this before the engine computes analyzer coverage.
+    UnitTypeExtensions = @{ python = @('.whl', '.egg') }
     RequiredTools  = @()
     Offline        = $true
     Tier           = 'core'

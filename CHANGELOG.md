@@ -25,6 +25,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Restricted OsvScan's Python-unit selection to wheels and eggs so it cannot
+  suppress coverage warnings for loose Python source or notebooks.
 - Enforced metadata record limits inside every shared parser, counting both
   exact dependencies and coverage findings against the scan-wide fallback cap.
 - Added metadata recovery after streaming TAR extraction stops at its budget,

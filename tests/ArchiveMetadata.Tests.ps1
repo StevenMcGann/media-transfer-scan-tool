@@ -213,6 +213,53 @@ Describe 'Shared pyproject parser - quoted dependency arrays' {
 }
 
 Describe 'OsvScan - normally extracted egg identity' {
+    It 'selects OsvScan for package identities but not Python source variants' -ForEach @(
+        @{ Name='example.py'; Type='python'; Expected=0 },
+        @{ Name='notebook.ipynb'; Type='python'; Expected=0 },
+        @{ Name='disguised.txt'; Type='python'; Expected=0 },
+        @{ Name='Example.WHL'; Type='python'; Expected=1 },
+        @{ Name='example.egg'; Type='python'; Expected=1 },
+        @{ Name='requirements.txt'; Type='python-requirements'; Expected=1 },
+        @{ Name='package-lock.json'; Type='npm'; Expected=1 },
+        @{ Name='example.nuspec'; Type='nuget'; Expected=1 }
+    ) {
+        $analyzer = [PSCustomObject](& (Join-Path $script:Analyzers 'OsvScan.ps1'))
+        $unit = [PSCustomObject]@{ Name=$Name; Type=$Type }
+        @(Select-AnalyzersForUnit -Enabled @($analyzer) -Unit $unit).Count | Should -Be $Expected
+    }
+
+    It 'reports missing Python source coverage for loose files and archive members when only OsvScan is enabled' {
+        $scanDir = Join-Path $TestDrive 'osv-only-source'
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $scanDir 'example.py') -Value 'print("fixture")'
+        $zipPath = Join-Path $scanDir 'source.zip'
+        $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $entry = $zip.CreateEntry('nested.py')
+            $writer = [IO.StreamWriter]::new($entry.Open())
+            try { $writer.Write('print("fixture")') } finally { $writer.Dispose() }
+        } finally { $zip.Dispose() }
+        $registry = @(Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers)
+        $disabled = @($registry | Where-Object { $_.Name -notin @('OsvScan', 'FileHash') } | ForEach-Object Name)
+        $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline -DisableAnalyzers $disabled
+        $loose = $result.Units | Where-Object Name -eq 'example.py'
+        @($loose.Findings | Where-Object TestID -eq 'MTS-NO-ANALYZER').Count | Should -Be 1
+        $archive = $result.Units | Where-Object Name -eq 'source.zip'
+        @($archive.Findings | Where-Object TestID -eq 'MTS-ARCHIVE-MEMBER-UNINSPECTED').Count | Should -Be 1
+    }
+
+    It 'retains package-identity coverage with only OsvScan enabled' {
+        $scanDir = Join-Path $TestDrive 'osv-only-egg'
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir 'Pillow-9.5.0-py3.egg') -Destination $scanDir
+        $registry = @(Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers)
+        $disabled = @($registry | Where-Object { $_.Name -notin @('OsvScan', 'FileHash') } | ForEach-Object Name)
+        $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline -DisableAnalyzers $disabled
+        $unit = $result.Units | Select-Object -First 1
+        @($unit.Findings | Where-Object TestID -eq 'MTS-NO-ANALYZER').Count | Should -Be 0
+        @($unit.Findings | Where-Object TestID -eq 'OSV-PYPI-OFFLINE').Count | Should -Be 1
+    }
+
     It 'submits the canonical egg identity to OSV after normal extraction' {
         $script:CapturedQueries = @()
         Mock Invoke-OsvQueryBatch {

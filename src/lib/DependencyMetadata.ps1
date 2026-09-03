@@ -542,7 +542,9 @@ function Convert-TomlLockMetadata {
         # declarations. Statement scanning also excludes quoted example text.
         $tablePath = @()
         $keyToken = '(?:[A-Za-z0-9_-]+|''[^''\r\n]*''|"(?:[^"\\\r\n]|\\.)*")'
-        $assignmentPattern = '(?s)^(?<key>' + $keyToken + '(?:\s*\.\s*' + $keyToken + ')*)\s*=\s*(?<value>.*)$'
+        $keyPathPattern = $keyToken + '(?:\s*\.\s*' + $keyToken + ')*'
+        $assignmentPattern = '(?s)^(?<key>' + $keyPathPattern + ')\s*=\s*(?<value>.*)$'
+        $headerPattern = '^\[\s*(?<key>' + $keyPathPattern + ')\s*\]\s*(?:#.*)?$'
         try { $statements = @(Get-TomlMetadataStatements -Text $Text) }
         catch {
             $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
@@ -553,7 +555,7 @@ function Convert-TomlLockMetadata {
             if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             if ($statement.StartsWith('[')) {
                 $tablePath = $null
-                $header = [regex]::Match($statement, '^\[(?<key>[^\r\n]+)\]\s*(?:#.*)?$')
+                $header = [regex]::Match($statement, $headerPattern)
                 if ($header.Success -and -not $statement.StartsWith('[[')) {
                     try { $tablePath = @(Get-TomlMetadataKeyParts -Text $header.Groups['key'].Value) }
                     catch {

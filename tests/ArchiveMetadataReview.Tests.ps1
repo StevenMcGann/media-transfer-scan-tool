@@ -122,7 +122,9 @@ Describe 'TOML equivalent dotted dependency keys' {
         @{ Text="[project]`n'optional-dependencies'.'security.extra' = ['requests==2.31.0']" },
         @{ Text='"project"."optional-dependencies"."security" = ["requests==2.31.0"]' },
         @{ Text="[project.optional-dependencies]`n'security.extra' = ['requests==2.31.0']" },
-        @{ Text="project.dependencies = ['requests==2.31.0']" }
+        @{ Text="project.dependencies = ['requests==2.31.0']" },
+        @{ Text="[project] # example [ignored]`noptional-dependencies.security = ['requests==2.31.0']" },
+        @{ Text="[project.optional-dependencies] # closing bracket ]`nsecurity = ['requests==2.31.0']" }
     ) {
         $parsed = Invoke-ReviewParser pyproject $Text
         @($parsed.Dependencies.Name) | Should -Be @('requests')

@@ -25,6 +25,11 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Traverse nested npm v1 lock dependencies under the existing record cap, stop
+  Python package-header parsing before the description body, and recognize
+  dotted-key forms of pyproject optional dependencies.
+- Preserve recognized archive formats ahead of weak PK magic detection, so a
+  crafted TAR member name cannot redirect metadata recovery to ZIP parsing.
 - Parse Poetry/uv identities only from actual package-table fields, excluding
   decoys in multiline strings, comments, arrays, and child tables.
 - Recognize PK ZIP magic in the budget-limited fallback even when the container

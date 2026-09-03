@@ -829,7 +829,7 @@ Describe 'Archive metadata fallback - engine integration' {
     }
 
     It 'recovers metadata from a budget-blocked ZIP with a misleading suffix' -ForEach @(
-        @{ Suffix='.nuspec' }, @{ Suffix='.dat' }, @{ Suffix='.tgz' }
+        @{ Suffix='.nuspec' }, @{ Suffix='.dat' }
     ) {
         $scanDir = Join-Path $TestDrive "renamed-fallback$Suffix"
         New-Item -ItemType Directory -Path $scanDir | Out-Null
@@ -848,7 +848,7 @@ Describe 'Archive metadata fallback - engine integration' {
         } finally { $script:ArchiveTreeMaxBytes = $oldBytes }
     }
 
-    It 'recognizes a ZIP nested under a TAR suffix without losing its spool budget' {
+    It 'reports a nested container that contradicts its recognized TAR suffix' {
         $zipPath = Join-Path $TestDrive 'renamed-nested.zip'
         $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
         try {
@@ -856,8 +856,8 @@ Describe 'Archive metadata fallback - engine integration' {
         } finally { $zip.Dispose() }
         $budget = New-ArchiveMetadataBudget
         $findings = @(Invoke-ArchiveMetadataDependencyScan -Path $zipPath -RelativePath 'renamed-nested.zip' -Context ([PSCustomObject]@{ Mode='offline' }) -Budget $budget)
-        @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 1
-        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+        @($findings | Where-Object TestID -eq 'OSV-ARCHIVE-METADATA-OFFLINE').Count | Should -Be 0
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 1
         $budget.TempBytes | Should -BeGreaterThan 0
     }
 

@@ -21,7 +21,7 @@ Set-StrictMode -Version Latest
 function New-ArchiveMetadataBudget {
     <# One mutable instance per Invoke-Scan run.  All blocked archives share it. #>
     [PSCustomObject]@{
-        MaxEntries             = 10000
+        MaxEntries             = 10000 # enumeration work, including recovery exclusions
         MaxCandidates          = 200
         MaxManifestBytes       = 1MB
         MaxDecodedBytes        = 16MB
@@ -66,16 +66,15 @@ function Get-DependencyMetadataKind {
 
 function Get-ArchiveMetadataContainerKind {
     param([Parameter(Mandatory)][string]$EntryName, [string]$Path, [string]$KnownKind)
-    # Actual containers may have misleading suffixes. Match normal extraction's
-    # bounded PK probe when a filesystem path is available; nested entry names
-    # alone still use the allowlisted formats before their streams are opened.
-    if ($Path -and (Test-ZipFileMagic -Path $Path)) { return 'zip' }
+    # A TAR filename can imitate PK magic. A carried/recognized format wins;
+    # weak magic only fills unknown suffixes such as renamed .nuspec/.dat ZIPs.
     if ($KnownKind) { return $KnownKind }
     $name = ($EntryName -replace '\\', '/').ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return 'tar-gzip' }
     $ext = [IO.Path]::GetExtension($name)
     if ($ext -in @('.zip', '.whl', '.egg', '.nupkg')) { return 'zip' }
     if ($ext -eq '.tar') { return 'tar' }
+    if ($Path -and (Test-ZipFileMagic -Path $Path)) { return 'zip' }
     return $null
 }
 
@@ -193,7 +192,15 @@ function Convert-NpmLockMetadata {
     param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
-    try { $lock = $Text | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    try {
+        $lock = $Text | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if ($lock -isnot [Collections.IDictionary]) { throw 'Expected a lockfile object.' }
+        foreach ($section in @('packages', 'dependencies')) {
+            if ($lock.Contains($section) -and $null -ne $lock[$section] -and $lock[$section] -isnot [Collections.IDictionary]) {
+                throw "Expected an object for '$section'."
+            }
+        }
+    }
     catch {
         $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
             -Issue "Malformed npm lock file: $_" -TestID 'OSV-NPM-MALFORMED'))
@@ -209,11 +216,27 @@ function Convert-NpmLockMetadata {
             $deps.Add((New-ParsedDependency -Name $name -Version ([string]$entry.version) -Ecosystem npm -ManifestFile $ManifestFile))
         }
     } elseif ($lock.ContainsKey('dependencies') -and $lock.dependencies) {
-        foreach ($name in $lock.dependencies.Keys) {
+        # npm v1 is a tree, not a flat map. Use enumerator frames so deeply
+        # nested locks cannot overflow the call stack or enqueue every node.
+        $pending = [Collections.Generic.Stack[object]]::new()
+        $pending.Push($lock.dependencies.GetEnumerator())
+        while ($pending.Count -gt 0) {
             if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
-            $entry = $lock.dependencies[$name]
-            if ($entry -and $entry.ContainsKey('version') -and $entry.version) {
+            $frame = $pending.Peek()
+            if (-not $frame.MoveNext()) { [void]$pending.Pop(); continue }
+            $name = [string]$frame.Key; $entry = $frame.Value
+            if ($entry -is [Collections.IDictionary] -and $entry.Contains('version') -and $entry.version) {
                 $deps.Add((New-ParsedDependency -Name $name -Version ([string]$entry.version) -Ecosystem npm -ManifestFile $ManifestFile))
+            } else {
+                $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                    -Issue "npm dependency '$name' has no resolvable version." -TestID 'OSV-NPM-MALFORMED'))
+            }
+            if ($entry -is [Collections.IDictionary] -and $entry.Contains('dependencies') -and $null -ne $entry.dependencies) {
+                if ($entry.dependencies -is [Collections.IDictionary]) { $pending.Push($entry.dependencies.GetEnumerator()) }
+                elseif (($deps.Count + $findings.Count) -lt $MaxRecords) {
+                    $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                        -Issue "npm dependency '$name' has a malformed nested dependency map." -TestID 'OSV-NPM-MALFORMED'))
+                }
             }
         }
     }
@@ -258,6 +281,9 @@ function Convert-PythonPackageMetadata {
     $findings = [Collections.Generic.List[object]]::new()
     $headers = [Collections.Generic.List[string]]::new()
     foreach ($line in ($Text -split "`r?`n")) {
+        # The body is a free-form description, not additional email headers.
+        # Whitespace-only continuation lines are still part of the headers.
+        if ($line.Length -eq 0) { break }
         if ($line -match '^\s+' -and $headers.Count -gt 0) {
             $headers[$headers.Count - 1] = $headers[$headers.Count - 1] + ' ' + $line.Trim()
         } else { $headers.Add($line) }
@@ -444,6 +470,19 @@ function Read-TomlDependencyArray {
     throw 'Unterminated dependency array.'
 }
 
+function Get-TomlMetadataKeyParts {
+    param([string]$Text)
+    $token = '(?:[A-Za-z0-9_-]+|''[^''\r\n]*''|"(?:[^"\\\r\n]|\\.)*")'
+    $match = [regex]::Match($Text, ('^\s*(?<part>' + $token + ')(?:\s*\.\s*(?<part>' + $token + '))*\s*$'))
+    if (-not $match.Success) { throw 'Malformed or unsupported TOML key path.' }
+    foreach ($part in $match.Groups['part'].Captures) {
+        $value = $part.Value
+        if ($value.StartsWith('"')) { ConvertFrom-Json -InputObject $value -ErrorAction Stop }
+        elseif ($value.StartsWith("'")) { $value.Substring(1, $value.Length - 2) }
+        else { $value }
+    }
+}
+
 function Convert-TomlLockMetadata {
     param([string]$Text, [string]$ManifestFile, [string]$UnitType, [string]$Kind, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
@@ -501,7 +540,9 @@ function Convert-TomlLockMetadata {
         # PEP 621 uses dependencies in [project], but arbitrary group keys in
         # [project.optional-dependencies]. Other TOML tables are not package
         # declarations. Statement scanning also excludes quoted example text.
-        $table = ''
+        $tablePath = @()
+        $keyToken = '(?:[A-Za-z0-9_-]+|''[^''\r\n]*''|"(?:[^"\\\r\n]|\\.)*")'
+        $assignmentPattern = '(?s)^(?<key>' + $keyToken + '(?:\s*\.\s*' + $keyToken + ')*)\s*=\s*(?<value>.*)$'
         try { $statements = @(Get-TomlMetadataStatements -Text $Text) }
         catch {
             $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
@@ -511,16 +552,25 @@ function Convert-TomlLockMetadata {
         foreach ($statement in $statements) {
             if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             if ($statement.StartsWith('[')) {
-                $table = if ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\]\s*(?:#.*)?$') { 'project' }
-                    elseif ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\.\s*(?:optional-dependencies|"optional-dependencies"|''optional-dependencies'')\s*\]\s*(?:#.*)?$') { 'optional' }
-                    else { '' }
+                $tablePath = $null
+                $header = [regex]::Match($statement, '^\[(?<key>[^\r\n]+)\]\s*(?:#.*)?$')
+                if ($header.Success -and -not $statement.StartsWith('[[')) {
+                    try { $tablePath = @(Get-TomlMetadataKeyParts -Text $header.Groups['key'].Value) }
+                    catch {
+                        $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                            -Issue "Malformed or unsupported pyproject table: $($_.Exception.Message)" -TestID 'OSV-PYPI-MALFORMED'))
+                    }
+                }
                 continue
             }
-            if (-not $table) { continue }
-            $assignment = [regex]::Match($statement, '(?s)^(?<key>[A-Za-z0-9_-]+|''[^''\r\n]*''|"(?:[^"\\\r\n]|\\.)*")\s*=\s*(?<value>.*)$')
+            if ($null -eq $tablePath) { continue }
+            $assignment = [regex]::Match($statement, $assignmentPattern)
             if (-not $assignment.Success) { continue }
-            if ($table -eq 'project' -and $assignment.Groups['key'].Value -cnotmatch '^(?:dependencies|"dependencies"|''dependencies'')$') { continue }
             try {
+                $keyPath = @($tablePath) + @(Get-TomlMetadataKeyParts -Text $assignment.Groups['key'].Value)
+                $isDependencies = $keyPath.Count -eq 2 -and $keyPath[0] -ceq 'project' -and $keyPath[1] -ceq 'dependencies'
+                $isOptional = $keyPath.Count -eq 3 -and $keyPath[0] -ceq 'project' -and $keyPath[1] -ceq 'optional-dependencies'
+                if (-not $isDependencies -and -not $isOptional) { continue }
                 if (-not $assignment.Groups['value'].Value.StartsWith('[')) { throw 'Expected a dependency string array.' }
                 $requirements = Read-TomlDependencyArray -Text $statement -StartIndex $assignment.Groups['value'].Index
             } catch {
@@ -714,6 +764,8 @@ function Invoke-ArchiveMetadataDependencyScan {
                     foreach ($entry in $zip.Entries) {
                         if (Test-LimitTime) { Add-Limit $logicalContainer "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; break }
                         if ($Budget.Entries -ge $Budget.MaxEntries) { Add-Limit $logicalContainer "entry cap ($($Budget.MaxEntries)) reached"; break }
+                        # Exclusions avoid duplicate audits, not enumeration work.
+                        # Keep that work bounded even when every path is excluded.
                         $Budget.Entries++
                         $name = ($entry.FullName -replace '\\','/').TrimStart('/')
                         if (-not $name -or $name.EndsWith('/')) { continue }

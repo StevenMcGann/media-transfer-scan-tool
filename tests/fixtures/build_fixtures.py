@@ -1112,6 +1112,22 @@ write(os.path.join(ARCMETA_DIR, 'rejected_metadata.tgz'), make_tgz_bytes([
     ('../outside.txt', b'not safe to extract\n'),
 ]))
 
+# A valid TAR filename may imitate the ZIP local-header signature. Recognition
+# must preserve the recognized TAR kind instead of accepting that prefix.
+_pk_tar = io.BytesIO()
+with _tarfile.open(fileobj=_pk_tar, mode='w', format=_tarfile.USTAR_FORMAT) as tf:
+    for name, data in [('PK\x03\x04decoy', b'not a ZIP'),
+                       ('requirements.txt', b'Pillow==9.5.0\n')]:
+        info = _tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mtime = FIXED_EPOCH
+        tf.addfile(info, io.BytesIO(data))
+write(os.path.join(ARCMETA_DIR, 'pk_prefix.tar'), _pk_tar.getvalue())
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+    z.writestr(zipfile.ZipInfo('packages/decoy.tar', FIXED_ZIP_DT), _pk_tar.getvalue())
+write(os.path.join(ARCMETA_DIR, 'nested_pk_prefix.zip'), buf.getvalue())
+
 # The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
 # the wheel's own central directory declares a much larger expanded payload.
 # This drives Engine.ps1's NESTED semantic-container budget-blocked branch.

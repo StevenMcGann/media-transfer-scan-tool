@@ -11,10 +11,9 @@
     containers are spooled to a dedicated temporary directory under a separate,
     scan-wide byte budget and are always removed by the caller.
 
-    Keep this fallback only at Engine.ps1's four pre-extraction budget gates.
-    Do not add it to mid-member or mid-TAR budget exhaustion paths: those paths
-    have already dispatched members and would create duplicate dependency
-    findings for metadata that was successfully reached before the stop.
+    Used at pre-extraction budget gates and after budget-stopped TAR dispatch.
+    The latter supplies logical paths already covered from the staged prefix
+    so metadata is never audited twice by that recovery pass.
 #>
 
 Set-StrictMode -Version Latest
@@ -32,7 +31,7 @@ function New-ArchiveMetadataBudget {
         # containers cannot buy unlimited write/delete I/O under one scan.
         MaxTempBytes           = 64MB
         MaxStreamBytes         = 256MB
-        MaxDependencies        = 5000
+        MaxDependencies        = 5000 # combined exact dependencies and parser findings
         MaxMilliseconds        = 30000
         MaxCompressionRatio    = 100.0
         CompressionRatioFloor = 64KB
@@ -43,6 +42,7 @@ function New-ArchiveMetadataBudget {
         TempBytes              = 0L
         StreamBytes            = 0L
         Dependencies           = 0
+        ParseRecords           = 0 # exact dependencies plus parser coverage findings
         ElapsedMilliseconds    = 0L
     }
 }
@@ -126,7 +126,7 @@ function New-DependencyParseFinding {
 }
 
 function Convert-RequirementsMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     $logicalLines = [Collections.Generic.List[string]]::new()
@@ -143,6 +143,7 @@ function Convert-RequirementsMetadata {
     if ($carry) { $logicalLines.Add($carry) }
 
     foreach ($rawLine in $logicalLines) {
+        if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
         $line = $rawLine.Trim()
         if (-not $line -or $line.StartsWith('#')) { continue }
         if ($line -match '^(?:-e\s*|--editable(?:=|\s+))(.+)$') {
@@ -184,7 +185,7 @@ function Convert-RequirementsMetadata {
 }
 
 function Convert-NpmLockMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     try { $lock = $Text | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
@@ -195,6 +196,7 @@ function Convert-NpmLockMetadata {
     }
     if ($lock.ContainsKey('packages') -and $lock.packages) {
         foreach ($key in $lock.packages.Keys) {
+            if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             if ([string]::IsNullOrEmpty($key)) { continue }
             $entry = $lock.packages[$key]
             if (-not $entry -or -not $entry.ContainsKey('version') -or -not $entry.version) { continue }
@@ -203,6 +205,7 @@ function Convert-NpmLockMetadata {
         }
     } elseif ($lock.ContainsKey('dependencies') -and $lock.dependencies) {
         foreach ($name in $lock.dependencies.Keys) {
+            if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             $entry = $lock.dependencies[$name]
             if ($entry -and $entry.ContainsKey('version') -and $entry.version) {
                 $deps.Add((New-ParsedDependency -Name $name -Version ([string]$entry.version) -Ecosystem npm -ManifestFile $ManifestFile))
@@ -213,7 +216,7 @@ function Convert-NpmLockMetadata {
 }
 
 function Convert-PipfileLockMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     try { $lock = $Text | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
@@ -225,6 +228,7 @@ function Convert-PipfileLockMetadata {
     foreach ($section in @('default','develop')) {
         if (-not $lock.ContainsKey($section) -or -not $lock[$section]) { continue }
         foreach ($name in $lock[$section].Keys) {
+            if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             $raw = $lock[$section][$name]
             $spec = if ($raw -is [string]) { [string]$raw }
                     elseif ($raw -is [Collections.IDictionary] -and $raw.Contains('version')) { [string]$raw.version }
@@ -244,7 +248,7 @@ function Convert-PipfileLockMetadata {
 }
 
 function Convert-PythonPackageMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     $headers = [Collections.Generic.List[string]]::new()
@@ -264,6 +268,7 @@ function Convert-PythonPackageMetadata {
             -TestID 'OSV-PYPI-AMBIGUOUS-METADATA'))
     }
     foreach ($header in @($headers | Where-Object { $_ -match '^Requires-Dist\s*:' })) {
+        if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
         $spec = (($header -split ':',2)[1] -split ';',2)[0].Trim()
         $plain = ([regex]::Replace($spec, '\[[^\]]*\]', '')).Trim()
         $m = [regex]::Match($plain, '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\(\s*)?===?\s*([^=\s\)]+)\s*\)?$')
@@ -282,7 +287,7 @@ function Convert-PythonPackageMetadata {
 }
 
 function Convert-NuspecMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     try {
@@ -326,6 +331,7 @@ function Convert-NuspecMetadata {
         -DepLabel "$id $ver" -SourceRole package))
     $dependencyNodes = @($metadata.SelectNodes('.//*[local-name()="dependency"]'))
     foreach ($node in $dependencyNodes) {
+        if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
         $depId = $node.GetAttribute('id'); $range = $node.GetAttribute('version')
         if (-not $depId) { continue }
         if ($range -match '^\[([^,\]\[]+)\]$') {
@@ -434,13 +440,14 @@ function Read-TomlDependencyArray {
 }
 
 function Convert-TomlLockMetadata {
-    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [string]$Kind)
+    param([string]$Text, [string]$ManifestFile, [string]$UnitType, [string]$Kind, [int]$MaxRecords = 5000)
     $deps = [Collections.Generic.List[object]]::new()
     $findings = [Collections.Generic.List[object]]::new()
     if ($Kind -in @('poetry-lock','uv-lock')) {
         $blocks = @([regex]::Split($Text, '(?m)^\s*\[\[package\]\]\s*$') | Select-Object -Skip 1)
         $blockNumber = 0
         foreach ($block in $blocks) {
+            if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             $blockNumber++
             $nm = [regex]::Match($block, '(?m)^\s*name\s*=\s*["'']([^"'']+)["'']\s*$')
             $vm = [regex]::Match($block, '(?m)^\s*version\s*=\s*["'']([^"'']+)["'']\s*$')
@@ -466,6 +473,7 @@ function Convert-TomlLockMetadata {
             return [PSCustomObject]@{ Dependencies = @(); Findings = $findings.ToArray() }
         }
         foreach ($statement in $statements) {
+            if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
             if ($statement.StartsWith('[')) {
                 $table = if ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\]\s*(?:#.*)?$') { 'project' }
                     elseif ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\.\s*(?:optional-dependencies|"optional-dependencies"|''optional-dependencies'')\s*\]\s*(?:#.*)?$') { 'optional' }
@@ -486,6 +494,7 @@ function Convert-TomlLockMetadata {
                 continue
             }
             foreach ($requirement in $requirements) {
+                if (($deps.Count + $findings.Count) -ge $MaxRecords) { break }
                 $spec = ($requirement -split ';',2)[0].Trim()
                 $plain = ([regex]::Replace($spec, '\[[^\]]*\]', '')).Trim()
                 if ($plain -match '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^=\s]+)$' -and $Matches[2] -notmatch '\*') {
@@ -510,29 +519,45 @@ function Convert-DependencyMetadataContent {
         [Parameter(Mandatory)][string]$Kind,
         [Parameter(Mandatory)][byte[]]$Bytes,
         [Parameter(Mandatory)][string]$ManifestFile,
-        [string]$UnitType = 'archive'
+        [string]$UnitType = 'archive',
+        [ValidateRange(0, 5000)][int]$MaxRecords = 5000
     )
+    if ($MaxRecords -eq 0) {
+        return [PSCustomObject]@{ Dependencies = @(); Findings = @(); RecordCount = 0; LimitReached = $true }
+    }
     try { $text = Convert-DependencyBytesToText -Bytes $Bytes }
     catch {
         return [PSCustomObject]@{ Dependencies = @(); Findings = @(
             New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
-                -Issue "Dependency metadata text decoding failed: $_" -TestID 'MTS-ARCHIVE-METADATA-ERROR') }
+                -Issue "Dependency metadata text decoding failed: $_" -TestID 'MTS-ARCHIVE-METADATA-ERROR'); RecordCount=1; LimitReached=$false }
     }
-    switch ($Kind) {
-        'requirements'    { return Convert-RequirementsMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType }
-        'npm-lock'        { return Convert-NpmLockMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType }
-        'pipfile-lock'    { return Convert-PipfileLockMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType }
-        'python-metadata' { return Convert-PythonPackageMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType }
-        'nuspec'          { return Convert-NuspecMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType }
-        'pyproject'       { return Convert-TomlLockMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType -Kind $Kind }
-        'poetry-lock'     { return Convert-TomlLockMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType -Kind $Kind }
-        'uv-lock'         { return Convert-TomlLockMetadata -Text $text -ManifestFile $ManifestFile -UnitType $UnitType -Kind $Kind }
+    $parserArgs = @{ Text=$text; ManifestFile=$ManifestFile; UnitType=$UnitType; MaxRecords=$MaxRecords }
+    $parsed = switch ($Kind) {
+        'requirements'    { Convert-RequirementsMetadata @parserArgs }
+        'npm-lock'        { Convert-NpmLockMetadata @parserArgs }
+        'pipfile-lock'    { Convert-PipfileLockMetadata @parserArgs }
+        'python-metadata' { Convert-PythonPackageMetadata @parserArgs }
+        'nuspec'          { Convert-NuspecMetadata @parserArgs }
+        'pyproject'       { Convert-TomlLockMetadata @parserArgs -Kind $Kind }
+        'poetry-lock'     { Convert-TomlLockMetadata @parserArgs -Kind $Kind }
+        'uv-lock'         { Convert-TomlLockMetadata @parserArgs -Kind $Kind }
         default {
             return [PSCustomObject]@{ Dependencies = @(); Findings = @(
                 New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType -Severity INFO `
-                    -Issue "Unsupported dependency metadata kind '$Kind'." -TestID 'MTS-ARCHIVE-METADATA-UNSUPPORTED') }
+                    -Issue "Unsupported dependency metadata kind '$Kind'." -TestID 'MTS-ARCHIVE-METADATA-UNSUPPORTED'); RecordCount=1; LimitReached=$false }
         }
     }
+    $recordCount = @($parsed.Dependencies).Count + @($parsed.Findings).Count
+    # Reaching the cap is deliberately conservative: no additional records
+    # are constructed just to prove that an untrusted manifest has a suffix.
+    $limited = $recordCount -ge $MaxRecords
+    $parseFindings = @($parsed.Findings)
+    if ($limited) {
+        $parseFindings += New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType -Severity INFO -Confidence HIGH `
+            -Issue "Dependency metadata record cap ($MaxRecords) reached; any remaining declarations were not inspected." `
+            -TestID 'MTS-ARCHIVE-METADATA-LIMIT'
+    }
+    [PSCustomObject]@{ Dependencies=@($parsed.Dependencies); Findings=$parseFindings; RecordCount=$recordCount; LimitReached=$limited }
 }
 
 function Read-ArchiveMetadataStreamBytes {
@@ -604,7 +629,8 @@ function Invoke-ArchiveMetadataDependencyScan {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$RelativePath,
         [Parameter(Mandatory)][PSCustomObject]$Context,
-        [Parameter(Mandatory)][PSCustomObject]$Budget
+        [Parameter(Mandatory)][PSCustomObject]$Budget,
+        [Collections.Generic.HashSet[string]]$ExcludedPaths = $null
     )
 
     $findings = [Collections.Generic.List[object]]::new()
@@ -668,6 +694,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                         $kind = Get-DependencyMetadataKind -EntryName $name
                         $nestedKind = Get-ArchiveMetadataContainerKind -EntryName $name
                         if (-not $kind -and -not $nestedKind) { continue }
+                        if ($ExcludedPaths -and $ExcludedPaths.Contains(($logical -replace '\\', '/'))) { continue }
                         $maxBytes = if ($kind) { $Budget.MaxManifestBytes } else { $Budget.MaxTempBytes - $Budget.TempBytes }
                         if ($entry.Length -gt $maxBytes) { Add-Limit $logical "entry size $($entry.Length) exceeds its $maxBytes-byte limit"; continue }
                         if ($entry.Length -ge $Budget.CompressionRatioFloor -and $entry.CompressedLength -gt 0 -and
@@ -729,6 +756,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                         $kind = Get-DependencyMetadataKind -EntryName $name
                         $nestedKind = Get-ArchiveMetadataContainerKind -EntryName $name
                         if (-not $kind -and -not $nestedKind) { continue }
+                        if ($ExcludedPaths -and $ExcludedPaths.Contains(($logical -replace '\\', '/'))) { continue }
                         if (-not $entry.DataStream) { Add-Error $logical 'regular TAR entry has no readable data stream'; continue }
                         $maxBytes = if ($kind) { $Budget.MaxManifestBytes } else { $Budget.MaxTempBytes - $Budget.TempBytes }
                         if ($entryLength -gt $maxBytes) { Add-Limit $logical "entry size $entryLength exceeds its $maxBytes-byte limit"; continue }
@@ -769,17 +797,24 @@ function Invoke-ArchiveMetadataDependencyScan {
     }
 
     try {
+        if ($Budget.ParseRecords -ge $Budget.MaxDependencies) {
+            Add-Limit $RelativePath "dependency/parser record cap ($($Budget.MaxDependencies)) reached"
+            return $findings.ToArray()
+        }
         Read-Container $Path $RelativePath 1
         foreach ($candidate in $candidates) {
             if (Test-LimitTime) { Add-Limit $candidate.LogicalPath "processing-time cap ($($Budget.MaxMilliseconds) ms) reached"; break }
-            if ($Budget.Dependencies -ge $Budget.MaxDependencies) { Add-Limit $candidate.LogicalPath "dependency record cap ($($Budget.MaxDependencies)) reached"; break }
+            if ($Budget.ParseRecords -ge $Budget.MaxDependencies) { Add-Limit $candidate.LogicalPath "dependency/parser record cap ($($Budget.MaxDependencies)) reached"; break }
             $parsed = Convert-DependencyMetadataContent -Kind $candidate.Kind -Bytes $candidate.Bytes `
-                -ManifestFile $candidate.LogicalPath -UnitType archive
+                -ManifestFile $candidate.LogicalPath -UnitType archive `
+                -MaxRecords ([Math]::Min(5000, $Budget.MaxDependencies - $Budget.ParseRecords))
+            $Budget.ParseRecords += $parsed.RecordCount
             foreach ($f in @($parsed.Findings)) { $findings.Add($f) }
             foreach ($dep in @($parsed.Dependencies)) {
                 if ($Budget.Dependencies -ge $Budget.MaxDependencies) { Add-Limit $candidate.LogicalPath "dependency record cap ($($Budget.MaxDependencies)) reached"; break }
                 $Budget.Dependencies++; $allDeps.Add($dep)
             }
+            if ($parsed.LimitReached) { break }
         }
         $resolved = @($allDeps.ToArray())
         if ($candidates.Count -gt 0) {

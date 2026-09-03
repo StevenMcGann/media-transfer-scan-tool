@@ -391,6 +391,47 @@ version = "1.0"
 }
 
 Describe 'Archive metadata fallback - fail-closed limits and malformed containers' {
+    It 'bounds dependency and diagnostic creation inside every manifest parser' -ForEach @(
+        @{ Kind='requirements'; Text="first==1`nsecond`nthird==3`nfourth" },
+        @{ Kind='npm-lock'; Text='{"packages":{"node_modules/a":{"version":"1"},"node_modules/b":{"version":"2"},"node_modules/c":{"version":"3"}}}' },
+        @{ Kind='pipfile-lock'; Text='{"default":{"a":"==1","b":"*"},"develop":{"c":"==3"}}' },
+        @{ Kind='python-metadata'; Text="Name: Example`nVersion: 1`nRequires-Dist: a (>=1)`nRequires-Dist: b (==2)" },
+        @{ Kind='nuspec'; Text='<package><metadata><id>Example</id><version>1</version><dependencies><dependency id="a" version="[1,2)"/><dependency id="b" version="[2]"/></dependencies></metadata></package>' },
+        @{ Kind='pyproject'; Text="[project]`ndependencies = ['a==1','b>=2','c==3']" },
+        @{ Kind='poetry-lock'; Text="[[package]]`nname = 'a'`nversion = '1'`n[[package]]`nname = 'bad'`n[[package]]`nname = 'c'`nversion = '3'" },
+        @{ Kind='uv-lock'; Text="[[package]]`nname = 'a'`nversion = '1'`n[[package]]`nname = 'bad'`n[[package]]`nname = 'c'`nversion = '3'" }
+    ) {
+        $parsed = Convert-DependencyMetadataContent -Kind $Kind -Bytes ([Text.Encoding]::UTF8.GetBytes($Text)) -ManifestFile 'fixture' -MaxRecords 2
+        $parsed.RecordCount | Should -Be 2
+        $parsed.LimitReached | Should -BeTrue
+        (@($parsed.Dependencies).Count + @($parsed.Findings).Count) | Should -Be 3 # two records + one limit diagnostic
+        @($parsed.Findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -Be 1
+    }
+
+    It 'does not allocate unbounded findings from dense unpinned manifests across sibling archives' {
+        $budget = New-ArchiveMetadataBudget
+        $budget.MaxDependencies = 7
+        $findings = RunMetadata 'dense_requirements.zip' $budget
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 7
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -Be 1
+        $budget.ParseRecords | Should -Be 7
+        $budget.Dependencies | Should -Be 0
+        Mock Convert-DependencyMetadataContent { throw 'An exhausted record budget must not parse again' }
+        $later = RunMetadata 'dense_requirements.zip' $budget
+        @($later | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 0
+        @($later | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-LIMIT').Count | Should -Be 1
+        Should -Invoke Convert-DependencyMetadataContent -Times 0
+        $budget.ParseRecords | Should -Be 7
+    }
+
+    It 'caps ordinary manifest parsing by default, not only archive fallbacks' {
+        $text = "unpinned`n" * 10000
+        $parsed = Convert-DependencyMetadataContent -Kind requirements -Bytes ([Text.Encoding]::UTF8.GetBytes($text)) -ManifestFile 'requirements.txt'
+        $parsed.RecordCount | Should -Be 5000
+        @($parsed.Findings).Count | Should -Be 5001
+        $parsed.LimitReached | Should -BeTrue
+    }
+
     It 'skips duplicate manifest names instead of trusting a decoy' {
         $budget = New-ArchiveMetadataBudget
         $findings = RunMetadata 'duplicate_metadata.zip' $budget
@@ -519,6 +560,71 @@ Describe 'Archive metadata fallback - fail-closed limits and malformed container
 }
 
 Describe 'Archive metadata fallback - engine integration' {
+    It 'recovers metadata after streaming TAR stops without re-auditing the staged prefix' -ForEach @(
+        @{ Name='stopped_metadata.tgz'; Members=1; Bytes=1GB; Partial=1 },
+        @{ Name='stopped_metadata.tgz'; Members=5000; Bytes=40; Partial=1 },
+        @{ Name='nested_stopped_tar.zip'; Members=2; Bytes=1GB; Partial=1 },
+        @{ Name='stopped_nested_wheel.tgz'; Members=1; Bytes=1GB; Partial=2 }
+    ) {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $scanDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir $Name) -Destination $scanDir
+        $oldBytes = $script:ArchiveTreeMaxBytes
+        $oldMembers = $script:ArchiveTreeMaxMembers
+        $oldHeadroom = $script:ArchiveTreeSafeHeadroomBytes
+        try {
+            $script:ArchiveTreeMaxBytes = $Bytes
+            $script:ArchiveTreeMaxMembers = $Members
+            $script:ArchiveTreeSafeHeadroomBytes = 0
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode online
+            $findings = @($result.Units | ForEach-Object { $_.Findings })
+            @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED').Count | Should -BeGreaterThan 0
+            @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be $Partial
+            @($script:CapturedQueries | Where-Object { $_.package.name -eq 'pillow' }).Count | Should -Be 1
+            @($script:CapturedQueries | Where-Object { $_.package.name -eq 'urllib3' }).Count | Should -Be 1
+            if ($Name -eq 'stopped_nested_wheel.tgz') {
+                @($script:CapturedQueries | Where-Object { $_.package.name -eq 'requests' }).Count | Should -Be 1
+            }
+            @($findings | Where-Object TestID -eq 'MTS-ANALYZER-ERR').Count | Should -Be 0
+        } finally {
+            $script:ArchiveTreeMaxBytes = $oldBytes
+            $script:ArchiveTreeMaxMembers = $oldMembers
+            $script:ArchiveTreeSafeHeadroomBytes = $oldHeadroom
+        }
+    }
+
+    It 'does not recover stopped-TAR metadata when OsvScan is disabled' {
+        $scanDir = Join-Path $TestDrive 'disabled-stopped-tar'
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir 'stopped_metadata.tgz') -Destination $scanDir
+        $oldMembers = $script:ArchiveTreeMaxMembers
+        try {
+            $script:ArchiveTreeMaxMembers = 1
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode offline -DisableAnalyzers OsvScan
+            $findings = @($result.Units | ForEach-Object { $_.Findings })
+            @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED').Count | Should -Be 1
+            @($findings | Where-Object TestID -like 'MTS-ARCHIVE-METADATA-*').Count | Should -Be 0
+        } finally { $script:ArchiveTreeMaxMembers = $oldMembers }
+    }
+
+    It 'does not run metadata recovery after a hard TAR traversal rejection' {
+        Mock Invoke-OsvQueryBatch { throw 'A hard-rejected TAR must not be audited' }
+        $scanDir = Join-Path $TestDrive 'hard-rejected-tar'
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:MetaDir 'rejected_metadata.tgz') -Destination $scanDir
+        $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir $script:Out -Mode online
+        $findings = @($result.Units | ForEach-Object { $_.Findings })
+        @($findings | Where-Object TestID -eq 'MTS-EXTRACT-TRAVERSAL').Count | Should -Be 1
+        @($findings | Where-Object TestID -like 'MTS-ARCHIVE-METADATA-*').Count | Should -Be 0
+        Should -Invoke Invoke-OsvQueryBatch -Times 0
+    }
+
     It 'does not stage a bare gzip stream that is not a TAR container' {
         $file = Get-Item -LiteralPath (Join-Path $script:MetaDir 'bare_payload.gz')
         $unit = (New-Unit -File $file -ScanRoot $script:MetaDir).Unit

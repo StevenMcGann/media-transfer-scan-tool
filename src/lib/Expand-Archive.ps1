@@ -399,7 +399,7 @@ function Expand-SubmissionArchive {
         shared archive-tree budget from Engine.ps1; passed straight through to
         Expand-TarArchive, the only extraction path here where the archive's
         own uncompressed size can't be known before writing starts.
-        Returns @{ Success; StagingPath; Findings }.
+        Returns @{ Success; StagingPath; Findings; BudgetStopped } on success.
     #>
     param(
         [Parameter(Mandatory)][string]$InputFile,
@@ -412,6 +412,7 @@ function Expand-SubmissionArchive {
     $name  = (Split-Path $InputFile -Leaf).ToLowerInvariant()
     $ext   = [IO.Path]::GetExtension($InputFile).ToLowerInvariant()
     $isTar = $name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')
+    $budgetStopped = $false
     $isZip = $ext -in @('.whl', '.egg', '.zip', '.nupkg') -or (Test-ZipFileMagic -Path $InputFile)
 
     # Classification can deliberately route ZIP magic under a misleading
@@ -466,12 +467,13 @@ function Expand-SubmissionArchive {
                 return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
             }
             if ($tarResult.BudgetStopped) {
+                $budgetStopped = $true
                 Write-Log -Level WARN -Message "Tarball extraction for $name stopped early — shared archive-tree budget reached."
             } else {
                 Write-Log -Level DEBUG -Message "Extracted tarball OK."
             }
         }
-        return @{ Success = $true; StagingPath = $OutputDir; Findings = $findings.ToArray() }
+        return @{ Success = $true; StagingPath = $OutputDir; Findings = $findings.ToArray(); BudgetStopped = $budgetStopped }
 
     } catch {
         Write-Log -Level ERROR -Message "Extraction failed for $name : $_"

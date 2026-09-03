@@ -1087,6 +1087,31 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
                    '[[package]]\nversion = "1.0"\n')
 write(os.path.join(ARCMETA_DIR, 'optional_and_mixed_locks.zip'), buf.getvalue())
 
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+    for suffix in ('a', 'b'):
+        z.writestr(zipfile.ZipInfo(f'requirements-{suffix}.txt', FIXED_ZIP_DT),
+                   'unpinned\n' * 10000)
+write(os.path.join(ARCMETA_DIR, 'dense_requirements.zip'), buf.getvalue())
+
+_stopped_tar = make_tgz_bytes([
+    ('requirements-a.txt', b'Pillow==9.5.0\n'),
+    ('requirements-b.txt', b'urllib3==1.26.5\n#' + b'padding' * 40 + b'\n'),
+])
+write(os.path.join(ARCMETA_DIR, 'stopped_metadata.tgz'), _stopped_tar)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+    z.writestr(zipfile.ZipInfo('dependencies.tgz', FIXED_ZIP_DT), _stopped_tar)
+write(os.path.join(ARCMETA_DIR, 'nested_stopped_tar.zip'), buf.getvalue())
+write(os.path.join(ARCMETA_DIR, 'stopped_nested_wheel.tgz'), make_tgz_bytes([
+    ('Pillow-9.5.0.whl', _vulnerable_wheel),
+    ('requirements.txt', b'requests==2.31.0\n'),
+]))
+write(os.path.join(ARCMETA_DIR, 'rejected_metadata.tgz'), make_tgz_bytes([
+    ('requirements.txt', b'Pillow==9.5.0\n'),
+    ('../outside.txt', b'not safe to extract\n'),
+]))
+
 # The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
 # the wheel's own central directory declares a much larger expanded payload.
 # This drives Engine.ps1's NESTED semantic-container budget-blocked branch.

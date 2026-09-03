@@ -25,6 +25,11 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Enforced metadata record limits inside every shared parser, counting both
+  exact dependencies and coverage findings against the scan-wide fallback cap.
+- Added metadata recovery after streaming TAR extraction stops at its budget,
+  excluding manifests and nested containers already handled from the staged
+  prefix to avoid duplicate audits.
 - Corrected pyproject dependency-array parsing so quoted extras, marker quotes,
   and comments cannot truncate the array; unsupported/malformed arrays now
   produce an explicit coverage finding.

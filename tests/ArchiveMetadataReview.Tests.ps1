@@ -249,6 +249,87 @@ Describe 'Container identity and recovery work accounting' {
     }
 }
 
+Describe 'Ordinary member-budget recovery' {
+    It 'recovers skipped parent metadata without repeating earlier or nested audits' -ForEach @(
+        @{ Limit='members'; Disabled=$false }, @{ Limit='bytes'; Disabled=$false },
+        @{ Limit='members'; Disabled=$true }
+    ) {
+        $script:Queries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:Queries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $inner = New-ReviewZipEntries ([ordered]@{ 'requirements.txt'='requests==2.31.0'; 'payload.bin'=[byte[]]::new(4096) })
+        $outer = New-ReviewZipEntries ([ordered]@{
+            'requirements-a.txt'='Pillow==9.5.0'
+            'requirements-b.zip'=[IO.File]::ReadAllBytes($inner)
+            'requirements-z.txt'='urllib3==1.26.5'
+        })
+        $scanDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        Copy-Item -LiteralPath $outer -Destination (Join-Path $scanDir 'parent.zip')
+        $oldBytes = $script:ArchiveTreeMaxBytes; $oldMembers = $script:ArchiveTreeMaxMembers
+        try {
+            if ($Limit -eq 'members') { $script:ArchiveTreeMaxMembers = 4 }
+            else { $script:ArchiveTreeMaxBytes = (Get-ArchiveExpansionEstimate -Path $outer).Bytes + (Get-ArchiveExpansionEstimate -Path $inner).Bytes - 1 }
+            $disabledAnalyzers = if ($Disabled) { @('OsvScan') } else { @() }
+            $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir (Join-Path $TestDrive 'reports') -Mode online -DisableAnalyzers $disabledAnalyzers
+            $findings = @($result.Units | ForEach-Object Findings)
+            @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-BUDGET-EXCEEDED' -and $_.Issue -match 'requirements-z\.txt' }).Count | Should -Be 1
+            if ($Disabled) {
+                $script:Queries.Count | Should -Be 0
+                @($findings | Where-Object TestID -like 'MTS-ARCHIVE-METADATA-*').Count | Should -Be 0
+            } else {
+                @($findings | Where-Object { $_.TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL' -and $_.File -eq 'parent.zip' }).Count | Should -Be 1
+                @($script:Queries.package.name | Sort-Object) | Should -Be @('pillow', 'requests', 'urllib3')
+            }
+        } finally { $script:ArchiveTreeMaxBytes = $oldBytes; $script:ArchiveTreeMaxMembers = $oldMembers }
+    }
+}
+
+Describe 'Unpacked canonical egg metadata' {
+    It 'classifies only supported PKG-INFO directory layouts' -ForEach @(
+        @{ Directory='EGG-INFO'; Expected='python-requirements' },
+        @{ Directory='example.egg-info'; Expected='python-requirements' },
+        @{ Directory='egg-info'; Expected='python-requirements' },
+        @{ Directory='unrelated'; Expected=$null }
+    ) {
+        $dir = Join-Path $TestDrive $Directory
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $path = Join-Path $dir 'PKG-INFO'
+        Set-Content -LiteralPath $path -Value "Name: Pillow`nVersion: 9.5.0"
+        Get-DeclaredType -File (Get-Item $path) | Should -Be $Expected
+    }
+
+    It 'audits unpacked egg identity and dependencies through the ordinary dispatch path' -ForEach @(
+        @{ Archived=$false }, @{ Archived=$true }
+    ) {
+        $script:Queries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:Queries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $text = "Name: Pillow`nVersion: 9.5.0`nRequires-Dist: urllib3 (==1.26.5)"
+        $scanDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scanDir | Out-Null
+        if ($Archived) {
+            $zip = New-ReviewZip 'EGG-INFO/PKG-INFO' $text
+            Copy-Item -LiteralPath $zip -Destination (Join-Path $scanDir 'unpacked-egg.zip')
+        } else {
+            $dir = Join-Path $scanDir 'EGG-INFO'
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            Set-Content -LiteralPath (Join-Path $dir 'PKG-INFO') -Value $text
+        }
+        $result = Invoke-Scan -Path $scanDir -Profile core -AnalyzerDir $script:Analyzers -ReportsDir (Join-Path $TestDrive 'reports') -Mode online
+        @($script:Queries.package.name | Sort-Object) | Should -Be @('pillow', 'urllib3')
+        $findings = @($result.Units | ForEach-Object Findings)
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-MEMBER-UNINSPECTED').Count | Should -Be 0
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-PARTIAL').Count | Should -Be 0
+    }
+}
+
 Describe 'Parser failure isolation' {
     It 'reports a malformed v2 entry while retaining valid packages in the same lockfile' {
         $parsed = Invoke-ReviewParser npm-lock '{"packages":{"node_modules/decoy":"bad","node_modules/lodash":{"version":"4.17.4"}}}'

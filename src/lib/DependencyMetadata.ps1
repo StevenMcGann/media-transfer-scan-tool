@@ -11,8 +11,9 @@
     containers are spooled to a dedicated temporary directory under a separate,
     scan-wide byte budget and are always removed by the caller.
 
-    Used at pre-extraction budget gates and after budget-stopped TAR dispatch.
-    The latter supplies logical paths already covered from the staged prefix
+    Used at pre-extraction budget gates, after budget-stopped TAR dispatch,
+    and after member dispatch skips files because descendants used the budget.
+    Recovery supplies logical paths already covered from the staged prefix
     so metadata is never audited twice by that recovery pass.
 #>
 

@@ -648,9 +648,9 @@ function Invoke-ArchiveMemberDispatch {
         if ($metadataEnabled) {
             # Record direct manifests actually dispatched to OsvScan, plus
             # nested containers already handled (including their own fallback
-            # or explicit extraction/depth rejection). Do not exclude loose
-            # METADATA/PKG-INFO files: normal member classification does not
-            # claim those, so the recovery reader can still inspect them.
+            # or explicit extraction/depth rejection). Unclassified loose
+            # metadata stays eligible; recognized dist-info/egg-info manifests
+            # are excluded only after their ordinary OsvScan dispatch.
             $directManifest = $childUnit.Type -in @('python-requirements', 'npm', 'nuget') -and
                 (Get-DependencyMetadataKind -EntryName $innerPath)
             if ($directManifest -or $budgetBlocked -or $depthBlocked -or $recursed -or
@@ -689,7 +689,7 @@ function Invoke-ArchiveMemberDispatch {
             -Recommendation 'Absence of findings here is absence of coverage, not evidence these members are safe. Split the submission across multiple scans if this is expected content.'))
     }
 
-    if ($MetadataFallbackNeeded -and $metadataEnabled) {
+    if (($MetadataFallbackNeeded -or $budgetSkipped.Count -gt 0) -and $metadataEnabled) {
         foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $ArchiveUnit.Path -RelativePath $ArchiveUnit.RelativePath `
                 -Context $Context -Budget $Budget.Metadata -ExcludedPaths $coveredMetadataPaths)) { $findings.Add($f) }
     }

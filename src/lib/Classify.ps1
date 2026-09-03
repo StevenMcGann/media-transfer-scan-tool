@@ -156,7 +156,9 @@ function Get-DeclaredType {
     if ($name -eq 'metadata' -and $File.Directory -and $File.Directory.Name.ToLowerInvariant().EndsWith('.dist-info')) {
         return 'python-requirements'
     }
-    if ($name -eq 'pkg-info' -and $File.Directory -and $File.Directory.Name.ToLowerInvariant().EndsWith('.egg-info')) {
+    if ($name -eq 'pkg-info' -and $File.Directory -and
+        ($File.Directory.Name.Equals('egg-info', [StringComparison]::OrdinalIgnoreCase) -or
+         $File.Directory.Name.ToLowerInvariant().EndsWith('.egg-info'))) {
         return 'python-requirements'
     }
     if ($name.EndsWith('.tar.gz')) { return 'archive' }

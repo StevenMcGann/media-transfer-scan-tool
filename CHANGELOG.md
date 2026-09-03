@@ -25,6 +25,9 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Recover metadata after ordinary archive-member budget skips, excluding
+  already-audited manifests/containers, and recognize unpacked canonical
+  `EGG-INFO/PKG-INFO` files during normal member classification.
 - Recover nested ZIPs disguised as metadata within the existing manifest,
   decoded-byte, spool, and depth limits; isolate parser failures per manifest.
 - Apply ZIP expansion estimates to magic-detected renamed archives before

@@ -53,7 +53,7 @@ function Get-DependencyMetadataKind {
     $name = ($EntryName -replace '\\', '/').TrimStart('/').ToLowerInvariant()
     $leaf = [IO.Path]::GetFileName($name)
     if ($name -match '(?:^|/)[^/]+\.dist-info/metadata$') { return 'python-metadata' }
-    if ($name -match '(?:^|/)[^/]+\.egg-info/pkg-info$')  { return 'python-metadata' }
+    if ($name -match '(?:^|/)(?:[^/]+\.)?egg-info/pkg-info$') { return 'python-metadata' }
     if ($name -match '(?:^|/)requirements[^/]*\.txt$') { return 'requirements' }
     if ($leaf -in @('package-lock.json', 'npm-shrinkwrap.json')) { return 'npm-lock' }
     if ($leaf -eq 'pipfile.lock') { return 'pipfile-lock' }
@@ -341,6 +341,55 @@ function Convert-NuspecMetadata {
     [PSCustomObject]@{ Dependencies = $deps.ToArray(); Findings = $findings.ToArray() }
 }
 
+function Read-TomlDependencyArray {
+    <# Read a bounded manifest's string array, not a general TOML document.
+       Brackets/comments only delimit tokens outside quotes. Unsupported TOML
+       string forms fail explicitly; never turn a truncated array into success. #>
+    param([string]$Text, [int]$StartIndex)
+    $values = [Collections.Generic.List[string]]::new()
+    $i = $StartIndex + 1 # opening bracket was matched by the caller
+    $expectValue = $true
+    while ($i -lt $Text.Length) {
+        $ch = $Text[$i]
+        if ([char]::IsWhiteSpace($ch)) { $i++; continue }
+        if ($ch -eq '#') {
+            while ($i -lt $Text.Length -and $Text[$i] -ne "`n") { $i++ }
+            continue
+        }
+        if ($ch -eq ']') { return ,$values.ToArray() }
+        if (-not $expectValue) {
+            if ($ch -ne ',') { throw 'Expected a comma between dependency strings.' }
+            $expectValue = $true; $i++; continue
+        }
+        if ($ch -ne '"' -and $ch -ne "'") { throw 'Expected a quoted dependency string.' }
+        $quote = $ch
+        $start = $i
+        if ($i + 2 -lt $Text.Length -and $Text[$i + 1] -eq $quote -and $Text[$i + 2] -eq $quote) {
+            throw 'Multiline TOML dependency strings are not supported by this parser.'
+        }
+        $i++
+        $closed = $false
+        while ($i -lt $Text.Length) {
+            $ch = $Text[$i]
+            if ($ch -eq "`r" -or $ch -eq "`n") { throw 'Unterminated dependency string.' }
+            if ($quote -eq '"' -and $ch -eq '\') {
+                # Skip the escaped character while locating the closing quote.
+                # JSON below validates/decodes the shared basic-string escapes.
+                $i += 2; continue
+            }
+            if ($ch -eq $quote) { $closed = $true; break }
+            $i++
+        }
+        if (-not $closed) { throw 'Unterminated dependency string.' }
+        $value = if ($quote -eq "'") { $Text.Substring($start + 1, $i - $start - 1) }
+                 else { ConvertFrom-Json -InputObject $Text.Substring($start, $i - $start + 1) -ErrorAction Stop }
+        $values.Add([string]$value)
+        $expectValue = $false
+        $i++
+    }
+    throw 'Unterminated dependency array.'
+}
+
 function Convert-TomlLockMetadata {
     param([string]$Text, [string]$ManifestFile, [string]$UnitType, [string]$Kind)
     $deps = [Collections.Generic.List[object]]::new()
@@ -362,12 +411,19 @@ function Convert-TomlLockMetadata {
                 -TestID 'OSV-PYPI-MALFORMED'))
         }
     } else {
-        # Conservative pyproject reader: only quoted dependency strings in a
-        # dependencies=[...] array are considered.  Complex TOML expressions
-        # remain visible as unpinned instead of being guessed.
-        foreach ($array in [regex]::Matches($Text, '(?ms)^\s*(?:optional-)?dependencies\s*=\s*\[(.*?)\]')) {
-            foreach ($quoted in [regex]::Matches($array.Groups[1].Value, '["'']([^"'']+)["'']')) {
-                $spec = ($quoted.Groups[1].Value -split ';',2)[0].Trim()
+        # Find array starts, then scan strings with quote/escape/comment state.
+        # A non-greedy closing-bracket regex loses requirements with extras.
+        foreach ($array in [regex]::Matches($Text, '(?m)^[\t ]*(?:optional-)?dependencies[\t ]*=[\t ]*\[')) {
+            try {
+                $requirements = Read-TomlDependencyArray -Text $Text -StartIndex ($array.Index + $array.Length - 1)
+            } catch {
+                $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                    -Issue "Malformed or unsupported pyproject dependency array: $($_.Exception.Message)" `
+                    -TestID 'OSV-PYPI-MALFORMED'))
+                continue
+            }
+            foreach ($requirement in $requirements) {
+                $spec = ($requirement -split ';',2)[0].Trim()
                 $plain = ([regex]::Replace($spec, '\[[^\]]*\]', '')).Trim()
                 if ($plain -match '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^=\s]+)$' -and $Matches[2] -notmatch '\*') {
                     $name = $Matches[1]; $ver = $Matches[2]

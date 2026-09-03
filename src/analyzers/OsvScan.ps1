@@ -82,11 +82,21 @@
                 if (-not ($Unit.Name.ToLowerInvariant().EndsWith('.whl') -or $Unit.Name.ToLowerInvariant().EndsWith('.egg'))) { return @() }
                 if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
                           (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return @() }
-                $metadata = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'METADATA' -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Directory.Name.ToLowerInvariant().EndsWith('.dist-info') })
+                $isEgg = $Unit.Name.ToLowerInvariant().EndsWith('.egg')
+                if ($isEgg) {
+                    # A zipped egg owns one root EGG-INFO/PKG-INFO. Do not use
+                    # unrelated/vendored distributions to infer its identity.
+                    $eggInfo = Join-Path $Unit.StagingPath 'EGG-INFO/PKG-INFO'
+                    $metadata = @(Get-Item -LiteralPath $eggInfo -ErrorAction SilentlyContinue |
+                        Where-Object { -not $_.PSIsContainer })
+                } else {
+                    $metadata = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'METADATA' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Directory.Name.ToLowerInvariant().EndsWith('.dist-info') })
+                }
+                $metadataLayout = if ($isEgg) { 'root EGG-INFO/PKG-INFO' } else { '.dist-info/METADATA' }
                 if ($metadata.Count -ne 1) {
                     return @(New-DependencyParseFinding -File $Unit.RelativePath -UnitType python -Severity MEDIUM -Confidence HIGH `
-                        -Issue "Python package has $($metadata.Count) .dist-info/METADATA files; exactly one is required for an OSV package-identity lookup." `
+                        -Issue "Python package has $($metadata.Count) $metadataLayout files; exactly one is required for an OSV package-identity lookup." `
                         -TestID 'OSV-PYPI-AMBIGUOUS-METADATA')
                 }
                 $parsed = Read-ManifestBytes $metadata[0].FullName $Unit.RelativePath 'python-metadata' 'python'

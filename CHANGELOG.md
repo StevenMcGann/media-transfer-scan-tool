@@ -25,6 +25,13 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- Corrected pyproject dependency-array parsing so quoted extras, marker quotes,
+  and comments cannot truncate the array; unsupported/malformed arrays now
+  produce an explicit coverage finding.
+- Recognized canonical `EGG-INFO/PKG-INFO` package identities in both normally
+  extracted eggs and the bounded archive-metadata fallback.
+- Added full-suite CI validation on the operator bundle's pinned PowerShell
+  runtime, alongside the GitHub-hosted runtime.
 - Reconciled the README, operator guide, test-environment runbook, public
   contract, maintainer guide, bundle guide, and roadmap with v0.13.0 behavior.
 - Clarified writable scan-root requirements, source archives versus operator

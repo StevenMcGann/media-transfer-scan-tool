@@ -1050,6 +1050,30 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
                seeded_bytes('archive-metadata-payload', 4096))
 write(os.path.join(ARCMETA_DIR, 'nested_vulnerable_wheel.zip'), buf.getvalue())
 
+# Canonical zipped-egg identity, exercised directly and inside a blocked ZIP.
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('EGG-INFO/PKG-INFO', FIXED_ZIP_DT),
+               'Metadata-Version: 1.2\nName: Pillow\nVersion: 9.5.0\n')
+    z.writestr(zipfile.ZipInfo('PIL/__init__.py', FIXED_ZIP_DT),
+               '__version__ = "9.5.0"\n')
+_metadata_egg = buf.getvalue()
+write(os.path.join(ARCMETA_DIR, 'Pillow-9.5.0-py3.egg'), _metadata_egg)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('packages/Pillow-9.5.0-py3.egg', FIXED_ZIP_DT),
+               _metadata_egg)
+write(os.path.join(ARCMETA_DIR, 'nested_egg.zip'), buf.getvalue())
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('pyproject.toml', FIXED_ZIP_DT),
+               '[project]\ndependencies = [\n'
+               '  "requests[security]==2.31.0", # ] "decoy==1"\n'
+               '  \'urllib3[socks]==1.26.5; python_version >= "3.8"\',\n'
+               '  "Pillow==9.5.0",\n]\n')
+write(os.path.join(ARCMETA_DIR, 'pyproject_extras.zip'), buf.getvalue())
+
 # The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
 # the wheel's own central directory declares a much larger expanded payload.
 # This drives Engine.ps1's NESTED semantic-container budget-blocked branch.

@@ -85,6 +85,34 @@ Describe 'Archive metadata fallback - nested wheel identity and dependencies' {
 }
 
 Describe 'Archive metadata fallback - ZIP, TAR, and manifest formats' {
+    It 'audits canonical egg identity directly and through a nested spool' -ForEach @(
+        @{ Name = 'Pillow-9.5.0-py3.egg' }, @{ Name = 'nested_egg.zip' }
+    ) {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $findings = RunMetadata $Name (New-ArchiveMetadataBudget) 'online'
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'pillow' -and $_.version -eq '9.5.0' }).Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'MTS-ARCHIVE-METADATA-ERROR').Count | Should -Be 0
+    }
+
+    It 'audits all pyproject pins after quoted extras and ignores brackets and quotes in comments' {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        RunMetadata 'pyproject_extras.zip' (New-ArchiveMetadataBudget) 'online' | Out-Null
+        @($script:CapturedQueries).Count | Should -Be 3
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'requests' -and $_.version -eq '2.31.0' }).Count | Should -Be 1
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'urllib3' -and $_.version -eq '1.26.5' }).Count | Should -Be 1
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'pillow' -and $_.version -eq '9.5.0' }).Count | Should -Be 1
+    }
+
     It 'reads METADATA from both compressed and uncompressed tar archives' -ForEach @(
         @{ Name = 'metadata.tgz' }, @{ Name = 'metadata.tar' }
     ) {
@@ -137,6 +165,99 @@ Describe 'Archive metadata fallback - ZIP, TAR, and manifest formats' {
         $classified.Unit.Type | Should -Be 'archive'
         @($classified.Findings | Where-Object TestID -eq 'MTS-DISGUISE-001').Count | Should -Be 1
         Test-IsArchiveUnit -Unit $classified.Unit | Should -BeTrue
+    }
+}
+
+Describe 'Shared pyproject parser - quoted dependency arrays' {
+    It 'keeps quoted brackets, marker quotes and escaped quotes inside one requirement' -ForEach @(
+        @{ Declaration = 'dependencies = ["requests[security]==2.31.0", "urllib3==1.26.5"]' },
+        @{ Declaration = 'dependencies = [''requests[security]==2.31.0; python_version >= "3.8"'', ''urllib3==1.26.5'']' },
+        @{ Declaration = 'dependencies = ["requests[security]==2.31.0; python_version >= \"3.8\"", "urllib3==1.26.5"]' }
+    ) {
+        $parsed = Convert-TomlLockMetadata -Text $Declaration -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 2
+        $parsed.Dependencies[0].Name | Should -Be 'requests'
+        $parsed.Dependencies[0].Version | Should -Be '2.31.0'
+        $parsed.Dependencies[1].Name | Should -Be 'urllib3'
+        @($parsed.Findings).Count | Should -Be 0
+    }
+
+    It 'reports malformed or unsupported arrays instead of silently claiming coverage' -ForEach @(
+        @{ Declaration = 'dependencies = ["requests[security]==2.31.0"' },
+        @{ Declaration = 'dependencies = ["requests[security]==2.31.0]' },
+        @{ Declaration = 'dependencies = ["requests==2.31.0" "urllib3==1.26.5"]' },
+        @{ Declaration = 'dependencies = [123]' },
+        @{ Declaration = 'dependencies = ["""requests==2.31.0"""]' }
+    ) {
+        $parsed = Convert-TomlLockMetadata -Text $Declaration -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 1
+    }
+
+    It 'accepts an empty array and reports unpinned requirements with extras' {
+        $parsed = Convert-TomlLockMetadata -Text 'dependencies = []' -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings).Count | Should -Be 0
+        $parsed = Convert-TomlLockMetadata -Text 'dependencies = ["requests[security]>=2"]' -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 1
+    }
+
+    It 'recognizes both canonical and distribution-named egg metadata' -ForEach @(
+        @{ EntryName = 'EGG-INFO/PKG-INFO' },
+        @{ EntryName = 'nested/egg-info/pkg-info' },
+        @{ EntryName = 'Pillow.egg-info/PKG-INFO' }
+    ) {
+        Get-DependencyMetadataKind -EntryName $EntryName | Should -Be 'python-metadata'
+    }
+}
+
+Describe 'OsvScan - normally extracted egg identity' {
+    It 'submits the canonical egg identity to OSV after normal extraction' {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $stage = Join-Path $TestDrive 'egg-stage'
+        [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $script:MetaDir 'Pillow-9.5.0-py3.egg'), $stage)
+        $unit = (New-Unit -File (Get-Item (Join-Path $script:MetaDir 'Pillow-9.5.0-py3.egg')) -ScanRoot $script:MetaDir).Unit
+        $unit.StagingPath = $stage
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        $findings = @(& $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }))
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'pillow' -and $_.version -eq '9.5.0' }).Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-AMBIGUOUS-METADATA').Count | Should -Be 0
+    }
+
+    It 'reports missing egg identity rather than using a vendored wheel identity' {
+        Mock Invoke-OsvQueryBatch { throw 'No identity should be queried' }
+        $stage = Join-Path $TestDrive 'egg-without-identity'
+        $vendored = Join-Path $stage 'vendor/Other.dist-info'
+        New-Item -ItemType Directory -Path $vendored -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $vendored 'METADATA') -Value "Name: Other`nVersion: 1.0"
+        $unit = (New-Unit -File (Get-Item (Join-Path $script:MetaDir 'Pillow-9.5.0-py3.egg')) -ScanRoot $script:MetaDir).Unit
+        $unit.StagingPath = $stage
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        $findings = @(& $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }))
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-AMBIGUOUS-METADATA').Count | Should -Be 1
+        Should -Invoke Invoke-OsvQueryBatch -Times 0
+    }
+
+    It 'uses the same extras-safe parser for a loose pyproject manifest' {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $manifest = Join-Path $TestDrive 'pyproject.toml'
+        Set-Content -LiteralPath $manifest -Value '[project]','dependencies = ["requests[security]==2.31.0", "urllib3==1.26.5"]'
+        $unit = (New-Unit -File (Get-Item $manifest) -ScanRoot $TestDrive).Unit
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        & $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }) | Out-Null
+        @($script:CapturedQueries).Count | Should -Be 2
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'requests' -and $_.version -eq '2.31.0' }).Count | Should -Be 1
     }
 }
 

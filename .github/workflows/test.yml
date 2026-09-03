@@ -40,6 +40,24 @@ jobs:
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -CI
 
+      - name: Test the pinned operator-bundle runtime
+        shell: pwsh
+        run: |
+          # Hosted pwsh can be newer than the offline bundle. Exercise the full
+          # suite on the actual pinned runtime as well (including ZIP APIs).
+          $bundleScript = Get-Content ./bundle/build-bundle.ps1 -Raw
+          $pin = [regex]::Match($bundleScript, '\$PwshVersion\s*=\s*''([^'']+)''')
+          if (-not $pin.Success) { throw 'Could not read the bundled PowerShell version pin.' }
+          $version = $pin.Groups[1].Value
+          $runtimeDir = Join-Path $env:RUNNER_TEMP "mts-pwsh-$version"
+          $runtimeZip = "$runtimeDir.zip"
+          Invoke-WebRequest "https://github.com/PowerShell/PowerShell/releases/download/v$version/PowerShell-$version-win-x64.zip" -OutFile $runtimeZip
+          Expand-Archive -LiteralPath $runtimeZip -DestinationPath $runtimeDir
+          $pwsh = Join-Path $runtimeDir 'pwsh.exe'
+          & $pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString(); [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription'
+          & $pwsh -NoProfile -File ./tests/Run-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Smoke test — operator entry point (cmd -> WinPS 5.1 -> bootstrap -> pwsh 7 -> engine)
         shell: cmd
         # Faithfully runs the real operator chain via Scan.cmd. The committed

@@ -28,6 +28,9 @@ validation against real untrusted transfers**, not a second contract freeze (see
 - Corrected pyproject dependency-array parsing so quoted extras, marker quotes,
   and comments cannot truncate the array; unsupported/malformed arrays now
   produce an explicit coverage finding.
+- Included standard `[project.optional-dependencies]` groups in both manifest
+  scan paths and report each unresolved Poetry/uv package block, even when
+  other blocks contain valid identities.
 - Recognized canonical `EGG-INFO/PKG-INFO` package identities in both normally
   extracted eggs and the bounded archive-metadata fallback.
 - Added full-suite CI validation on the operator bundle's pinned PowerShell

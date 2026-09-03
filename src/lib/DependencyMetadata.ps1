@@ -341,6 +341,49 @@ function Convert-NuspecMetadata {
     [PSCustomObject]@{ Dependencies = $deps.ToArray(); Findings = $findings.ToArray() }
 }
 
+function Get-TomlMetadataStatements {
+    <# Split bounded TOML into statements without interpreting headers/keys in
+       comments, quoted descriptions, or multiline arrays as real metadata. #>
+    param([string]$Text)
+    $statements = [Collections.Generic.List[string]]::new()
+    $start = 0; $depth = 0; $quote = ''; $multiline = $false
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $ch = $Text[$i]
+        if ($quote) {
+            if ($quote -eq '"' -and $ch -eq '\') { $i++; continue }
+            if ($ch -eq $quote) {
+                if (-not $multiline) { $quote = '' }
+                elseif ($i + 2 -lt $Text.Length -and $Text[$i + 1] -eq $quote -and $Text[$i + 2] -eq $quote) {
+                    # TOML permits one/two literal quotes immediately before
+                    # a triple-quote terminator (four/five consecutive quotes).
+                    $end = $i + 3
+                    while ($end -lt $Text.Length -and $Text[$end] -eq $quote) { $end++ }
+                    $quote = ''; $i = $end - 1
+                }
+            }
+            continue
+        }
+        if ($ch -eq '#') {
+            while ($i -lt $Text.Length -and $Text[$i] -ne "`n") { $i++ }
+            if ($i -ge $Text.Length) { break }
+            $ch = "`n"
+        }
+        if ($ch -eq '"' -or $ch -eq "'") {
+            $quote = [string]$ch
+            $multiline = $i + 2 -lt $Text.Length -and $Text[$i + 1] -eq $ch -and $Text[$i + 2] -eq $ch
+            if ($multiline) { $i += 2 }
+        } elseif ($ch -eq '[' -or $ch -eq '{') { $depth++ }
+        elseif ($ch -eq ']' -or $ch -eq '}') { $depth = [Math]::Max(0, $depth - 1) }
+        elseif ($ch -eq "`n" -and $depth -eq 0) {
+            $statements.Add($Text.Substring($start, $i - $start).Trim())
+            $start = $i + 1
+        }
+    }
+    if ($quote -or $depth -ne 0) { throw 'Unterminated TOML string, array, or inline table.' }
+    if ($start -lt $Text.Length) { $statements.Add($Text.Substring($start).Trim()) }
+    return $statements.ToArray()
+}
+
 function Read-TomlDependencyArray {
     <# Read a bounded manifest's string array, not a general TOML document.
        Brackets/comments only delimit tokens outside quotes. Unsupported TOML
@@ -396,26 +439,46 @@ function Convert-TomlLockMetadata {
     $findings = [Collections.Generic.List[object]]::new()
     if ($Kind -in @('poetry-lock','uv-lock')) {
         $blocks = @([regex]::Split($Text, '(?m)^\s*\[\[package\]\]\s*$') | Select-Object -Skip 1)
+        $blockNumber = 0
         foreach ($block in $blocks) {
+            $blockNumber++
             $nm = [regex]::Match($block, '(?m)^\s*name\s*=\s*["'']([^"'']+)["'']\s*$')
             $vm = [regex]::Match($block, '(?m)^\s*version\s*=\s*["'']([^"'']+)["'']\s*$')
             if ($nm.Success -and $vm.Success) {
                 $deps.Add((New-ParsedDependency -Name (Get-Pep503NormalizedName -Name $nm.Groups[1].Value) `
                     -Version $vm.Groups[1].Value -Ecosystem PyPI -ManifestFile $ManifestFile `
                     -DepLabel "$($nm.Groups[1].Value) $($vm.Groups[1].Value)"))
+            } else {
+                $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                    -Issue "TOML lock package block $blockNumber could not be resolved to an exact name/version pair." `
+                    -TestID 'OSV-PYPI-MALFORMED'))
             }
         }
-        if ($blocks.Count -gt 0 -and $deps.Count -eq 0) {
-            $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
-                -Issue 'TOML lock file contains package blocks that could not be resolved to exact name/version pairs.' `
-                -TestID 'OSV-PYPI-MALFORMED'))
-        }
     } else {
-        # Find array starts, then scan strings with quote/escape/comment state.
-        # A non-greedy closing-bracket regex loses requirements with extras.
-        foreach ($array in [regex]::Matches($Text, '(?m)^[\t ]*(?:optional-)?dependencies[\t ]*=[\t ]*\[')) {
+        # PEP 621 uses dependencies in [project], but arbitrary group keys in
+        # [project.optional-dependencies]. Other TOML tables are not package
+        # declarations. Statement scanning also excludes quoted example text.
+        $table = ''
+        try { $statements = @(Get-TomlMetadataStatements -Text $Text) }
+        catch {
+            $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
+                -Issue "Malformed pyproject TOML: $($_.Exception.Message)" -TestID 'OSV-PYPI-MALFORMED'))
+            return [PSCustomObject]@{ Dependencies = @(); Findings = $findings.ToArray() }
+        }
+        foreach ($statement in $statements) {
+            if ($statement.StartsWith('[')) {
+                $table = if ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\]\s*(?:#.*)?$') { 'project' }
+                    elseif ($statement -cmatch '^\[\s*(?:project|"project"|''project'')\s*\.\s*(?:optional-dependencies|"optional-dependencies"|''optional-dependencies'')\s*\]\s*(?:#.*)?$') { 'optional' }
+                    else { '' }
+                continue
+            }
+            if (-not $table) { continue }
+            $assignment = [regex]::Match($statement, '(?s)^(?<key>[A-Za-z0-9_-]+|''[^''\r\n]*''|"(?:[^"\\\r\n]|\\.)*")\s*=\s*(?<value>.*)$')
+            if (-not $assignment.Success) { continue }
+            if ($table -eq 'project' -and $assignment.Groups['key'].Value -cnotmatch '^(?:dependencies|"dependencies"|''dependencies'')$') { continue }
             try {
-                $requirements = Read-TomlDependencyArray -Text $Text -StartIndex ($array.Index + $array.Length - 1)
+                if (-not $assignment.Groups['value'].Value.StartsWith('[')) { throw 'Expected a dependency string array.' }
+                $requirements = Read-TomlDependencyArray -Text $statement -StartIndex $assignment.Groups['value'].Index
             } catch {
                 $findings.Add((New-DependencyParseFinding -File $ManifestFile -UnitType $UnitType `
                     -Issue "Malformed or unsupported pyproject dependency array: $($_.Exception.Message)" `

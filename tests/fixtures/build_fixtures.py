@@ -1074,6 +1074,19 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
                '  "Pillow==9.5.0",\n]\n')
 write(os.path.join(ARCMETA_DIR, 'pyproject_extras.zip'), buf.getvalue())
 
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr(zipfile.ZipInfo('pyproject.toml', FIXED_ZIP_DT),
+               '[project.optional-dependencies]\n'
+               'security = ["requests[security]==2.31.0"]\n'
+               '\'docs\' = ["urllib3==1.26.5", "Sphinx>=7"]\n')
+    for lock_name in ('poetry.lock', 'uv.lock'):
+        z.writestr(zipfile.ZipInfo(lock_name, FIXED_ZIP_DT),
+                   '[[package]]\nname = "Pillow"\nversion = "9.5.0"\n'
+                   '[[package]]\nname = "missing-version"\n'
+                   '[[package]]\nversion = "1.0"\n')
+write(os.path.join(ARCMETA_DIR, 'optional_and_mixed_locks.zip'), buf.getvalue())
+
 # The outer ZIP is small enough to pass a tight archive-tree look-ahead, while
 # the wheel's own central directory declares a much larger expanded payload.
 # This drives Engine.ps1's NESTED semantic-container budget-blocked branch.

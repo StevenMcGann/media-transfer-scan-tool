@@ -174,7 +174,7 @@ Describe 'Shared pyproject parser - quoted dependency arrays' {
         @{ Declaration = 'dependencies = [''requests[security]==2.31.0; python_version >= "3.8"'', ''urllib3==1.26.5'']' },
         @{ Declaration = 'dependencies = ["requests[security]==2.31.0; python_version >= \"3.8\"", "urllib3==1.26.5"]' }
     ) {
-        $parsed = Convert-TomlLockMetadata -Text $Declaration -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        $parsed = Convert-TomlLockMetadata -Text "[project]`n$Declaration" -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
         @($parsed.Dependencies).Count | Should -Be 2
         $parsed.Dependencies[0].Name | Should -Be 'requests'
         $parsed.Dependencies[0].Version | Should -Be '2.31.0'
@@ -189,16 +189,16 @@ Describe 'Shared pyproject parser - quoted dependency arrays' {
         @{ Declaration = 'dependencies = [123]' },
         @{ Declaration = 'dependencies = ["""requests==2.31.0"""]' }
     ) {
-        $parsed = Convert-TomlLockMetadata -Text $Declaration -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        $parsed = Convert-TomlLockMetadata -Text "[project]`n$Declaration" -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
         @($parsed.Dependencies).Count | Should -Be 0
         @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 1
     }
 
     It 'accepts an empty array and reports unpinned requirements with extras' {
-        $parsed = Convert-TomlLockMetadata -Text 'dependencies = []' -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        $parsed = Convert-TomlLockMetadata -Text "[project]`ndependencies = []" -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
         @($parsed.Dependencies).Count | Should -Be 0
         @($parsed.Findings).Count | Should -Be 0
-        $parsed = Convert-TomlLockMetadata -Text 'dependencies = ["requests[security]>=2"]' -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        $parsed = Convert-TomlLockMetadata -Text ("[project]`n" + 'dependencies = ["requests[security]>=2"]') -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
         @($parsed.Dependencies).Count | Should -Be 0
         @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 1
     }
@@ -258,6 +258,135 @@ Describe 'OsvScan - normally extracted egg identity' {
         & $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }) | Out-Null
         @($script:CapturedQueries).Count | Should -Be 2
         @($script:CapturedQueries | Where-Object { $_.package.name -eq 'requests' -and $_.version -eq '2.31.0' }).Count | Should -Be 1
+    }
+}
+
+Describe 'TOML coverage - optional groups and mixed-validity locks' {
+    It 'tracks optional tables and ignores dependency examples and unrelated tool tables' {
+        $text = @'
+[project]
+description = """
+[project.optional-dependencies]
+fake = ["decoy==1.0"]
+"""
+dependencies = ["Pillow==9.5.0"]
+[project.optional-dependencies] # actual optional groups
+security = [
+  "requests[security]==2.31.0", # ] not an array terminator
+]
+'docs' = ['urllib3==1.26.5; python_version >= "3.8"', "Sphinx>=7"]
+[tool.example]
+dependencies = ["not-a-project-dependency==1.0"]
+other = ["also-not-a-dependency==2.0"]
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies.Name | Sort-Object) | Should -Be @('pillow', 'requests', 'urllib3')
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 1
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 0
+    }
+
+    It 'accepts quoted optional table names and group keys' {
+        $text = @'
+["project" . 'optional-dependencies']
+"security-extra" = ["requests[security]==2.31.0"]
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 1
+        $parsed.Dependencies[0].Name | Should -Be 'requests'
+    }
+
+    It 'does not lose real declarations after a quoted multiline-string terminator' {
+        $text = @'
+[project]
+description = """Example ending in a quoted word: "word""""
+dependencies = ["Pillow==9.5.0"]
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 1
+        @($parsed.Findings).Count | Should -Be 0
+    }
+
+    It 'reports a truncated description that would hide later optional groups' {
+        $text = @'
+[project]
+description = """unfinished
+[project.optional-dependencies]
+security = ["requests==2.31.0"]
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 1
+    }
+
+    It 'reports an optional group that is not a string array while preserving later valid groups' {
+        $text = @'
+[project.optional-dependencies]
+bad = { version = "1" }
+good = ["Pillow==9.5.0"]
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'pyproject.toml' -UnitType python-requirements -Kind pyproject
+        @($parsed.Dependencies).Count | Should -Be 1
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 1
+    }
+
+    It 'reports each malformed package block while retaining valid blocks' -ForEach @(
+        @{ Kind='poetry-lock'; File='poetry.lock' }, @{ Kind='uv-lock'; File='uv.lock' }
+    ) {
+        $text = @'
+[[package]]
+name = "missing-version"
+[[package]]
+name = "Pillow"
+version = "9.5.0"
+[[package]]
+version = "1.0"
+'@
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile $File -UnitType python-requirements -Kind $Kind
+        @($parsed.Dependencies).Count | Should -Be 1
+        $parsed.Dependencies[0].Name | Should -Be 'pillow'
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 2
+    }
+
+    It 'preserves every missing-block warning when all package blocks are invalid' -ForEach @(
+        @{ Kind='poetry-lock' }, @{ Kind='uv-lock' }
+    ) {
+        $text = "[[package]]`nname = 'missing-version'`n[[package]]`nversion = '1.0'"
+        $parsed = Convert-TomlLockMetadata -Text $text -ManifestFile 'lock' -UnitType python-requirements -Kind $Kind
+        @($parsed.Dependencies).Count | Should -Be 0
+        @($parsed.Findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 2
+    }
+
+    It 'queries optional-only dependencies and reports incomplete locks inside a blocked archive' {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $findings = RunMetadata 'optional_and_mixed_locks.zip' (New-ArchiveMetadataBudget) 'online'
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq 'requests' -and $_.version -eq '2.31.0' }).Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be 4
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-UNPINNED').Count | Should -Be 1
+    }
+
+    It 'uses the same TOML coverage rules on normal loose manifests' -ForEach @(
+        @{ File='pyproject.toml'; Name='requests'; Malformed=0 },
+        @{ File='poetry.lock'; Name='pillow'; Malformed=2 },
+        @{ File='uv.lock'; Name='pillow'; Malformed=2 }
+    ) {
+        $script:CapturedQueries = @()
+        Mock Invoke-OsvQueryBatch {
+            param($Queries, $TimeoutSec)
+            $script:CapturedQueries += @($Queries)
+            @($Queries | ForEach-Object { [PSCustomObject]@{} })
+        }
+        $stage = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $script:MetaDir 'optional_and_mixed_locks.zip'), $stage)
+        $unit = (New-Unit -File (Get-Item (Join-Path $stage $File)) -ScanRoot $stage).Unit
+        $analyzer = & (Join-Path $script:Analyzers 'OsvScan.ps1')
+        $findings = @(& $analyzer.Invoke $unit ([PSCustomObject]@{ Mode='online' }))
+        @($script:CapturedQueries | Where-Object { $_.package.name -eq $Name }).Count | Should -Be 1
+        @($findings | Where-Object TestID -eq 'OSV-PYPI-MALFORMED').Count | Should -Be $Malformed
     }
 }
 

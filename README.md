@@ -6,7 +6,7 @@ A Windows-focused static security scanner for reviewing untrusted files before t
 
 Point the scanner at a submission folder and it will inventory, classify, hash, and route the files through the appropriate analyzers. Each scan produces a durable report in JSON, HTML, and text formats.
 
-> **Status:** **v0.13.0** is the current release. The development branch targets **v0.14.0** and adds bounded metadata-only dependency auditing when an archive cannot be fully extracted within the shared safety budget. Every originally planned file-type family remains implemented: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives.
+> **Status:** **v0.14.0** is the current release. It adds bounded metadata-only dependency auditing when an archive cannot be fully extracted within the shared safety budget. Every originally planned file-type family remains implemented: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives.
 >
 > The JSON schema and CLI contract have been frozen since v0.9.0; see [docs/contract.md](docs/contract.md). The package remains on the 0.x line while it is validated against real untrusted transfers on an isolated host. That operational validation—not another planned file-type family—is the remaining gate for v1.0.0. See [PLAN.md](PLAN.md).
 
@@ -59,7 +59,7 @@ For the stable JSON schema, analyzer contract, CLI surface, and exit codes, see 
 
 ## Running the Packaged Tool
 
-The operator bundle is the preferred way to run the scanner on Windows. It includes the supported PowerShell runtime and scanner dependencies, so the review host does not require a separate installation.
+The operator bundle is the preferred way to run the scanner on Windows. It includes the supported PowerShell and Python runtimes plus scanner dependencies, so the review host does not require a separate installation.
 
 An operator bundle is a ZIP produced by `bundle/build-bundle.ps1`; GitHub's automatically generated "Source code" archives are not operator bundles. If a release does not include a `media-transfer-scan-tool-<version>.zip` asset, a maintainer must build the bundle on a connected development host by following [bundle/README.md](bundle/README.md), then deliver it through the controlled channel described in [docs/test-environment.md](docs/test-environment.md).
 

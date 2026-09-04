@@ -7,11 +7,11 @@ requirements in [../PLAN.md](../PLAN.md).
 ## Build (on a connected dev host)
 
 ```powershell
-# Full v0.13.0 operator bundle (downloads the pinned pwsh 7.4 LTS patch and builds the scanner venv):
-pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -Zip
+# Full v0.14.0 operator bundle (downloads the pinned pwsh 7.4 LTS patch and builds the scanner venv):
+pwsh ./bundle/build-bundle.ps1 -Version 0.14.0 -PwshVersion 7.4.19 -Zip
 
 # Using a pre-downloaded portable pwsh zip instead of fetching it:
-pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -PwshZip C:\downloads\PowerShell-7.4.19-win-x64.zip -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.14.0 -PwshVersion 7.4.19 -PwshZip C:\downloads\PowerShell-7.4.19-win-x64.zip -Zip
 
 # Skeleton (layout only — NOT operator-ready; for testing the build itself):
 pwsh ./bundle/build-bundle.ps1 -SkipPwsh -SkipVenv
@@ -25,12 +25,13 @@ media-transfer-scan-tool-<version>/
   bootstrap.ps1         5.1-safe launcher (resolves PS 7.4+, runs the engine)
   src/                  engine + lib + analyzers + helpers
   tools/pwsh/           vendored portable PowerShell 7.4 (Windows x64)
-  tools/venv/           vendored scanner venv (bandit, pip-audit, detect-secrets, pefile, pyelftools)
+  tools/python/         vendored Python embeddable runtime (Windows x64)
+  tools/venv/           vendored scanner packages (bandit, pip-audit, detect-secrets, pefile, pyelftools)
   manifest.json         bundle/tool versions, build date, completeness flag, sealed-file hashes
 ```
 
-`manifest.json` has `complete: true` only when both the runtime and venv are
-vendored. The bootstrapper verifies its sealed-file SHA-256 values and prefers
+`manifest.json` has `complete: true` only when the PowerShell runtime, Python
+runtime, and scanner packages are vendored. The bootstrapper verifies its sealed-file SHA-256 values and prefers
 `tools/pwsh` (authoritative). When `tools/venv` exists, the engine uses those
 vendored tools but keeps the requested mode: online by default, or offline only
 when the operator passes `-Mode offline`.

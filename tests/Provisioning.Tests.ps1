@@ -42,6 +42,37 @@ Describe 'Initialize-ScannerVenv' {
     }
 }
 
+Describe 'Bundled Python runtime resolution' {
+    It 'prefers the relocatable sibling runtime over the build-time venv launcher' {
+        $root = Join-Path $env:TEMP "mts-bundled-python-$(Get-Random)"
+        $venvDir = Join-Path $root 'venv'
+        $pythonDir = Join-Path $root 'python'
+        New-Item -ItemType Directory -Path (Join-Path $venvDir 'Scripts'),$pythonDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $venvDir 'Scripts/python.exe') -Value 'venv launcher' -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $pythonDir 'python.exe') -Value 'portable runtime' -Encoding ascii
+        try {
+            $paths = Get-VenvPaths -VenvDir $venvDir
+            $paths.Python | Should -Be (Join-Path $pythonDir 'python.exe')
+            $paths.Scripts | Should -Be (Join-Path $venvDir 'Scripts')
+        } finally {
+            Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'does not require PATH Python when a bundled interpreter is present' {
+        $python = (Get-VenvPaths -VenvDir $script:TestVenv).Python
+        $analyzer = [PSCustomObject]@{
+            RequiredTools = @([PSCustomObject]@{ Kind='pip'; Id='test-package'; MinVersion='1.0'; BundlePath=$null })
+        }
+        Mock Find-Python { throw 'PATH discovery must not run' }
+        Mock Get-VenvPaths { param($VenvDir) [PSCustomObject]@{ Root=$VenvDir; Python=$python; Pip=''; Scripts=(Split-Path $python) } }
+        Mock Resolve-PipTool { [PSCustomObject]@{ Name='test-package'; Available=$true; Version='1.0'; ScriptsDir='' } }
+        $result = Invoke-Provisioning -EnabledAnalyzers @($analyzer) -VenvDir 'X:\bundled\venv' -Mode offline
+        $result.Venv.Python | Should -Be $python
+        Should -Invoke Find-Python -Times 0 -Exactly
+    }
+}
+
 Describe 'Compare-PipVersions (PEP 440)' {
     BeforeAll {
         $py = Find-Python

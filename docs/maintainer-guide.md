@@ -47,15 +47,16 @@ fails if any new detection appears. Run it after touching analyzer signatures.
 ## Build the offline bundle
 On a **connected** host:
 ```powershell
-pwsh ./bundle/build-bundle.ps1 -Version 0.13.0 -PwshVersion 7.4.19 -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.14.0 -PwshVersion 7.4.19 -Zip
 ```
-Produces `bundle/out/media-transfer-scan-tool-0.13.0/` (+ `.zip`) containing the
-engine, a vendored portable **PowerShell 7.4 LTS**, the scanner **venv**, and
+Produces `bundle/out/media-transfer-scan-tool-0.14.0/` (+ `.zip`) containing the
+engine, vendored portable **PowerShell 7.4 LTS** and **Python 3.12** runtimes,
+the scanner package environment, and
 `manifest.json`. Flags: `-PwshZip <path>` to use a pre-downloaded pwsh,
 `-SkipPwsh`/`-SkipVenv` for layout-only test builds.
 
 Use the current project version and current PowerShell 7.4 LTS patch for each
-release. The version values above describe v0.13.0; the release checklist below
+release. The version values above describe v0.14.0; the release checklist below
 requires updating them for later releases. GitHub's automatically generated
 source archives are not operator-ready bundles.
 

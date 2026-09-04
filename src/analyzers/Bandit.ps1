@@ -38,17 +38,22 @@
                 -Recommendation 'Run with -AutoInstall (online) or vendor bandit in the offline bundle.')
         }
         $banditExe = Join-Path $tool.ScriptsDir 'bandit.exe'
-        if (-not (Test-Path -LiteralPath $banditExe)) {
+        $pythonExe = $Context.Venv?.Python
+        if ((-not $pythonExe -or -not (Test-Path -LiteralPath $pythonExe)) -and
+            -not (Test-Path -LiteralPath $banditExe)) {
             return @(New-Finding -Tool 'Bandit' -Category 'parser' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType 'python' -File $Unit.RelativePath `
-                -Issue "bandit.exe not found at '$banditExe'." -TestID 'MTS-BANDIT-MISSING')
+                -Issue 'Bandit module/launcher is unavailable.' -TestID 'MTS-BANDIT-MISSING')
         }
 
         $tmpJson  = Join-Path $env:TEMP "mts_bandit_$([IO.Path]::GetRandomFileName()).json"
         $findings = [System.Collections.Generic.List[object]]::new()
         try {
             # -ll : report MEDIUM and HIGH severity only (cuts low-value noise)
-            $r = Invoke-BoundedProcess -FilePath $banditExe -Arguments @('-r', $target, '-ll', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            $command = if ($pythonExe -and (Test-Path -LiteralPath $pythonExe)) { $pythonExe } else { $banditExe }
+            $arguments = if ($command -eq $pythonExe) { @('-m', 'bandit', '-r', $target, '-ll', '-f', 'json', '-o', $tmpJson) }
+                         else { @('-r', $target, '-ll', '-f', 'json', '-o', $tmpJson) }
+            $r = Invoke-BoundedProcess -FilePath $command -Arguments $arguments -TimeoutSeconds $Context.TimeoutSeconds
             if (-not $r.Started) {
                 return @(New-ToolBlockedFinding -Tool 'Bandit' -UnitType 'python' -File $Unit.RelativePath -Reason $r.StartError)
             }

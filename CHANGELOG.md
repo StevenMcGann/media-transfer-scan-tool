@@ -9,6 +9,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-03
+
 ### Added
 - Added a scan-wide, resource-bounded metadata-only dependency fallback for
   ZIP, wheel, NuGet, TAR, and TGZ containers that cannot be normally extracted
@@ -25,6 +27,13 @@ validation against real untrusted transfers**, not a second contract freeze (see
   unaudited rather than being guessed.
 
 ### Changed
+- The complete operator bundle now vendors a relocatable Python 3.12 runtime
+  alongside PowerShell and invokes Python analyzers as modules, removing the
+  build-host paths embedded by Windows virtual-environment launchers and the
+  need for a system Python installation on the scanning workstation. Bundle
+  assembly also excludes host-generated Python bytecode/cache artifacts.
+- Fixed a case-insensitive variable collision that prevented production bundle
+  builds using the `-Zip` switch from completing.
 - Recover metadata after ordinary archive-member budget skips, excluding
   already-audited manifests/containers, and recognize unpacked canonical
   `EGG-INFO/PKG-INFO` files during normal member classification.

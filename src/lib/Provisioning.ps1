@@ -83,9 +83,18 @@ function Find-Python {
 
 function Get-VenvPaths {
     param([string]$VenvDir)
+    # A production bundle carries the relocatable Python embeddable runtime as
+    # a sibling of tools/venv. Its ._pth file points at this venv's installed
+    # packages. Source/dev venvs keep using Scripts/python.exe.
+    $bundledPython = Join-Path (Split-Path $VenvDir -Parent) 'python\python.exe'
+    $pythonExe = if (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+        $bundledPython
+    } else {
+        Join-Path $VenvDir 'Scripts\python.exe'
+    }
     [PSCustomObject]@{
         Root    = $VenvDir
-        Python  = Join-Path $VenvDir 'Scripts\python.exe'
+        Python  = $pythonExe
         Pip     = Join-Path $VenvDir 'Scripts\pip.exe'
         Scripts = Join-Path $VenvDir 'Scripts'
     }
@@ -390,9 +399,15 @@ function Invoke-Provisioning {
     # (and don't fail) when scanning, say, only PowerShell on a Python-less host.
     $venv = $null
     if (@($allTools | Where-Object { $_.Kind -eq 'pip' }).Count -gt 0) {
-        $pythonCmd = Find-Python
-        if (-not $pythonCmd) { throw 'Python 3 is required for the enabled pip-based analyzers but was not found on PATH.' }
-        $venv = Initialize-ScannerVenv -PythonCmd $pythonCmd -VenvDir $VenvDir
+        $existing = Get-VenvPaths -VenvDir $VenvDir
+        if (Test-Path -LiteralPath $existing.Python -PathType Leaf) {
+            $venv = $existing
+            Write-Log -Level INFO -Message "Reusing bundled/existing scanner environment: $VenvDir"
+        } else {
+            $pythonCmd = Find-Python
+            if (-not $pythonCmd) { throw 'Python 3 is required for the enabled pip-based analyzers but no bundled or PATH interpreter was found.' }
+            $venv = Initialize-ScannerVenv -PythonCmd $pythonCmd -VenvDir $VenvDir
+        }
         if ($Mode -eq 'online') {
             Update-PipBootstrap -PythonExe $venv.Python
         } else {

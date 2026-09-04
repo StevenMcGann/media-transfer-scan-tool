@@ -42,11 +42,17 @@
                 -Recommendation 'Run with -AutoInstall (online) or vendor detect-secrets in the offline bundle.')
         }
         $dsExe = Join-Path $tool.ScriptsDir 'detect-secrets.exe'
-        if (-not (Test-Path -LiteralPath $dsExe)) {
+        $pythonExe = $Context.Venv?.Python
+        if ((-not $pythonExe -or -not (Test-Path -LiteralPath $pythonExe)) -and
+            -not (Test-Path -LiteralPath $dsExe)) {
             return @(New-Finding -Tool 'DetectSecrets' -Category 'parser' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType 'python' -File $Unit.RelativePath `
-                -Issue "detect-secrets.exe not found at '$dsExe'." -TestID 'MTS-SECRETS-MISSING')
+                -Issue 'detect-secrets module/launcher is unavailable.' -TestID 'MTS-SECRETS-MISSING')
         }
+        $dsCommand = if ($pythonExe -and (Test-Path -LiteralPath $pythonExe)) { $pythonExe } else { $dsExe }
+        $dsPrefix = if ($dsCommand -eq $pythonExe) {
+            @('-c', 'from detect_secrets.main import main; main()')
+        } else { @() }
 
         # Resolve scan dir + arg so detect-secrets emits clean relative paths.
         if (Test-Path -LiteralPath $target -PathType Leaf) {
@@ -63,7 +69,7 @@
             # WorkingDirectory replaces Push-Location; the helper keeps stdout (the
             # JSON) and stderr separate, so detect-secrets' stderr progress noise
             # never pollutes the JSON we persist.
-            $r = Invoke-BoundedProcess -FilePath $dsExe -Arguments @('scan', '--all-files', '--no-verify', $scanArg) `
+            $r = Invoke-BoundedProcess -FilePath $dsCommand -Arguments @($dsPrefix + @('scan', '--all-files', '--no-verify', $scanArg)) `
                 -TimeoutSeconds $Context.TimeoutSeconds -WorkingDirectory $pushDir
             if (-not $r.Started) {
                 return @(New-ToolBlockedFinding -Tool 'DetectSecrets' -UnitType $Unit.Type -File $Unit.RelativePath -Reason $r.StartError)

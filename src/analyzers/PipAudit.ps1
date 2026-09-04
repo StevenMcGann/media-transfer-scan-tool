@@ -49,12 +49,16 @@
         }
 
         $auditExe = Join-Path $toolHandle.ScriptsDir 'pip-audit.exe'
-        if (-not (Test-Path -LiteralPath $auditExe)) {
+        $pythonExe = $Context.Venv?.Python
+        if ((-not $pythonExe -or -not (Test-Path -LiteralPath $pythonExe)) -and
+            -not (Test-Path -LiteralPath $auditExe)) {
             return @(New-Finding -Tool 'PipAudit' -Category 'parser' -Severity 'INFO' `
                 -Confidence 'HIGH' -UnitType 'python' -File $Unit.RelativePath `
-                -Issue "pip-audit.exe not found at '$auditExe'." `
+                -Issue 'pip-audit module/launcher is unavailable.' `
                 -TestID 'MTS-PIPAUDIT-MISSING')
         }
+        $auditCommand = if ($pythonExe -and (Test-Path -LiteralPath $pythonExe)) { $pythonExe } else { $auditExe }
+        $auditPrefix = if ($auditCommand -eq $pythonExe) { @('-m', 'pip_audit') } else { @() }
 
         # ── Extract Requires-Dist from METADATA ──────────────────────────────
         $metaFiles = @(Get-ChildItem -LiteralPath $scanPath -Recurse -File `
@@ -91,7 +95,7 @@
             # PS 7: no EAP wrapper needed; pip-audit stderr doesn't trigger Stop.
             # --no-deps --disable-pip: audit only what the package declares, not
             # the scanner's own environment. Pattern carried from v1.6.1.
-            $r = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'json', '-o', $tmpJson) -TimeoutSeconds $Context.TimeoutSeconds
+            $r = Invoke-BoundedProcess -FilePath $auditCommand -Arguments @($auditPrefix + @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'json', '-o', $tmpJson)) -TimeoutSeconds $Context.TimeoutSeconds
             if (-not $r.Started) {
                 return @(New-ToolBlockedFinding -Tool 'PipAudit' -UnitType 'python' -File $Unit.RelativePath -Reason $r.StartError)
             }
@@ -146,7 +150,7 @@
             $tmpSbom  = Join-Path $env:TEMP "mts_sbom_$([IO.Path]::GetRandomFileName()).json"
 
             try {
-                $rs = Invoke-BoundedProcess -FilePath $auditExe -Arguments @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'cyclonedx-json', '-o', $tmpSbom) -TimeoutSeconds $Context.TimeoutSeconds
+                $rs = Invoke-BoundedProcess -FilePath $auditCommand -Arguments @($auditPrefix + @('-r', $reqFile, '--no-deps', '--disable-pip', '-f', 'cyclonedx-json', '-o', $tmpSbom)) -TimeoutSeconds $Context.TimeoutSeconds
                 if (-not $rs.Started) {
                     Write-Log -Level WARN -Message "PipAudit: SBOM generation could not start for $($Unit.RelativePath) - skipped: $($rs.StartError)"
                     Remove-Item -LiteralPath $tmpSbom -Force -ErrorAction SilentlyContinue

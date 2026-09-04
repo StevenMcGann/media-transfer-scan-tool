@@ -44,6 +44,19 @@ $script:MaxEntryCount        = 50000    # absurd entry counts are bomb-like
 # Extensions that indicate a nested archive (flagged, not recursively expanded).
 $script:NestedArchiveExt = @('.zip', '.whl', '.egg', '.jar', '.tgz', '.gz', '.tar', '.7z', '.rar', '.bz2', '.xz')
 
+function Test-ZipFileMagic {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $header = [byte[]]::new(4)
+        $stream = [IO.File]::OpenRead($Path)
+        try { $read = $stream.Read($header, 0, $header.Length) }
+        finally { $stream.Dispose() }
+        return $read -eq 4 -and $header[0] -eq 0x50 -and $header[1] -eq 0x4B -and
+               (($header[2] -eq 0x03 -and $header[3] -eq 0x04) -or
+                ($header[2] -eq 0x05 -and $header[3] -eq 0x06))
+    } catch { return $false }
+}
+
 function Test-ZipArchiveHazards {
     <#
         Inspect a ZIP's entries (without extracting) for path traversal,
@@ -386,7 +399,7 @@ function Expand-SubmissionArchive {
         shared archive-tree budget from Engine.ps1; passed straight through to
         Expand-TarArchive, the only extraction path here where the archive's
         own uncompressed size can't be known before writing starts.
-        Returns @{ Success; StagingPath; Findings }.
+        Returns @{ Success; StagingPath; Findings; BudgetStopped } on success.
     #>
     param(
         [Parameter(Mandatory)][string]$InputFile,
@@ -396,13 +409,22 @@ function Expand-SubmissionArchive {
 
     $findings = [System.Collections.Generic.List[object]]::new()
     $relPath  = Split-Path $InputFile -Leaf
-    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-
     $name  = (Split-Path $InputFile -Leaf).ToLowerInvariant()
     $ext   = [IO.Path]::GetExtension($InputFile).ToLowerInvariant()
     $isTar = $name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')
-    $isZip = $ext -in @('.whl', '.egg', '.zip', '.nupkg')
+    $budgetStopped = $false
+    $isZip = $ext -in @('.whl', '.egg', '.zip', '.nupkg') -or (Test-ZipFileMagic -Path $InputFile)
 
+    # Classification can deliberately route ZIP magic under a misleading
+    # extension (for example, payload.nuspec) to the generic archive path.
+    # Confirm magic here so the hardened ZIP extractor does not depend solely
+    # on an attacker-controlled suffix.
+    if (-not $isTar -and -not $isZip) {
+        Write-Log -Level WARN -Message "Unrecognized archive type: $name — skipping extraction."
+        return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
+    }
+
+    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
     Write-Log -Level INFO -Message "Extracting: $relPath -> $OutputDir"
 
     try {
@@ -445,17 +467,13 @@ function Expand-SubmissionArchive {
                 return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
             }
             if ($tarResult.BudgetStopped) {
+                $budgetStopped = $true
                 Write-Log -Level WARN -Message "Tarball extraction for $name stopped early — shared archive-tree budget reached."
             } else {
                 Write-Log -Level DEBUG -Message "Extracted tarball OK."
             }
         }
-        else {
-            Write-Log -Level WARN -Message "Unrecognized archive type: $name — skipping extraction."
-            return @{ Success = $false; StagingPath = $OutputDir; Findings = $findings.ToArray() }
-        }
-
-        return @{ Success = $true; StagingPath = $OutputDir; Findings = $findings.ToArray() }
+        return @{ Success = $true; StagingPath = $OutputDir; Findings = $findings.ToArray(); BudgetStopped = $budgetStopped }
 
     } catch {
         Write-Log -Level ERROR -Message "Extraction failed for $name : $_"

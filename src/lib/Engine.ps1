@@ -116,6 +116,10 @@ function New-ArchiveTreeBudget {
         # every cumulative counter stayed at zero. Subtracted from the count
         # headroom alongside MemberCount wherever an extraction is gated.
         StagedDirectories = 0
+        # Independent, scan-wide budget for issue #39's metadata-only archive
+        # fallback.  It is deliberately shared by every blocked archive so a
+        # submission cannot reset the limits by supplying many containers.
+        Metadata = New-ArchiveMetadataBudget
     }
 }
 
@@ -131,7 +135,11 @@ function Test-IsArchiveUnit {
     $name = $Unit.Name.ToLowerInvariant()
     if ($name.EndsWith('.tar.gz') -or $name.EndsWith('.tgz')) { return $true }
     $ext = [IO.Path]::GetExtension($Unit.Name).ToLowerInvariant()
-    return $ext -in @('.whl', '.egg', '.zip', '.nupkg')
+    if ($ext -in @('.whl', '.egg', '.zip', '.nupkg')) { return $true }
+    # Content detection wins only for PK ZIP magic hidden behind a misleading
+    # extension (for example, a ZIP renamed .nuspec). Do not widen this to every
+    # generic archive classification: a bare .gz is not an extractable tarball.
+    return $Unit.Type -eq 'archive' -and (Test-ZipFileMagic -Path $Unit.Path)
 }
 
 function Get-ArchiveExpansionEstimate {
@@ -167,7 +175,8 @@ function Get-ArchiveExpansionEstimate {
     #>
     param([Parameter(Mandatory)][string]$Path)
     $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
-    if ($ext -notin @('.zip', '.whl', '.egg', '.nupkg')) { return $null }
+    # Match extraction's content-based routing for renamed ZIPs as well.
+    if ($ext -notin @('.zip', '.whl', '.egg', '.nupkg') -and -not (Test-ZipFileMagic -Path $Path)) { return $null }
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
         try {
@@ -318,6 +327,7 @@ function Expand-UnitInPlace {
 
     $findings  = [System.Collections.Generic.List[object]]::new()
     $isArchive = Test-IsArchiveUnit -Unit $Unit
+    $budgetStopped = $false
 
     if ($isArchive) {
         # The per-unit index makes the staging dir unique. Keying it on the
@@ -340,6 +350,7 @@ function Expand-UnitInPlace {
         foreach ($f in $extraction.Findings) { $findings.Add($f) }
 
         if ($extraction.Success) {
+            $budgetStopped = [bool]$extraction['BudgetStopped']
             $Unit.StagingPath = $extraction.StagingPath
             Write-Log -Level DEBUG -Message "StagingPath set: $($Unit.StagingPath)"
             # Charge the directories this extraction just created (review
@@ -372,7 +383,7 @@ function Expand-UnitInPlace {
         }
     }
 
-    return @{ Findings = $findings.ToArray(); IsArchive = $isArchive }
+    return @{ Findings = $findings.ToArray(); IsArchive = $isArchive; BudgetStopped = $budgetStopped }
 }
 
 function Invoke-ArchiveMemberDispatch {
@@ -407,7 +418,8 @@ function Invoke-ArchiveMemberDispatch {
         [Parameter(Mandatory)][PSCustomObject]$Context,
         [Parameter(Mandatory)][object[]]$Enabled,
         [Parameter(Mandatory)][PSCustomObject]$Budget,
-        [int]$Depth = 1
+        [int]$Depth = 1,
+        [switch]$MetadataFallbackNeeded
     )
 
     $findings = [System.Collections.Generic.List[object]]::new()
@@ -424,6 +436,8 @@ function Invoke-ArchiveMemberDispatch {
     $members = @(Get-ChildItem -LiteralPath $ArchiveUnit.StagingPath -Recurse -File -ErrorAction SilentlyContinue)
     $uninspected   = [System.Collections.Generic.List[string]]::new()
     $budgetSkipped = [System.Collections.Generic.List[string]]::new()
+    $metadataEnabled = @($Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0
+    $coveredMetadataPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # Extraction writes the WHOLE archive at once (ZipFile::ExtractToDirectory),
     # so every member below is already on disk before this loop starts -- only
@@ -532,6 +546,10 @@ function Invoke-ArchiveMemberDispatch {
                 -Issue 'Nested archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                 -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                 -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+            if (@($Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $file.FullName -RelativePath $childRel `
+                        -Context $Context -Budget $Budget.Metadata)) { $findings.Add($f) }
+            }
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
         }
@@ -567,6 +585,10 @@ function Invoke-ArchiveMemberDispatch {
                 -Issue 'Semantic container not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                 -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                 -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
+            if (@($Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $file.FullName -RelativePath $childRel `
+                        -Context $Context -Budget $Budget.Metadata)) { $findings.Add($f) }
+            }
             $dispatch = Invoke-UnitDispatch -Unit $childUnit -Context $Context -Enabled $Enabled
             foreach ($f in $dispatch.Findings) { $findings.Add($f) }
         }
@@ -617,8 +639,23 @@ function Invoke-ArchiveMemberDispatch {
             if ($expansion.IsArchive -and $isGenericArchiveChild -and $childUnit.StagingPath) {
                 $recursed = $true
                 $nestedFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $childUnit -Context $Context `
-                    -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1)
+                    -Enabled $Enabled -Budget $Budget -Depth ($Depth + 1) `
+                    -MetadataFallbackNeeded:([bool]$expansion['BudgetStopped'])
                 foreach ($f in $nestedFindings) { $findings.Add($f) }
+            }
+        }
+
+        if ($metadataEnabled) {
+            # Record direct manifests actually dispatched to OsvScan, plus
+            # nested containers already handled (including their own fallback
+            # or explicit extraction/depth rejection). Unclassified loose
+            # metadata stays eligible; recognized dist-info/egg-info manifests
+            # are excluded only after their ordinary OsvScan dispatch.
+            $directManifest = $childUnit.Type -in @('python-requirements', 'npm', 'nuget') -and
+                (Get-DependencyMetadataKind -EntryName $innerPath)
+            if ($directManifest -or $budgetBlocked -or $depthBlocked -or $recursed -or
+                $isSemanticContainerChild -or ($isGenericArchiveChild -and (Test-IsArchiveUnit -Unit $childUnit))) {
+                [void]$coveredMetadataPaths.Add(($childRel -replace '\\', '/'))
             }
         }
 
@@ -650,6 +687,11 @@ function Invoke-ArchiveMemberDispatch {
                 $Budget.MaxMembers, $Budget.MaxBytes, $budgetSkipped.Count, ($skippedNames -join ', '), $more) `
             -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
             -Recommendation 'Absence of findings here is absence of coverage, not evidence these members are safe. Split the submission across multiple scans if this is expected content.'))
+    }
+
+    if (($MetadataFallbackNeeded -or $budgetSkipped.Count -gt 0) -and $metadataEnabled) {
+        foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $ArchiveUnit.Path -RelativePath $ArchiveUnit.RelativePath `
+                -Context $Context -Budget $Budget.Metadata -ExcludedPaths $coveredMetadataPaths)) { $findings.Add($f) }
     }
 
     return $findings.ToArray()
@@ -764,6 +806,7 @@ function Invoke-Scan {
             # category yet, that scenario is indistinguishable from "no
             # bound configured at all" and must still extract.
             $topLevelBudgetBlocked = $false
+            $tarBudgetStopped = $false
             $topLevelSemanticBudget = [PSCustomObject]@{
                 MaxBytes = $budget.MaxBytes; ExpandedBytes = $budget.TopLevelSemanticBytes
                 MaxMembers = $script:ArchiveTreeMaxMembers; MemberCount = $budget.TopLevelSemanticEntries
@@ -776,6 +819,10 @@ function Invoke-Scan {
                     -Issue 'Archive not opened — extracting it would exceed the shared archive-tree budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this archive is safe. Split the submission across multiple scans if this is expected content.'))
+                if (@($sel.Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                    foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $unit.Path -RelativePath $unit.RelativePath `
+                            -Context $context -Budget $budget.Metadata)) { $findings.Add($f) }
+                }
             } elseif ($unit.Type -ne 'archive' -and (Test-IsArchiveUnit -Unit $unit) -and
                       ($budget.TopLevelSemanticBytes -gt 0 -or $budget.TopLevelSemanticEntries -gt 0) -and
                       (Test-ArchiveWouldExceedBudget -Path $unit.Path -Budget $topLevelSemanticBudget -CountAllEntries)) {
@@ -785,8 +832,13 @@ function Invoke-Scan {
                     -Issue 'Semantic container not opened — extracting it would exceed the cumulative top-level semantic-container budget for this scan.' `
                     -TestID 'MTS-ARCHIVE-BUDGET-EXCEEDED' `
                     -Recommendation 'Absence of findings here is absence of coverage, not evidence this file is safe. Split the submission across multiple scans if this is expected content.'))
+                if (@($sel.Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
+                    foreach ($f in @(Invoke-ArchiveMetadataDependencyScan -Path $unit.Path -RelativePath $unit.RelativePath `
+                            -Context $context -Budget $budget.Metadata)) { $findings.Add($f) }
+                }
             } else {
                 $expansion = Expand-UnitInPlace -Unit $unit -Context $context -Budget $budget
+                $tarBudgetStopped = [bool]$expansion['BudgetStopped']
                 foreach ($f in $expansion.Findings) { $findings.Add($f) }
 
                 # A top-level semantic container's expanded size/entry count
@@ -839,7 +891,7 @@ function Invoke-Scan {
             $memberDispatched = $false
             if ($unit.Type -eq 'archive' -and $unit.StagingPath) {
                 $memberFindings = Invoke-ArchiveMemberDispatch -ArchiveUnit $unit -Context $context `
-                    -Enabled $sel.Enabled -Budget $budget -Depth 1
+                    -Enabled $sel.Enabled -Budget $budget -Depth 1 -MetadataFallbackNeeded:$tarBudgetStopped
                 foreach ($f in $memberFindings) { $findings.Add($f) }
                 $memberDispatched = $true
             }

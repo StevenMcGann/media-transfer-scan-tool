@@ -33,7 +33,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDir   = (Join-Path $PSScriptRoot 'out'),
-    [string]$Version     = '0.13.0-dev',
+    [string]$Version     = '0.14.0-dev',
     [string]$PwshVersion = '7.4.19',         # pinned PS 7.4 LTS patch
     [string]$PwshZip     = '',
     [string]$BuiltUtc    = '',               # ISO timestamp; defaults to now if empty

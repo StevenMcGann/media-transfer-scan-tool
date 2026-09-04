@@ -6,7 +6,7 @@ A Windows-focused static security scanner for reviewing untrusted files before t
 
 Point the scanner at a submission folder and it will inventory, classify, hash, and route the files through the appropriate analyzers. Each scan produces a durable report in JSON, HTML, and text formats.
 
-> **Status:** **v0.13.0** implements every originally planned file-type family: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives. The default core profile also includes curated Python rules and live OSV.dev lookups for supported PyPI, npm, and NuGet inputs.
+> **Status:** **v0.13.0** is the current release. The development branch targets **v0.14.0** and adds bounded metadata-only dependency auditing when an archive cannot be fully extracted within the shared safety budget. Every originally planned file-type family remains implemented: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives.
 >
 > The JSON schema and CLI contract have been frozen since v0.9.0; see [docs/contract.md](docs/contract.md). The package remains on the 0.x line while it is validated against real untrusted transfers on an isolated host. That operational validation—not another planned file-type family—is the remaining gate for v1.0.0. See [PLAN.md](PLAN.md).
 
@@ -36,7 +36,7 @@ See [docs/test-environment.md](docs/test-environment.md) for the recommended rev
 
 ## Analysis Coverage
 
-The current release includes coverage for:
+The current codebase includes coverage for:
 
 - Python source, packages, wheels, notebooks, and pinned requirements
 - PowerShell, shell, VBA, and VBScript
@@ -48,6 +48,7 @@ The current release includes coverage for:
 - PE and ELF binary inspection
 - Pickle-based and common machine-learning model formats
 - ZIP-family and tar archives, including path traversal and decompression-bomb controls, with every extracted member recursively classified and scanned by the full analyzer set (nested archives included, to a bounded depth/size budget)
+- Bounded metadata-only dependency inspection for budget-blocked ZIP/TAR trees, including compressed nested wheels and NuGet packages, without creating a normal payload staging tree
 - Known dependency vulnerabilities through OSV.dev for supported PyPI, npm, and NuGet inputs
 
 The default **core** profile favors focused, higher-signal checks. The **full** profile adds Bandit and detect-secrets, which provide broader coverage but may generate more review noise.

@@ -1,358 +1,134 @@
 #Requires -Version 7.4
 <#
-    OsvScan analyzer — dependency-vulnerability audit against OSV.dev
-    (POST /v1/querybatch + GET /v1/vulns/{id}), across every ecosystem this
-    tool currently reads exact dependency versions from (issue #32):
+    OsvScan analyzer - exact dependency and packaged-component lookups against
+    OSV.dev. Parsing lives in lib/DependencyMetadata.ps1 so ordinary files,
+    extracted semantic containers, and issue #39's metadata-only fallback use
+    one interpretation of every supported manifest.
 
-      - PyPI:  requirements.txt (loose 'python-requirements' unit) — exact
-               `==` pins only. Anything else (a range, no specifier, multiple
-               comma-joined specifiers, a VCS/URL requirement) is reported as
-               an explicit "unpinned, OSV skipped" finding rather than
-               silently passed over — a fuzzy specifier can't be matched to
-               one OSV record with confidence.
-      - npm:   package-lock.json — a loose 'npm' unit. A lockfile inside a
-               GENERIC archive is classified as its own 'npm' unit by
-               recursive archive-member dispatch (issue #31) and reaches the
-               exact same loose-unit path; this used to ALSO walk a whole npm
-               tarball's StagingPath itself (UnitTypes included 'archive'),
-               removed since that duplicated member dispatch's own findings
-               for the same lockfile. Schema v1 (`dependencies`) and v2/v3
-               (`packages`); lockfile versions are always exact-resolved, so
-               there is no "unpinned" case here.
-      - NuGet: a .nupkg's OWN identity (id + version read from its embedded
-               .nuspec, namespace-agnostically — the schema URI has changed
-               across NuGet client versions). The artifact itself is the
-               pinned dependency; there is no separate lock file to read.
-
-    ON BY DEFAULT (issue #32 decision): this tool always runs with network
-    access to the connected/staging host before an air-gapped transfer, so
-    the audit is core/default-on rather than opt-in. Offline=true only means
-    "no external tool to provision" — the audit itself needs network and
-    degrades to one coverage-gap finding per manifest when -Mode offline.
-
-    Shared query/scoring logic (PEP 503 normalization, querybatch, per-vuln
-    advisory detail, CVSS v3 base-score severity) lives in src/lib/Osv.ps1 so
-    every ecosystem here — and any future one — scores and reports the same way.
-
-    Tier: core (default-on).
+    Direct/extracted wheels query their own Name/Version here. Their
+    Requires-Dist dependencies remain PipAudit's responsibility on the normal
+    extraction path, avoiding duplicate findings; the metadata-only fallback
+    queries both identity and exact Requires-Dist records because PipAudit
+    cannot operate without a staging tree.
+    Eggs retain their exact dependencies here because PipAudit only consumes
+    wheel METADATA, not the canonical egg PKG-INFO file.
 #>
 @{
     Name           = 'OsvScan'
-    Version        = '0.2.0'
-    UnitTypes      = @('python-requirements', 'npm', 'nuget')
+    Version        = '0.3.0'
+    UnitTypes      = @('python-requirements', 'npm', 'nuget', 'python')
+    # Package-identity lookups do not inspect loose Python source/notebooks.
+    # Selection must know this before the engine computes analyzer coverage.
+    UnitTypeExtensions = @{ python = @('.whl', '.egg') }
     RequiredTools  = @()
-    Offline        = $true   # no tool to provision; the OSV call itself needs network
+    Offline        = $true
     Tier           = 'core'
     DefaultEnabled = $true
     Invoke         = {
         param($Unit, $Context)
 
-        $findings = [System.Collections.Generic.List[object]]::new()
-
-        # ── PyPI: requirements.txt ───────────────────────────────────────────
-        function Get-PinnedPyPIDeps {
-            param($Unit, [System.Collections.Generic.List[object]]$Findings)
-            $pinned = [System.Collections.Generic.List[object]]::new()
-
-            # Reassemble backslash line-continuations into one logical line first —
-            # pip-compile/pip-tools hash-pinned output splits an exact pin and its
-            # --hash=... options across multiple physical lines:
-            #   package==1.2.3 \
-            #       --hash=sha256:aaaa \
-            #       --hash=sha256:bbbb
-            # Parsing physical lines individually would see "package==1.2.3 \" (a
-            # trailing backslash breaks the exact-pin match) and orphaned --hash
-            # lines, misreporting an actual exact pin as unpinned.
-            $logicalLines = [System.Collections.Generic.List[string]]::new()
-            $carry = ''
-            foreach ($rawLine in (Get-Content -LiteralPath $Unit.Path -ErrorAction SilentlyContinue)) {
-                $joined = if ($carry) { "$carry $($rawLine.Trim())" } else { $rawLine }
-                if ($joined.TrimEnd().EndsWith('\')) {
-                    $carry = $joined.TrimEnd().TrimEnd('\').TrimEnd()
-                } else {
-                    $logicalLines.Add($joined)
-                    $carry = ''
-                }
-            }
-            if ($carry) { $logicalLines.Add($carry) }
-
-            foreach ($rawLine in $logicalLines) {
-                $line = $rawLine.Trim()
-                if (-not $line -or $line.StartsWith('#')) { continue }
-
-                # Editable/VCS install ('-e spec' / '--editable spec') has no exact
-                # version to pin — report it as unqueryable rather than silently
-                # dropping it. A requirements.txt of ONLY editable installs must
-                # still surface a coverage note, not read as "nothing to flag".
-                # pip accepts the short option ATTACHED with no delimiter
-                # ('-e./localpkg', verified against a real pip install --dry-run) —
-                # '-e\s*' covers both '-e spec' and '-espec'.
-                if ($line -match '^(?:-e\s*|--editable(?:=|\s+))(.+)$') {
-                    $spec = $Matches[1].Trim()
-                    $editableName = if ($spec -match '#egg=([A-Za-z0-9][A-Za-z0-9._-]*)') { $Matches[1] } else { $spec }
-                    $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
-                        -UnitType 'python-requirements' -File $Unit.RelativePath `
-                        -Issue "Dependency '$editableName' is an editable/VCS install ('$line') — unpinned, OSV skipped." `
-                        -TestID 'OSV-PYPI-UNPINNED' `
-                        -Recommendation 'Editable/VCS installs have no exact version to check against OSV — review the source manually.'))
-                    continue
-                }
-                # '-r'/'--requirement' delegates to another manifest. The classifier
-                # only recognizes the literal filename 'requirements.txt' (see
-                # Classify.ps1), so the included file is never discovered as its own
-                # unit — silently skipping this line would let an include-only
-                # manifest read as "audited, clean" when nothing in it was actually
-                # checked. Report the gap explicitly instead of following it (the
-                # target may not even be part of this submission). pip accepts the
-                # short option ATTACHED with no delimiter ('-rprod.txt', verified
-                # against a real pip install --dry-run), unlike the long option
-                # (which needs '=' or a space) — '-r\s*' covers both '-r x' and '-rx'.
-                if ($line -match '^(?:-r\s*|--requirement(?:=|\s+))(.+)$') {
-                    $target = $Matches[1].Trim()
-                    $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'HIGH' `
-                        -UnitType 'python-requirements' -File $Unit.RelativePath `
-                        -Issue "Includes '$target' via -r/--requirement — that file is not automatically discovered or audited." `
-                        -TestID 'OSV-PYPI-INCLUDE-UNAUDITED' `
-                        -Recommendation "Scan '$target' directly (as its own requirements.txt) to audit the dependencies it declares."))
-                    continue
-                }
-                # Any other '-' prefixed line is an option, not a dependency
-                # (--index-url, -i, --extra-index-url, --pre, --constraint, ...).
-                if ($line.StartsWith('-')) { continue }
-
-                $line = ($line -split ';', 2)[0]              # strip environment marker
-                $line = ($line -split '\s+#', 2)[0].Trim()    # strip inline comment
-                if (-not $line) { continue }
-
-                # Truncate at the first per-requirement option so a hash-pinned or
-                # config-settings line is still recognized as an exact pin. Cutting
-                # at the option START (rather than deleting option tokens) is what
-                # makes the SPACE-separated forms work — '--hash sha256:...' and
-                # '-C KEY=VALUE' leave their VALUE behind if you only remove the
-                # flag name, and the leftover value then breaks the pin match.
-                # A requirement spec never contains whitespace followed by a
-                # '-'/'--' + letter, so everything from there on is options.
-                $optStart = [regex]::Match($line, '\s+-{1,2}[A-Za-z]')
-                if ($optStart.Success) { $line = $line.Substring(0, $optStart.Index).Trim() }
-
-                $nameMatch = [regex]::Match($line, '^([A-Za-z0-9][A-Za-z0-9._-]*)')
-                $depName = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { $line }
-
-                # Drop extras ('pkg[extra1,extra2]') before splitting on ',' so a
-                # comma inside the brackets doesn't look like a compound specifier.
-                $noExtras = ([regex]::Replace($line, '\[[^\]]*\]', '')).Trim()
-                $specs = @($noExtras -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-
-                # '===?' accepts BOTH '==' and PEP 440's '===' arbitrary equality —
-                # both pin exactly one version. Matching only '==' would consume two
-                # of the three characters in 'foo===1.2.3' and capture the version as
-                # '=1.2.3', then query OSV for that nonexistent version: no match, no
-                # unpinned note, and a vulnerable dependency reads as clean.
-                # '[^=\s]' on the first version character keeps that failure mode from
-                # simply moving to a malformed 'foo====1.2.3' (which now falls through
-                # to the unpinned branch — visible, rather than silently wrong).
-                # A trailing '.*' ('foo==1.2.*', compatible-release wildcard) is a
-                # RANGE, not one exact version, and is likewise reported as unpinned.
-                if ($specs.Count -eq 1 -and $specs[0] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s*===?\s*([^=\s]\S*)$' -and $Matches[1] -notmatch '\*') {
-                    $ver = $Matches[1]
-                    $pinned.Add(@{
-                        Name      = Get-Pep503NormalizedName -Name $depName
-                        Version   = $ver
-                        Ecosystem = 'PyPI'
-                        ManifestFile = $Unit.RelativePath
-                        DepLabel     = "$depName $ver"
-                    })
-                } else {
-                    $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
-                        -UnitType 'python-requirements' -File $Unit.RelativePath `
-                        -Issue "Dependency '$depName' is not exact-pinned ('$line') — unpinned, OSV skipped." `
-                        -TestID 'OSV-PYPI-UNPINNED' `
-                        -Recommendation 'Pin an exact version (==) to enable a dependency vulnerability check.'))
-                }
-            }
-            return $pinned.ToArray()
-        }
-
-        # ── NuGet: the .nupkg's own id/version from its embedded .nuspec ────
-        function Get-NuGetDep {
-            param($Unit, [System.Collections.Generic.List[object]]$Findings)
-            if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
-                      (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return $null }
-
-            # A .nupkg's manifest lives at the package ROOT, so look there only.
-            # A recursive search would happily pick up a .nuspec shipped inside the
-            # package as content/test data — or, before the staging dirs were made
-            # unique (Engine.ps1), a leftover one from a same-named package — and
-            # audit this unit under someone else's identity.
-            $rootNuspecs = @(Get-ChildItem -LiteralPath $Unit.StagingPath -File -Filter '*.nuspec' -ErrorAction SilentlyContinue)
-            if ($rootNuspecs.Count -gt 1) {
-                # The real NuGet client (NuGet.Packaging's PackageArchiveReader) refuses
-                # to load a package with more than one root .nuspec rather than guessing
-                # -- and for good reason: silently picking one (e.g. alphabetically) lets a
-                # crafted package put a benign decoy identity first while its second
-                # manifest carries the package's real, possibly-vulnerable identity, which
-                # then never gets queried. Reproduced: a decoy 'Totally.Fine.Package' sorted
-                # first hid a genuine 'Newtonsoft.Json 12.0.1' manifest entirely.
-                $names = ($rootNuspecs | ForEach-Object { $_.Name }) -join ', '
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue "Package has $($rootNuspecs.Count) root .nuspec files ($names) -- ambiguous identity, cannot identify the package for an OSV lookup." `
-                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
-                    -Recommendation 'A valid .nupkg has exactly one root .nuspec. Treat this package as suspect and inspect it manually.'))
-                return $null
-            }
-            $nuspec = $rootNuspecs | Select-Object -First 1
-            if (-not $nuspec) {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue 'No .nuspec found in the extracted package — cannot identify the package for an OSV lookup.' `
-                    -TestID 'OSV-NUGET-NO-NUSPEC'))
-                return $null
-            }
-
-            try { [xml]$xml = Get-Content -LiteralPath $nuspec.FullName -Raw }
-            catch {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'LOW' `
-                    -UnitType 'nuget' -File $Unit.RelativePath -Issue "Malformed .nuspec: $_" -TestID 'OSV-NUGET-MALFORMED'))
-                return $null
-            }
-
-            # Read ONLY the root <package>'s direct-child <metadata> — never a
-            # document-wide search. A `//` XPath (the previous approach) matches
-            # a <metadata> ANYWHERE in the tree, in document order: a decoy
-            # <metadata><id>Benign</id>...</metadata> nested inside some other
-            # element ahead of the real one resolves to the decoy's identity,
-            # and the package's real (possibly vulnerable) identity is never
-            # queried — the same evasion the multi-root-.nuspec check above
-            # blocks, just one level down, inside a single nuspec file. PoC
-            # verified before this fix: a <decoy><metadata><id>Totally.Benign
-            # .Package</id>... resolved ahead of a real Newtonsoft.Json 12.0.1
-            # <package><metadata> sibling.
-            # Namespace-agnostic on LocalName only: the nuspec xmlns URI has
-            # changed across NuGet client versions (2010/05, 2011/08, 2012/06,
-            # 2013/01, 2013/05, ...) — comparing by local-name, not full name,
-            # is unaffected by which one a given package declares.
-            $root = $xml.DocumentElement
-            if (-not $root -or $root.LocalName -ne 'package') {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue ".nuspec root element is '$(if ($root) { $root.LocalName } else { '<none>' })', not <package> — cannot identify the package for an OSV lookup." `
-                    -TestID 'OSV-NUGET-MALFORMED'))
-                return $null
-            }
-            $metadataNodes = @($root.ChildNodes | Where-Object { $_.LocalName -eq 'metadata' })
-            if ($metadataNodes.Count -ne 1) {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue ".nuspec has $($metadataNodes.Count) <metadata> element(s) directly under <package> (expected exactly 1) -- ambiguous identity, cannot identify the package for an OSV lookup." `
-                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
-                    -Recommendation 'A valid nuspec has exactly one <package><metadata> element. Treat this package as suspect and inspect it manually.'))
-                return $null
-            }
-            $metadata = $metadataNodes[0]
-            $idNodes  = @($metadata.ChildNodes | Where-Object { $_.LocalName -eq 'id' })
-            $verNodes = @($metadata.ChildNodes | Where-Object { $_.LocalName -eq 'version' })
-            if ($idNodes.Count -ne 1 -or $verNodes.Count -ne 1) {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'MEDIUM' -Confidence 'HIGH' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue ".nuspec <metadata> has $($idNodes.Count) <id> and $($verNodes.Count) <version> element(s) (expected exactly 1 each) -- ambiguous identity, cannot identify the package for an OSV lookup." `
-                    -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC' `
-                    -Recommendation 'A valid nuspec has exactly one <id> and one <version> in <metadata>. Treat this package as suspect and inspect it manually.'))
-                return $null
-            }
-            $id  = $idNodes[0].InnerText.Trim()
-            $ver = $verNodes[0].InnerText.Trim()
-            if (-not $id -or -not $ver) {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'MEDIUM' `
-                    -UnitType 'nuget' -File $Unit.RelativePath `
-                    -Issue '.nuspec <id> and/or <version> is empty — cannot identify the package for an OSV lookup.' `
-                    -TestID 'OSV-NUGET-NO-NUSPEC'))
-                return $null
-            }
-            return @{ Name = $id; Version = $ver; Ecosystem = 'NuGet'; ManifestFile = $Unit.RelativePath; DepLabel = "$id $ver" }
-        }
-
-        # ── npm: package-lock.json (v1 `dependencies` / v2-v3 `packages`) ──
-        function Get-NpmLockDeps {
-            param([string]$LockPath, [string]$Rel, [System.Collections.Generic.List[object]]$Findings)
-            try {
-                # -AsHashtable is REQUIRED: v2/v3 has a root package keyed by ""
-                # (empty string), which ConvertFrom-Json rejects without it.
-                $lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json -AsHashtable
-            } catch {
-                $Findings.Add((New-Finding -Tool 'OsvScan' -Category 'parser' -Severity 'LOW' -Confidence 'LOW' `
-                    -UnitType 'npm' -File $Rel -Issue "Malformed package-lock.json: $_" -TestID 'OSV-NPM-MALFORMED'))
-                return @()
-            }
-            $deps = [System.Collections.Generic.List[object]]::new()
-            if ($lock.ContainsKey('packages') -and $lock.packages) {
-                foreach ($key in $lock.packages.Keys) {
-                    if ([string]::IsNullOrEmpty($key)) { continue }   # "" = root project
-                    $entry = $lock.packages[$key]
-                    $ver = $entry.version
-                    if (-not $ver) { continue }
-                    $nm = if ($entry.ContainsKey('name') -and $entry.name) { $entry.name } else { ($key -replace '.*node_modules/', '') }
-                    $deps.Add(@{ Name = $nm; Version = $ver; Ecosystem = 'npm'; ManifestFile = $Rel; DepLabel = "$nm@$ver" })
-                }
-            } elseif ($lock.ContainsKey('dependencies') -and $lock.dependencies) {
-                foreach ($name in $lock.dependencies.Keys) {
-                    $v = $lock.dependencies[$name].version
-                    if ($v) { $deps.Add(@{ Name = $name; Version = $v; Ecosystem = 'npm'; ManifestFile = $Rel; DepLabel = "$name@$v" }) }
-                }
-            }
-            return $deps.ToArray()
-        }
-
-        # ── Resolve dependencies + the manifest's relative label by unit shape ──
-        $deps = @()
+        $findings = [Collections.Generic.List[object]]::new()
+        $parsed = $null
         $manifestRel = $Unit.RelativePath
+
+        function Read-ManifestBytes([string]$Path, [string]$Rel, [string]$Kind, [string]$UnitType) {
+            try {
+                $info = Get-Item -LiteralPath $Path -ErrorAction Stop
+                if ($info.Length -gt 1MB) {
+                    return [PSCustomObject]@{ Dependencies=@(); Findings=@(
+                        New-DependencyParseFinding -File $Rel -UnitType $UnitType -Severity INFO -Confidence HIGH `
+                            -Issue "Dependency manifest exceeds the 1 MiB parser limit ($($info.Length) bytes)." `
+                            -TestID 'MTS-ARCHIVE-METADATA-LIMIT') }
+                }
+                $bytes = [IO.File]::ReadAllBytes($Path)
+                return Convert-DependencyMetadataContent -Kind $Kind -Bytes $bytes -ManifestFile $Rel -UnitType $UnitType
+            } catch {
+                return [PSCustomObject]@{ Dependencies=@(); Findings=@(
+                    New-DependencyParseFinding -File $Rel -UnitType $UnitType `
+                        -Issue "Dependency manifest could not be read: $_" -TestID 'MTS-ARCHIVE-METADATA-ERROR') }
+            }
+        }
 
         switch ($Unit.Type) {
             'python-requirements' {
                 if (-not (Test-Path -LiteralPath $Unit.Path -PathType Leaf)) { return @() }
-                # @() wrap is REQUIRED: a function's `return` of an empty array collapses
-                # to $null at the caller when it's the sole pipeline output (a classic
-                # PowerShell gotcha) — plain assignment alone does not guard against it.
-                $deps = @(Get-PinnedPyPIDeps -Unit $Unit -Findings $findings)
+                $kind = Get-DependencyMetadataKind -EntryName $Unit.Path
+                if (-not $kind) { return @() }
+                $parsed = Read-ManifestBytes $Unit.Path $Unit.RelativePath $kind 'python-requirements'
+            }
+            'npm' {
+                if (-not (Test-Path -LiteralPath $Unit.Path -PathType Leaf)) { return @() }
+                $kind = Get-DependencyMetadataKind -EntryName $Unit.Name
+                if ($kind -ne 'npm-lock') { return @() }
+                $parsed = Read-ManifestBytes $Unit.Path $Unit.RelativePath $kind 'npm'
             }
             'nuget' {
-                $dep = Get-NuGetDep -Unit $Unit -Findings $findings
-                if ($dep) { $deps = @($dep) }
+                if ($Unit.Name.ToLowerInvariant().EndsWith('.nuspec') -and (Test-Path -LiteralPath $Unit.Path -PathType Leaf)) {
+                    $parsed = Read-ManifestBytes $Unit.Path $Unit.RelativePath 'nuspec' 'nuget'
+                } elseif ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
+                          (Test-Path -LiteralPath $Unit.StagingPath -PathType Container)) {
+                    $rootNuspecs = @(Get-ChildItem -LiteralPath $Unit.StagingPath -File -Filter '*.nuspec' -ErrorAction SilentlyContinue)
+                    if ($rootNuspecs.Count -gt 1) {
+                        $names = ($rootNuspecs | ForEach-Object { $_.Name }) -join ', '
+                        return @(New-DependencyParseFinding -File $Unit.RelativePath -UnitType nuget -Severity MEDIUM -Confidence HIGH `
+                            -Issue "Package has $($rootNuspecs.Count) root .nuspec files ($names) - ambiguous identity, cannot identify the package for an OSV lookup." `
+                            -TestID 'OSV-NUGET-AMBIGUOUS-NUSPEC')
+                    }
+                    $nuspec = $rootNuspecs | Select-Object -First 1
+                    if (-not $nuspec) {
+                        return @(New-DependencyParseFinding -File $Unit.RelativePath -UnitType nuget `
+                            -Issue 'No root .nuspec found in the extracted package - cannot identify it for an OSV lookup.' `
+                            -TestID 'OSV-NUGET-NO-NUSPEC')
+                    }
+                    $parsed = Read-ManifestBytes $nuspec.FullName $Unit.RelativePath 'nuspec' 'nuget'
+                } else { return @() }
             }
-            default {
-                # 'npm' — a loose package-lock.json. A lockfile found inside a
-                # GENERIC archive is classified as its own 'npm' unit by
-                # recursive archive-member dispatch (issue #31) and reaches
-                # this exact branch — this used to ALSO walk a whole npm
-                # tarball's StagingPath itself (UnitTypes included 'archive');
-                # removed, since that would now duplicate every finding member
-                # dispatch already produces for the same lockfile.
-                if ($Unit.Name.ToLowerInvariant() -ne 'package-lock.json') { return @() }
-                $deps = @(Get-NpmLockDeps -LockPath $Unit.Path -Rel $Unit.RelativePath -Findings $findings)
+            'python' {
+                if (-not ($Unit.Name.ToLowerInvariant().EndsWith('.whl') -or $Unit.Name.ToLowerInvariant().EndsWith('.egg'))) { return @() }
+                if (-not ($Unit.PSObject.Properties['StagingPath'] -and $Unit.StagingPath -and
+                          (Test-Path -LiteralPath $Unit.StagingPath -PathType Container))) { return @() }
+                $isEgg = $Unit.Name.ToLowerInvariant().EndsWith('.egg')
+                if ($isEgg) {
+                    # A zipped egg owns one root EGG-INFO/PKG-INFO. Do not use
+                    # unrelated/vendored distributions to infer its identity.
+                    $eggInfo = Join-Path $Unit.StagingPath 'EGG-INFO/PKG-INFO'
+                    $metadata = @(Get-Item -LiteralPath $eggInfo -ErrorAction SilentlyContinue |
+                        Where-Object { -not $_.PSIsContainer })
+                } else {
+                    $metadata = @(Get-ChildItem -LiteralPath $Unit.StagingPath -Recurse -File -Filter 'METADATA' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Directory.Name.ToLowerInvariant().EndsWith('.dist-info') })
+                }
+                $metadataLayout = if ($isEgg) { 'root EGG-INFO/PKG-INFO' } else { '.dist-info/METADATA' }
+                if ($metadata.Count -ne 1) {
+                    return @(New-DependencyParseFinding -File $Unit.RelativePath -UnitType python -Severity MEDIUM -Confidence HIGH `
+                        -Issue "Python package has $($metadata.Count) $metadataLayout files; exactly one is required for an OSV package-identity lookup." `
+                        -TestID 'OSV-PYPI-AMBIGUOUS-METADATA')
+                }
+                $parsed = Read-ManifestBytes $metadata[0].FullName $Unit.RelativePath 'python-metadata' 'python'
             }
+            default { return @() }
         }
 
-        if ($deps.Count -eq 0) {
-            Write-Log -Level INFO -Message "OsvScan: no queryable dependency in $($Unit.RelativePath)."
-            return $findings.ToArray()
+        foreach ($f in @($parsed.Findings)) { $findings.Add($f) }
+        $deps = @($parsed.Dependencies)
+        if ($Unit.Type -eq 'python' -and -not $isEgg) {
+            $deps = @($deps | Where-Object { $_.SourceRole -eq 'package' })
         }
+        if ($deps.Count -eq 0) { return $findings.ToArray() }
 
         if ($Context.Mode -eq 'offline') {
             $offlineTestId = switch ($Unit.Type) {
                 'python-requirements' { 'OSV-PYPI-OFFLINE' }
-                'nuget'                { 'OSV-NUGET-OFFLINE' }
-                default                { 'OSV-NPM-OFFLINE' }
+                'python'              { 'OSV-PYPI-OFFLINE' }
+                'nuget'               { 'OSV-NUGET-OFFLINE' }
+                default               { 'OSV-NPM-OFFLINE' }
             }
             $findings.Add((New-OsvOfflineFinding -Tool 'OsvScan' -UnitType $Unit.Type -File $manifestRel -TestId $offlineTestId))
             return $findings.ToArray()
         }
 
-        foreach ($f in (Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType $Unit.Type -Dependencies $deps `
-                -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR')) {
-            $findings.Add($f)
-        }
-
-        Write-Log -Level INFO -Message "OsvScan: $($findings.Count) finding(s) in $($Unit.RelativePath)."
+        foreach ($f in @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType $Unit.Type -Dependencies $deps `
+                -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR')) { $findings.Add($f) }
         return $findings.ToArray()
     }
 }

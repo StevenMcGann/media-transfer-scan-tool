@@ -20,7 +20,7 @@
 .PARAMETER OutputFormat
     'all' (default) or 'json' to also echo the JSON report path for capture.
 .NOTES
-    Version : 0.13.0
+    Version : 0.14.0-dev
 #>
 [CmdletBinding()]
 param(
@@ -40,11 +40,11 @@ $ErrorActionPreference = 'Stop'
 
 # Single source of truth for the tool version (keep in sync with the .NOTES block,
 # CHANGELOG, and the git tag). Report schemaVersion is tracked separately in Report.ps1.
-$script:ToolVersion = '0.13.0'
+$script:ToolVersion = '0.14.0-dev'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
-foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Osv', 'Report', 'Engine') {
+foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Osv', 'DependencyMetadata', 'Report', 'Engine') {
     . (Join-Path $here "lib/$lib.ps1")
 }
 

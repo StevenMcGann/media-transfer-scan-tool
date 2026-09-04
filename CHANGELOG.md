@@ -9,7 +9,55 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+### Added
+- Added a scan-wide, resource-bounded metadata-only dependency fallback for
+  ZIP, wheel, NuGet, TAR, and TGZ containers that cannot be normally extracted
+  without exceeding the shared archive-tree budget ([#39](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/39)).
+- The fallback reads recognized dependency manifests without writing payloads
+  to the staging tree, recursively inspects bounded nested containers, audits
+  exact wheel/package identities and dependencies through the shared OSV client,
+  and reports partial, limited, malformed, encrypted/unreadable, duplicate, and
+  otherwise skipped coverage explicitly.
+- Added shared parsers for wheel `METADATA`/`PKG-INFO`, `requirements*.txt`, npm
+  lock/shrinkwrap files, `Pipfile.lock`, `pyproject.toml`, `poetry.lock`,
+  `uv.lock`, and `.nuspec` metadata. The normal and fallback paths use the same
+  parser semantics, and non-exact dependency declarations remain visible as
+  unaudited rather than being guessed.
+
 ### Changed
+- Recover metadata after ordinary archive-member budget skips, excluding
+  already-audited manifests/containers, and recognize unpacked canonical
+  `EGG-INFO/PKG-INFO` files during normal member classification.
+- Recover nested ZIPs disguised as metadata within the existing manifest,
+  decoded-byte, spool, and depth limits; isolate parser failures per manifest.
+- Apply ZIP expansion estimates to magic-detected renamed archives before
+  extracting any payload bytes or filesystem entries.
+- Traverse nested npm v1 lock dependencies under the existing record cap, stop
+  Python package-header parsing before the description body, and recognize
+  dotted-key forms of pyproject optional dependencies.
+- Preserve recognized archive formats ahead of weak PK magic detection, so a
+  crafted TAR member name cannot redirect metadata recovery to ZIP parsing.
+- Parse Poetry/uv identities only from actual package-table fields, excluding
+  decoys in multiline strings, comments, arrays, and child tables.
+- Recognize PK ZIP magic in the budget-limited fallback even when the container
+  has a misleading suffix, and retain exact egg dependencies for OSV lookup.
+- Restricted OsvScan's Python-unit selection to wheels and eggs so it cannot
+  suppress coverage warnings for loose Python source or notebooks.
+- Enforced metadata record limits inside every shared parser, counting both
+  exact dependencies and coverage findings against the scan-wide fallback cap.
+- Added metadata recovery after streaming TAR extraction stops at its budget,
+  excluding manifests and nested containers already handled from the staged
+  prefix to avoid duplicate audits.
+- Corrected pyproject dependency-array parsing so quoted extras, marker quotes,
+  and comments cannot truncate the array; unsupported/malformed arrays now
+  produce an explicit coverage finding.
+- Included standard `[project.optional-dependencies]` groups in both manifest
+  scan paths and report each unresolved Poetry/uv package block, even when
+  other blocks contain valid identities.
+- Recognized canonical `EGG-INFO/PKG-INFO` package identities in both normally
+  extracted eggs and the bounded archive-metadata fallback.
+- Added full-suite CI validation on the operator bundle's pinned PowerShell
+  runtime, alongside the GitHub-hosted runtime.
 - Reconciled the README, operator guide, test-environment runbook, public
   contract, maintainer guide, bundle guide, and roadmap with v0.13.0 behavior.
 - Clarified writable scan-root requirements, source archives versus operator

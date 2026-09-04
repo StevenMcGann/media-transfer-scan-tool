@@ -75,7 +75,10 @@ words inside strings/comments are **not** flagged.
 1. Drop a descriptor in `src/analyzers/<Name>.ps1` returning a hashtable with
    `Name, Version, UnitTypes, RequiredTools, Offline, Tier, DefaultEnabled, Invoke`
    (see the current architecture in [PLAN.md](../PLAN.md)). The engine
-   auto-registers it.
+   auto-registers it. When an analyzer handles only certain extensions within a
+   shared unit type, declare an optional `UnitTypeExtensions` dictionary (for
+   example, `@{ python = @('.whl', '.egg') }`). This narrows selection before the
+   engine determines coverage; silently returning from `Invoke` is not sufficient.
 2. `Invoke { param($Unit,$Context) }` must **return `Finding[]`** (never throw),
    be **static** (never execute submitted content), and use `New-Finding`.
 3. Add fixtures to `build_fixtures.py` and a `*.Tests.ps1` suite.

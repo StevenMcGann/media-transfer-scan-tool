@@ -25,6 +25,8 @@ function Import-AnalyzerRegistry {
             if (-not $desc.ContainsKey('Version'))         { $desc.Version = '0.0.0' }
             if (-not $desc.ContainsKey('RequiredTools'))   { $desc.RequiredTools = @() }
             if (-not $desc.ContainsKey('Offline'))         { $desc.Offline = $true }
+            if (-not $desc.ContainsKey('UnitTypeExtensions')) { $desc.UnitTypeExtensions = @{} }
+            if ($desc.UnitTypeExtensions -isnot [Collections.IDictionary]) { throw "analyzer '$($file.Name)' UnitTypeExtensions must be a dictionary" }
             $registry.Add([PSCustomObject]$desc)
             Write-Log -Level DEBUG -Message "Registered analyzer: $($desc.Name) [tier=$($desc.Tier), default=$($desc.DefaultEnabled)]"
         } catch {
@@ -61,5 +63,16 @@ function Resolve-EnabledAnalyzers {
 
 function Select-AnalyzersForUnit {
     param([object[]]$Enabled, [PSCustomObject]$Unit)
-    return @($Enabled | Where-Object { $_.UnitTypes -contains $Unit.Type -or $_.UnitTypes -contains 'any' })
+    return @($Enabled | Where-Object {
+        if ($_.UnitTypes -notcontains $Unit.Type -and $_.UnitTypes -notcontains 'any') { return $false }
+        # Optional restrictions narrow one shared unit type without adding a
+        # public type or claiming coverage for variants the analyzer ignores.
+        $hasRestrictions = if ($_ -is [Collections.IDictionary]) { $_.Contains('UnitTypeExtensions') }
+                           else { [bool]$_.PSObject.Properties['UnitTypeExtensions'] }
+        if ($hasRestrictions -and $_.UnitTypeExtensions.Contains($Unit.Type)) {
+            $name = if ($Unit.PSObject.Properties['Name']) { $Unit.Name } else { '' }
+            return [IO.Path]::GetExtension($name) -in @($_.UnitTypeExtensions[$Unit.Type])
+        }
+        return $true
+    })
 }

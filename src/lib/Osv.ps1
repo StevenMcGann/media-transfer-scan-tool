@@ -474,12 +474,17 @@ function Get-OsvDependencyFindings {
                 Write-Log -Level WARN -Message "OSV: $batchMessage; retrying $($chunk.Count) dependencies via /v1/query."
                 $FallbackBudget.Timer.Start()
                 $chunkResults = @(foreach ($q in $queries) {
-                    if ($FallbackBudget.Timer.Elapsed.TotalSeconds -ge $FallbackBudget.MaxSeconds) {
+                    # Cap each request by the budget's REMAINING time, not the full
+                    # $TimeoutSec, so one slow request can't overrun the scan-wide cap
+                    # (PR #43 review). Stop below 1s: Invoke-RestMethod treats
+                    # -TimeoutSec 0 as "no timeout".
+                    $remaining = $FallbackBudget.MaxSeconds - $FallbackBudget.Timer.Elapsed.TotalSeconds
+                    if ($remaining -lt 1) {
                         throw [System.IO.InvalidDataException]::new(
                             "$batchMessage; per-package /v1/query fallback stopped at its $($FallbackBudget.MaxSeconds)s time cap")
                     }
                     $FallbackBudget.Queries++
-                    Invoke-OsvQuery -Query $q -TimeoutSec $TimeoutSec
+                    Invoke-OsvQuery -Query $q -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
                 })
             } catch {
                 $chunkError = $_

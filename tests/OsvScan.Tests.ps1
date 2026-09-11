@@ -444,6 +444,15 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
         Should -Invoke -CommandName Get-OsvDependencyFindings -ParameterFilter { $null -ne $FallbackBudget -and $FallbackBudget.MaxQueries -eq 200 }
     }
 
+    It 'caps each fallback request timeout by the remaining budget time, never 0 (= infinite)' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        [void](Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2) `
+            -TimeoutSec 30 -MaxFallbackSeconds 5)
+        Should -Invoke -CommandName Invoke-RestMethod -Times 2 -Exactly -ParameterFilter {
+            $Uri -like '*/query' -and $TimeoutSec -ge 1 -and $TimeoutSec -le 5 }
+    }
+
     It 'stops the fallback at its time cap' {
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }

@@ -9,6 +9,15 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+### Fixed
+- OSV responses that are reachable but not a usable `querybatch` body (no
+  top-level `results`, an empty body, a proxy page, or a result count that does
+  not match the query count) were reported as `could not reach api.osv.dev`,
+  leaving every dependency unaudited. The batch is now validated, unusable
+  batches are retried per package through `/v1/query` (where `{}` means no
+  advisories), and any remaining gap is worded as an unexpected response rather
+  than a connectivity failure ([#42](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/42)).
+
 ## [0.14.0] - 2026-09-03
 
 ### Added

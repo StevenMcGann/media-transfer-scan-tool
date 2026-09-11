@@ -224,18 +224,90 @@ function Test-OsvFixNotNewerThan {
     return $false   # equal versions — not "not newer", but nothing to exclude either
 }
 
+function Get-OsvResponseShape {
+    <#
+        Short, content-free description of an unexpected OSV response for a
+        finding/log message (issue #42). Never echoes the body itself: a
+        proxy's HTML block page has no business in a scan report.
+    #>
+    param($Response)
+    if ($null -eq $Response) { return 'an empty body' }
+    if ($Response -is [string]) {
+        if ($Response.Trim() -eq '') { return 'an empty body' }
+        return "non-JSON text ($($Response.Length) chars)"
+    }
+    if ($Response -is [System.Management.Automation.PSCustomObject]) {
+        $names = @($Response.PSObject.Properties | ForEach-Object { $_.Name })
+        if ($names.Count -eq 0) { return "an empty JSON object '{}'" }
+        return "a JSON object with properties: $($names -join ', ')"
+    }
+    return "a $($Response.GetType().Name)"
+}
+
+function Assert-OsvResultEntry {
+    <#
+        One per-package result must be a JSON object: '{}' (no advisories) or
+        '{ "vulns": [...] }'. Anything else (a bare string, a number) would be
+        read as "no vulns" by the caller's property check — fail open — so it
+        is rejected as an unexpected response instead.
+    #>
+    param($Entry, [Parameter(Mandatory)][string]$Endpoint)
+    if ($Entry -isnot [System.Management.Automation.PSCustomObject]) {
+        throw [System.IO.InvalidDataException]::new(
+            "OSV $Endpoint returned $(Get-OsvResponseShape $Entry) where a per-package result object was expected")
+    }
+}
+
 function Invoke-OsvQueryBatch {
     <#
         POST one batch of package/version queries to /v1/querybatch. Returns
         the raw .results array (each entry has only .vulns[].id/.modified —
-        no advisory detail; that's a separate GET per id). Throws on network
-        failure; callers decide how to surface that as a finding.
+        no advisory detail; that's a separate GET per id), one entry per query
+        in query order.
+
+        Throws on network failure (the Invoke-RestMethod exception, as-is).
+        Throws [System.IO.InvalidDataException] when the server answered but
+        not with a usable querybatch body (issue #42): no top-level 'results'
+        (e.g. '{}', an empty body, a proxy's HTML page) or a results count that
+        differs from the query count. The count check matters beyond parsing —
+        results are matched to dependencies BY INDEX, so a short array would
+        attribute advisories to the wrong packages.
     #>
     param([Parameter(Mandatory)][object[]]$Queries, [int]$TimeoutSec = 30)
     $body = @{ queries = $Queries } | ConvertTo-Json -Depth 6
     $resp = Invoke-RestMethod -Uri "$script:OsvApiBase/querybatch" -Method Post `
         -Body $body -ContentType 'application/json' -TimeoutSec $TimeoutSec
-    return @($resp.results)
+
+    if ($resp -isnot [System.Management.Automation.PSCustomObject] -or -not $resp.PSObject.Properties['results']) {
+        throw [System.IO.InvalidDataException]::new(
+            "OSV querybatch returned $(Get-OsvResponseShape $resp) instead of a 'results' array")
+    }
+    $results = if ($null -eq $resp.results) { @() } else { @($resp.results) }
+    if ($results.Count -ne $Queries.Count) {
+        throw [System.IO.InvalidDataException]::new(
+            "OSV querybatch returned $($results.Count) result(s) for $($Queries.Count) queries")
+    }
+    foreach ($entry in $results) { Assert-OsvResultEntry $entry 'querybatch' }
+    return $results
+}
+
+function Invoke-OsvQuery {
+    <#
+        POST ONE package/version query to /v1/query — the fallback when a
+        querybatch response is unusable (issue #42). Its documented shape is
+        '{ "vulns": [...] }', with the key omitted entirely ('{}') when there
+        are no advisories, which is the same shape as one querybatch results
+        entry, so callers treat the return value identically.
+
+        Throws on network failure; throws [System.IO.InvalidDataException] if
+        the body is not a JSON object.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Query, [int]$TimeoutSec = 30)
+    $body = $Query | ConvertTo-Json -Depth 6
+    $resp = Invoke-RestMethod -Uri "$script:OsvApiBase/query" -Method Post `
+        -Body $body -ContentType 'application/json' -TimeoutSec $TimeoutSec
+    Assert-OsvResultEntry $resp 'query'
+    return $resp
 }
 
 function Get-OsvVulnDetails {
@@ -326,24 +398,50 @@ function Get-OsvDependencyFindings {
         $queries = @($chunk | ForEach-Object {
             @{ package = @{ name = $_.Name; ecosystem = $_.Ecosystem }; version = $_.Version } })
 
+        $chunkError = $null
         try {
             # @() wrap is REQUIRED: a function's `return` of an empty array collapses
             # to $null at the caller when it's the sole pipeline output — plain
             # assignment does not guard against it (see OsvScan.ps1 for the full note).
             $chunkResults = @(Invoke-OsvQueryBatch -Queries $queries -TimeoutSec $TimeoutSec)
-            $consecutiveFailures = 0
+        } catch [System.IO.InvalidDataException] {
+            # The server ANSWERED, just not with a usable querybatch body (issue #42).
+            # Re-ask one package at a time via /v1/query, whose '{}' = "no advisories"
+            # shape is documented. Any failure there fails the whole chunk: partial
+            # per-package results are not kept, so a chunk is either fully audited
+            # or fully reported as a gap — never silently half-covered.
+            Write-Log -Level WARN -Message "OSV: $($_.Exception.Message); retrying $($chunk.Count) dependencies via /v1/query."
+            try {
+                $chunkResults = @($queries | ForEach-Object { Invoke-OsvQuery -Query $_ -TimeoutSec $TimeoutSec })
+            } catch {
+                $chunkError = $_
+            }
         } catch {
+            $chunkError = $_
+        }
+
+        if ($null -eq $chunkError) {
+            $consecutiveFailures = 0
+        } else {
             $consecutiveFailures++
             # Report the unqueried chunk, but DO NOT abandon hits already confirmed
             # by earlier chunks — returning here would turn "OSV confirmed 3
             # vulnerable packages, then the 2nd request failed" into a lone INFO
             # coverage note, hiding real findings. Skip only this chunk's
             # dependencies and let the accumulated hits below still be reported.
+            # A malformed/unexpected response is NOT described as a connectivity
+            # failure (issue #42): the host was reachable, and saying otherwise
+            # sends the operator chasing a network outage that doesn't exist.
+            $failureText = if ($chunkError.Exception -is [System.IO.InvalidDataException]) {
+                'received an unexpected response from api.osv.dev'
+            } else {
+                'could not reach api.osv.dev'
+            }
             $unqueried = @($chunk | ForEach-Object { $_.Name }) -join ', '
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
                 -UnitType $UnitType -File $chunk[0].ManifestFile `
-                -Issue ("OSV dependency audit could not reach api.osv.dev for {0} of {1} dependencies ({2}): {3}" -f `
-                    $chunk.Count, $Dependencies.Count, $unqueried, $_) `
+                -Issue ("OSV dependency audit {0} for {1} of {2} dependencies ({3}): {4}" -f `
+                    $failureText, $chunk.Count, $Dependencies.Count, $unqueried, $chunkError.Exception.Message) `
                 -TestID $ErrorTestId `
                 -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))
 
@@ -376,7 +474,7 @@ function Get-OsvDependencyFindings {
             $more  = if ($grp.Count -gt $names.Count) { " and $($grp.Count - $names.Count) more" } else { '' }
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
                 -UnitType $UnitType -File $grp.Name `
-                -Issue ("OSV dependency audit stopped after {0} consecutive transport failures -- {1} more dependencies in this manifest were never queried ({2}{3})." -f `
+                -Issue ("OSV dependency audit stopped after {0} consecutive failed requests -- {1} more dependencies in this manifest were never queried ({2}{3})." -f `
                     $MaxConsecutiveFailures, $grp.Count, ($names -join ', '), $more) `
                 -TestID $ErrorTestId `
                 -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))

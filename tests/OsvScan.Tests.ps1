@@ -305,6 +305,97 @@ Describe 'Get-OsvDependencyFindings — partial batch failure (no network)' {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no network)' {
+    # These mock Invoke-RestMethod itself (not Invoke-OsvQueryBatch) so the real
+    # response validation in Invoke-OsvQueryBatch / Invoke-OsvQuery is exercised.
+    BeforeAll {
+        function script:Deps([int]$Count) {
+            1..$Count | ForEach-Object {
+                @{ Name = "pkg$_"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = 'requirements.txt'; DepLabel = "pkg$_ 1.0.0" }
+            }
+        }
+        function script:Gaps($Findings) { @($Findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' }) }
+    }
+    BeforeEach {
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'HIGH' } }
+        }
+    }
+
+    It "treats a batch '{""results"":[{}]}' as zero advisories, with no error" {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{"results":[{}]}' | ConvertFrom-Json }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 1))
+        $findings.Count | Should -Be 0
+    }
+
+    It 'maps each batch result to its own dependency by position' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith {
+            '{"results":[{},{"vulns":[{"id":"GHSA-test-0002"}]},{}]}' | ConvertFrom-Json
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 3))
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count     | Should -Be 1
+        $vulns[0].TestID | Should -Be 'GHSA-test-0002'
+        $vulns[0].Issue  | Should -Match "'pkg2 1\.0\.0'"
+        @(Gaps $findings).Count | Should -Be 0
+    }
+
+    It "falls back to /v1/query when querybatch returns '{}', and reads '{}' there as zero advisories" {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2))
+        $findings.Count | Should -Be 0
+        Should -Invoke -CommandName Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $Uri -like '*/query' }
+    }
+
+    It "reads advisories from 'vulns' in a /v1/query fallback response" {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '' }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith {
+            param($Uri, $Method, $Body)
+            if ($Body -match '"pkg2"') { '{"vulns":[{"id":"GHSA-test-0009"}]}' | ConvertFrom-Json } else { '{}' | ConvertFrom-Json }
+        }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2))
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count     | Should -Be 1
+        $vulns[0].TestID | Should -Be 'GHSA-test-0009'
+        $vulns[0].Issue  | Should -Match "'pkg2 1\.0\.0'"
+        @(Gaps $findings).Count | Should -Be 0
+    }
+
+    It 'rejects a batch whose result count does not match the query count rather than misattributing advisories' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith {
+            '{"results":[{"vulns":[{"id":"GHSA-test-0001"}]}]}' | ConvertFrom-Json   # 1 result for 3 queries
+        }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 3))
+        # The short batch was discarded and every dependency was re-asked individually.
+        @($findings | Where-Object { $_.Category -eq 'vuln-dependency' }).Count | Should -Be 0
+        Should -Invoke -CommandName Invoke-RestMethod -Times 3 -Exactly -ParameterFilter { $Uri -like '*/query' }
+    }
+
+    It 'describes an unusable response as unexpected, not as a connectivity failure, and keeps the coverage gap' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '<html>proxy block page</html>' }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '<html>proxy block page</html>' }
+        $gaps = @(Gaps @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2)))
+        $gaps.Count    | Should -Be 1
+        $gaps[0].Issue | Should -Match 'unexpected response from api\.osv\.dev for 2 of 2'
+        $gaps[0].Issue | Should -Not -Match 'could not reach'
+        $gaps[0].Issue | Should -Not -Match 'proxy block page'   # body is described, never echoed
+    }
+
+    It 'still reports a transport failure as could-not-reach' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith {
+            throw [System.Net.Http.HttpRequestException]::new('No such host is known.')
+        }
+        $gaps = @(Gaps @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 1)))
+        $gaps.Count    | Should -Be 1
+        $gaps[0].Issue | Should -Match 'could not reach api\.osv\.dev'
+        Should -Invoke -CommandName Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*/query' }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 Describe 'OsvScan — PyPI (requirements.txt), offline-safe' {
     It 'reports every non-exact-pin shape as unpinned, OSV skipped — no network call' {
         $r = ScanDir 'python_requirements/unpinned'

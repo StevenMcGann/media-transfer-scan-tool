@@ -296,7 +296,13 @@ function Invoke-OsvQueryBatch {
         throw [System.IO.InvalidDataException]::new(
             "OSV querybatch returned $(Get-OsvResponseShape $resp) instead of a 'results' array")
     }
-    $results = if ($null -eq $resp.results) { @() } else { @($resp.results) }
+    # Must be a real JSON array: @() would wrap '{"results":{}}' into a one-element
+    # array that passes the count check for a one-query batch (PR #43 review).
+    if ($resp.results -isnot [array]) {
+        throw [System.IO.InvalidDataException]::new(
+            "OSV querybatch returned a 'results' value that is $(Get-OsvResponseShape $resp.results), not an array")
+    }
+    $results = @($resp.results)
     if ($results.Count -ne $Queries.Count) {
         throw [System.IO.InvalidDataException]::new(
             "OSV querybatch returned $($results.Count) result(s) for $($Queries.Count) queries")

@@ -392,6 +392,15 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
         $gaps[0].Issue | Should -Match "no 'vulns'"
     }
 
+    It "rejects a batch whose 'results' is an object rather than an array" {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{"results":{}}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '<html>x</html>' }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 1))
+        # The one-query batch was NOT accepted as clean: it fell back to /v1/query.
+        Should -Invoke -CommandName Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*/query' }
+        @(Gaps $findings).Count | Should -Be 1
+    }
+
     It 'rejects a batch entry whose vulns is not an array of advisories with ids' {
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{"results":[{"vulns":"oops"}]}' | ConvertFrom-Json }
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{"vulns":[{"modified":"x"}]}' | ConvertFrom-Json }

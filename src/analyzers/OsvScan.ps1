@@ -128,7 +128,7 @@
         }
 
         foreach ($f in @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType $Unit.Type -Dependencies $deps `
-                -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR')) { $findings.Add($f) }
+                -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR' -FallbackBudget (Get-OsvJsonProp $Context 'OsvFallback'))) { $findings.Add($f) }
         return $findings.ToArray()
     }
 }

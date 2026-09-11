@@ -57,6 +57,9 @@ function New-AnalyzerContext {
         HelperDir      = $HelperDir   # src/helpers — Python helper scripts (inspect_binary.py, etc.)
         TimeoutSeconds = $TimeoutSeconds
         AdvisoryDbDate = $null
+        # Scan-wide budget for the OSV per-package /v1/query fallback (issue #42):
+        # shared by every OsvScan unit and archive-metadata audit in this run.
+        OsvFallback    = New-OsvFallbackBudget
     }
 }
 

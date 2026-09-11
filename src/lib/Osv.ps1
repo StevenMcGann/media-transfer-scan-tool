@@ -246,15 +246,29 @@ function Get-OsvResponseShape {
 
 function Assert-OsvResultEntry {
     <#
-        One per-package result must be a JSON object: '{}' (no advisories) or
-        '{ "vulns": [...] }'. Anything else (a bare string, a number) would be
-        read as "no vulns" by the caller's property check — fail open — so it
-        is rejected as an unexpected response instead.
+        One per-package result must be EXACTLY '{}' (no advisories) or an
+        object carrying a 'vulns' array of objects with a string 'id'. The
+        caller reads "no 'vulns' property" as zero advisories, so anything else
+        — a bare string, or a non-empty object without 'vulns' such as a
+        gateway's '{"error":"rate limited"}' — would be fail-open and is
+        rejected as an unexpected response instead (PR #43 review).
     #>
     param($Entry, [Parameter(Mandatory)][string]$Endpoint)
+    $problem = $null
     if ($Entry -isnot [System.Management.Automation.PSCustomObject]) {
+        $problem = Get-OsvResponseShape $Entry
+    } elseif (@($Entry.PSObject.Properties).Count -gt 0) {
+        if (-not $Entry.PSObject.Properties['vulns']) {
+            $problem = "$(Get-OsvResponseShape $Entry) but no 'vulns'"
+        } elseif ($Entry.vulns -isnot [array] -or @($Entry.vulns | Where-Object {
+                    $_ -isnot [System.Management.Automation.PSCustomObject] -or
+                    (Get-OsvJsonProp $_ 'id') -isnot [string] -or -not (Get-OsvJsonProp $_ 'id') }).Count -gt 0) {
+            $problem = "a 'vulns' value that is not an array of advisory objects with an 'id'"
+        }
+    }
+    if ($problem) {
         throw [System.IO.InvalidDataException]::new(
-            "OSV $Endpoint returned $(Get-OsvResponseShape $Entry) where a per-package result object was expected")
+            "OSV $Endpoint returned $problem where a per-package result object was expected")
     }
 }
 
@@ -382,7 +396,15 @@ function Get-OsvDependencyFindings {
         [int]$TimeoutSec = 30,
         [string]$ErrorTestId = 'OSV-QUERY-ERR',
         [int]$MaxConsecutiveFailures = 2,
-        [int]$MaxDetailFetches = 500
+        [int]$MaxDetailFetches = 500,
+        # Bounds for the per-package /v1/query fallback (issue #42, PR #43 review).
+        # Slow-but-successful fallback requests reset the consecutive-failure
+        # counter, so without these a large manifest against a persistently
+        # unusable querybatch endpoint could hold the scan for
+        # Dependencies.Count * $TimeoutSec. A chunk that would exceed either cap
+        # is not attempted and is reported as an unaudited gap instead.
+        [int]$MaxFallbackQueries = 200,
+        [int]$MaxFallbackSeconds = 120
     )
     $out = [System.Collections.Generic.List[object]]::new()
     if ($Dependencies.Count -eq 0) { return $out.ToArray() }
@@ -391,6 +413,8 @@ function Get-OsvDependencyFindings {
     $hits = [System.Collections.Generic.List[object]]::new()
     $consecutiveFailures = 0
     $stoppedAtIndex = -1
+    $fallbackQueries = 0
+    $fallbackTimer = [System.Diagnostics.Stopwatch]::new()
 
     for ($i = 0; $i -lt $Dependencies.Count; $i += $batchSize) {
         $end   = [Math]::Min($i + $batchSize, $Dependencies.Count) - 1
@@ -409,12 +433,28 @@ function Get-OsvDependencyFindings {
             # Re-ask one package at a time via /v1/query, whose '{}' = "no advisories"
             # shape is documented. Any failure there fails the whole chunk: partial
             # per-package results are not kept, so a chunk is either fully audited
-            # or fully reported as a gap — never silently half-covered.
-            Write-Log -Level WARN -Message "OSV: $($_.Exception.Message); retrying $($chunk.Count) dependencies via /v1/query."
+            # or fully reported as a gap — never silently half-covered. Bounded by
+            # $MaxFallbackQueries / $MaxFallbackSeconds across the whole call.
+            $batchMessage = $_.Exception.Message
             try {
-                $chunkResults = @($queries | ForEach-Object { Invoke-OsvQuery -Query $_ -TimeoutSec $TimeoutSec })
+                if ($fallbackQueries + $queries.Count -gt $MaxFallbackQueries) {
+                    throw [System.IO.InvalidDataException]::new(
+                        "$batchMessage; per-package /v1/query fallback not attempted (cap of $MaxFallbackQueries fallback requests reached)")
+                }
+                Write-Log -Level WARN -Message "OSV: $batchMessage; retrying $($chunk.Count) dependencies via /v1/query."
+                $fallbackTimer.Start()
+                $chunkResults = @(foreach ($q in $queries) {
+                    if ($fallbackTimer.Elapsed.TotalSeconds -ge $MaxFallbackSeconds) {
+                        throw [System.IO.InvalidDataException]::new(
+                            "$batchMessage; per-package /v1/query fallback stopped at its ${MaxFallbackSeconds}s time cap")
+                    }
+                    $fallbackQueries++
+                    Invoke-OsvQuery -Query $q -TimeoutSec $TimeoutSec
+                })
             } catch {
                 $chunkError = $_
+            } finally {
+                $fallbackTimer.Stop()
             }
         } catch {
             $chunkError = $_

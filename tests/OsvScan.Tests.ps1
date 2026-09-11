@@ -384,6 +384,47 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
         $gaps[0].Issue | Should -Not -Match 'proxy block page'   # body is described, never echoed
     }
 
+    It 'treats a non-empty fallback object without vulns (a gateway error body) as a gap, not a clean result' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{"error":"rate limited"}' | ConvertFrom-Json }
+        $gaps = @(Gaps @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2)))
+        $gaps.Count    | Should -Be 1
+        $gaps[0].Issue | Should -Match "no 'vulns'"
+    }
+
+    It 'rejects a batch entry whose vulns is not an array of advisories with ids' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{"results":[{"vulns":"oops"}]}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{"vulns":[{"modified":"x"}]}' | ConvertFrom-Json }
+        $gaps = @(Gaps @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 1)))
+        $gaps.Count    | Should -Be 1
+        $gaps[0].Issue | Should -Match "not an array of advisory objects"
+    }
+
+    It 'caps total fallback requests and reports the remaining dependencies as unaudited' {
+        # 250 deps => 3 chunks, every batch unusable. With a cap of 100, only chunk 1
+        # falls back; chunks 2 and 3 are reported without a single /v1/query call.
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 250) `
+            -MaxFallbackQueries 100)
+        Should -Invoke -CommandName Invoke-RestMethod -Times 100 -Exactly -ParameterFilter { $Uri -like '*/query' }
+        $gaps = @(Gaps $findings)
+        $gaps.Count | Should -Be 2
+        ($gaps.Issue -join ' ') | Should -Match 'cap of 100 fallback requests'
+        ($gaps.Issue -join ' ') | Should -Match '100 of 250'
+        ($gaps.Issue -join ' ') | Should -Match '50 of 250'
+    }
+
+    It 'stops the fallback at its time cap' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        $gaps = @(Gaps @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 3) `
+            -MaxFallbackSeconds 0))
+        Should -Invoke -CommandName Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*/query' }
+        $gaps.Count    | Should -Be 1
+        $gaps[0].Issue | Should -Match 'time cap'
+    }
+
     It 'still reports a transport failure as could-not-reach' {
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith {
             throw [System.Net.Http.HttpRequestException]::new('No such host is known.')

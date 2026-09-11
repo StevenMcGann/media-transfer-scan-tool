@@ -328,6 +328,26 @@ function New-OsvFallbackBudget {
     }
 }
 
+function New-OsvDetailBudget {
+    <#
+        Shared, mutable bound for GET /v1/vulns/{id} advisory-detail fetches.
+        One per Invoke-Scan run lives on the analyzer context (Context.OsvDetail)
+        so the allowance is spent ONCE per scan, not once per manifest. Both a
+        request count AND a time cap: the count alone bounds attempts, not
+        wall-clock -- 500 near-timeout responses would still be ~4 hours.
+        Reaching either cap never drops a confirmed vulnerability; it is still
+        reported (HIGH, without summary/fix detail), and the stop is logged and
+        reported as a coverage-gap finding.
+    #>
+    param([int]$MaxFetches = 500, [int]$MaxSeconds = 600)
+    [PSCustomObject]@{
+        MaxFetches = $MaxFetches
+        MaxSeconds = $MaxSeconds
+        Fetches    = 0
+        Timer      = [System.Diagnostics.Stopwatch]::new()
+    }
+}
+
 function Invoke-OsvQuery {
     <#
         POST ONE package/version query to /v1/query — the fallback when a
@@ -399,16 +419,18 @@ function Get-OsvDependencyFindings {
         dependencies are still reported, grouped by manifest, as one gap finding
         each rather than silently dropped.
 
-        The per-id detail-fetch loop below has a SECOND, independent bound:
-        $MaxDetailFetches caps total detail-fetch ATTEMPTS regardless of
-        outcome. $MaxConsecutiveFailures alone never trips if the endpoint
-        alternates failure/success — the counter resets to 0 on every success
-        (correct for its own purpose: a genuinely flaky-but-working endpoint
-        shouldn't be treated as down) — so a manifest resolving to many
-        distinct advisories against a flapping /vulns/{id} endpoint could still
-        hold the scan for uniqueIds.Count * $TimeoutSec with no upper bound.
-        Stopping at the cap uses the same "detail unavailable" fallback and
-        coverage-gap finding as the consecutive-failure case — a hit already
+        The per-id detail-fetch loop below has SECOND, independent bounds:
+        $DetailBudget caps total detail-fetch ATTEMPTS and total detail-fetch
+        TIME regardless of outcome, scan-wide when the caller passes the scan's
+        Context.OsvDetail. $MaxConsecutiveFailures alone never trips if the
+        endpoint alternates failure/success — the counter resets to 0 on every
+        success (correct for its own purpose: a genuinely flaky-but-working
+        endpoint shouldn't be treated as down) — so a manifest resolving to many
+        distinct advisories against a flapping or slow /vulns/{id} endpoint could
+        still hold the scan for uniqueIds.Count * $TimeoutSec. Each request's
+        timeout is also capped by the budget's remaining time. Stopping at any
+        cap uses the same "detail unavailable" fallback and coverage-gap finding
+        as the consecutive-failure case, plus a WARN log line — a hit already
         confirmed by querybatch is never dropped, just reported without
         summary/severity/fix detail.
     #>
@@ -419,7 +441,12 @@ function Get-OsvDependencyFindings {
         [int]$TimeoutSec = 30,
         [string]$ErrorTestId = 'OSV-QUERY-ERR',
         [int]$MaxConsecutiveFailures = 2,
+        # Advisory-detail bounds. Pass the scan's shared $DetailBudget
+        # (Context.OsvDetail) so they are scan-wide; the Max* values only size a
+        # private budget when none is given (direct/unit-test calls).
+        [PSCustomObject]$DetailBudget = $null,
         [int]$MaxDetailFetches = 500,
+        [int]$MaxDetailSeconds = 600,
         # Bounds for the per-package /v1/query fallback (issue #42, PR #43 review).
         # Slow-but-successful fallback requests reset the consecutive-failure
         # counter, so without these a large manifest against a persistently
@@ -435,6 +462,9 @@ function Get-OsvDependencyFindings {
     )
     if ($null -eq $FallbackBudget) {
         $FallbackBudget = New-OsvFallbackBudget -MaxQueries $MaxFallbackQueries -MaxSeconds $MaxFallbackSeconds
+    }
+    if ($null -eq $DetailBudget) {
+        $DetailBudget = New-OsvDetailBudget -MaxFetches $MaxDetailFetches -MaxSeconds $MaxDetailSeconds
     }
     $out = [System.Collections.Generic.List[object]]::new()
     if ($Dependencies.Count -eq 0) { return $out.ToArray() }
@@ -519,6 +549,10 @@ function Get-OsvDependencyFindings {
                     $failureText, $chunk.Count, $Dependencies.Count, $unqueried, $chunkError.Exception.Message) `
                 -TestID $ErrorTestId `
                 -Recommendation 'These dependencies were NOT audited — absence of findings for them is absence of coverage. Re-run online, or check them against OSV.dev manually before admitting.'))
+            # Every coverage gap is in the log as well as the report, including
+            # a fallback budget cap being reached.
+            Write-Log -Level WARN -Message ("OSV: {0} for {1} dependencies in {2} (reported as {3}): {4}" -f `
+                $failureText, $chunk.Count, $chunk[0].ManifestFile, $ErrorTestId, $chunkError.Exception.Message)
 
             if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
                 # api.osv.dev is down, not just one flaky request — stop spending
@@ -544,6 +578,8 @@ function Get-OsvDependencyFindings {
 
     if ($stoppedAtIndex -ge 0 -and $stoppedAtIndex -lt $Dependencies.Count) {
         $untried = $Dependencies[$stoppedAtIndex..($Dependencies.Count - 1)]
+        Write-Log -Level WARN -Message ("OSV: dependency audit stopped after {0} consecutive failed requests; {1} dependencies never queried (reported as {2})." -f `
+            $MaxConsecutiveFailures, $untried.Count, $ErrorTestId)
         foreach ($grp in ($untried | Group-Object ManifestFile)) {
             $names = @($grp.Group | ForEach-Object { $_.Name }) | Select-Object -First 10
             $more  = if ($grp.Count -gt $names.Count) { " and $($grp.Count - $names.Count) more" } else { '' }
@@ -570,44 +606,57 @@ function Get-OsvDependencyFindings {
     $uniqueIds = @($hits | ForEach-Object { $_.VulnIds } | Select-Object -Unique)
     $detailCache = @{}
     $detailConsecutiveFailures = 0
-    $detailAttempts = 0
     $detailStoppedAtIndex = -1
     $detailStopReason = $null
-    for ($k = 0; $k -lt $uniqueIds.Count; $k++) {
-        # Total-attempts cap, independent of the consecutive-failure cap below:
-        # checked BEFORE attempting so a manifest with more distinct advisories
-        # than $MaxDetailFetches can't out-stall a flapping endpoint that
-        # happens to alternate failure/success (the consecutive counter alone
-        # never trips in that case — see the doc comment above).
-        if ($detailAttempts -ge $MaxDetailFetches) {
-            $detailStoppedAtIndex = $k
-            $detailStopReason = 'max-fetches'
-            break
-        }
-        $id = $uniqueIds[$k]
-        $detailAttempts++
-        try {
-            $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec $TimeoutSec
-            $detailConsecutiveFailures = 0
-        } catch {
-            Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"
-            $detailCache[$id] = $null
-            $detailConsecutiveFailures++
-            if ($detailConsecutiveFailures -ge $MaxConsecutiveFailures) {
-                $detailStoppedAtIndex = $k + 1
-                $detailStopReason = 'consecutive-failures'
+    $DetailBudget.Timer.Start()
+    try {
+        for ($k = 0; $k -lt $uniqueIds.Count; $k++) {
+            # Total-attempts and total-time caps, independent of the consecutive-
+            # failure cap below: checked BEFORE attempting so a manifest (or a
+            # scan's worth of manifests) with many distinct advisories can't
+            # out-stall a flapping or slow endpoint that never fails twice in a
+            # row (the consecutive counter alone never trips in that case).
+            if ($DetailBudget.Fetches -ge $DetailBudget.MaxFetches) {
+                $detailStoppedAtIndex = $k
+                $detailStopReason = 'max-fetches'
                 break
             }
+            # Stop below 1s: Invoke-RestMethod treats -TimeoutSec 0 as "no timeout".
+            $remaining = $DetailBudget.MaxSeconds - $DetailBudget.Timer.Elapsed.TotalSeconds
+            if ($remaining -lt 1) {
+                $detailStoppedAtIndex = $k
+                $detailStopReason = 'time-cap'
+                break
+            }
+            $id = $uniqueIds[$k]
+            $DetailBudget.Fetches++
+            try {
+                $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
+                $detailConsecutiveFailures = 0
+            } catch {
+                Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"
+                $detailCache[$id] = $null
+                $detailConsecutiveFailures++
+                if ($detailConsecutiveFailures -ge $MaxConsecutiveFailures) {
+                    $detailStoppedAtIndex = $k + 1
+                    $detailStopReason = 'consecutive-failures'
+                    break
+                }
+            }
         }
+    } finally {
+        $DetailBudget.Timer.Stop()
     }
     if ($detailStoppedAtIndex -ge 0 -and $detailStoppedAtIndex -lt $uniqueIds.Count) {
         $skippedIds = @($uniqueIds[$detailStoppedAtIndex..($uniqueIds.Count - 1)])
         foreach ($id in $skippedIds) { $detailCache[$id] = $null }   # never attempted, not just failed
-        $reasonText = if ($detailStopReason -eq 'max-fetches') {
-            "reaching the {0}-advisory total detail-fetch cap for this scan" -f $MaxDetailFetches
-        } else {
-            "{0} consecutive failures" -f $MaxConsecutiveFailures
+        $reasonText = switch ($detailStopReason) {
+            'max-fetches' { "reaching the {0}-advisory total detail-fetch cap for this scan" -f $DetailBudget.MaxFetches }
+            'time-cap'    { "reaching the {0}s total detail-fetch time cap for this scan" -f $DetailBudget.MaxSeconds }
+            default       { "{0} consecutive failures" -f $MaxConsecutiveFailures }
         }
+        Write-Log -Level WARN -Message ("OSV: advisory-detail lookup stopped after {0}; {1} of {2} distinct advisories skipped (reported as {3}; affected dependencies are still flagged vulnerable, without detail)." -f `
+            $reasonText, $skippedIds.Count, $uniqueIds.Count, $ErrorTestId)
         $affectedHits = @($hits | Where-Object { @($_.VulnIds | Where-Object { $_ -in $skippedIds }).Count -gt 0 })
         foreach ($grp in ($affectedHits | Group-Object { $_.Dep.ManifestFile })) {
             $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `

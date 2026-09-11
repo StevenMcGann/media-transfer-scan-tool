@@ -18,6 +18,15 @@ validation against real untrusted transfers**, not a second contract freeze (see
   advisories) under a scan-wide 200-request/120-second budget, and any remaining gap is worded as an unexpected response rather
   than a connectivity failure ([#42](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/42)).
 
+### Changed
+- OSV advisory-detail lookups (`GET /v1/vulns/{id}`) are now bounded scan-wide
+  by both a request count (500) and a time cap (600 seconds), instead of a
+  count that reset for every dependency manifest; each request's timeout is
+  also capped by the time remaining. Reaching any OSV limit never drops a
+  confirmed vulnerability (it is still reported, as HIGH, without advisory
+  detail), and every stop is now written to the log as a WARN line in addition
+  to the `OSV-QUERY-ERR` report finding.
+
 ## [0.14.0] - 2026-09-03
 
 ### Added

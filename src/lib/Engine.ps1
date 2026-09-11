@@ -60,6 +60,8 @@ function New-AnalyzerContext {
         # Scan-wide budget for the OSV per-package /v1/query fallback (issue #42):
         # shared by every OsvScan unit and archive-metadata audit in this run.
         OsvFallback    = New-OsvFallbackBudget
+        # Scan-wide budget for OSV advisory-detail fetches (count + time cap).
+        OsvDetail      = New-OsvDetailBudget
     }
 }
 

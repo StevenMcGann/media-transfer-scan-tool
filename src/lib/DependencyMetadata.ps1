@@ -956,7 +956,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                 }
             } else {
                 foreach ($f in @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType archive -Dependencies $resolved `
-                        -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR')) { $findings.Add($f) }
+                        -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR' -FallbackBudget (Get-OsvJsonProp $Context 'OsvFallback'))) { $findings.Add($f) }
             }
         }
     } catch { Add-Error $RelativePath $_.Exception.Message }

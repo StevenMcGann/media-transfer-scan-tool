@@ -311,6 +311,23 @@ function Invoke-OsvQueryBatch {
     return $results
 }
 
+function New-OsvFallbackBudget {
+    <#
+        Shared, mutable bound for the per-package /v1/query fallback (issue #42,
+        PR #43 review). One per Invoke-Scan run lives on the analyzer context
+        (Context.OsvFallback) so the allowance is spent ONCE per scan, not once
+        per manifest: OsvScan calls Get-OsvDependencyFindings separately for
+        every dependency unit, and a transfer can hold many of them.
+    #>
+    param([int]$MaxQueries = 200, [int]$MaxSeconds = 120)
+    [PSCustomObject]@{
+        MaxQueries = $MaxQueries
+        MaxSeconds = $MaxSeconds
+        Queries    = 0
+        Timer      = [System.Diagnostics.Stopwatch]::new()
+    }
+}
+
 function Invoke-OsvQuery {
     <#
         POST ONE package/version query to /v1/query — the fallback when a
@@ -409,9 +426,16 @@ function Get-OsvDependencyFindings {
         # unusable querybatch endpoint could hold the scan for
         # Dependencies.Count * $TimeoutSec. A chunk that would exceed either cap
         # is not attempted and is reported as an unaudited gap instead.
+        # Pass the scan's shared $FallbackBudget (Context.OsvFallback) so the caps
+        # are scan-wide; the Max* values only size a private budget when none is
+        # given (direct/unit-test calls).
+        [PSCustomObject]$FallbackBudget = $null,
         [int]$MaxFallbackQueries = 200,
         [int]$MaxFallbackSeconds = 120
     )
+    if ($null -eq $FallbackBudget) {
+        $FallbackBudget = New-OsvFallbackBudget -MaxQueries $MaxFallbackQueries -MaxSeconds $MaxFallbackSeconds
+    }
     $out = [System.Collections.Generic.List[object]]::new()
     if ($Dependencies.Count -eq 0) { return $out.ToArray() }
 
@@ -419,8 +443,6 @@ function Get-OsvDependencyFindings {
     $hits = [System.Collections.Generic.List[object]]::new()
     $consecutiveFailures = 0
     $stoppedAtIndex = -1
-    $fallbackQueries = 0
-    $fallbackTimer = [System.Diagnostics.Stopwatch]::new()
 
     for ($i = 0; $i -lt $Dependencies.Count; $i += $batchSize) {
         $end   = [Math]::Min($i + $batchSize, $Dependencies.Count) - 1
@@ -440,27 +462,29 @@ function Get-OsvDependencyFindings {
             # shape is documented. Any failure there fails the whole chunk: partial
             # per-package results are not kept, so a chunk is either fully audited
             # or fully reported as a gap — never silently half-covered. Bounded by
-            # $MaxFallbackQueries / $MaxFallbackSeconds across the whole call.
+            # $FallbackBudget, which is shared across the whole scan when the
+            # caller passes Context.OsvFallback: once spent, later chunks and
+            # later manifests are reported unaudited without any request.
             $batchMessage = $_.Exception.Message
             try {
-                if ($fallbackQueries + $queries.Count -gt $MaxFallbackQueries) {
+                if ($FallbackBudget.Queries + $queries.Count -gt $FallbackBudget.MaxQueries) {
                     throw [System.IO.InvalidDataException]::new(
-                        "$batchMessage; per-package /v1/query fallback not attempted (cap of $MaxFallbackQueries fallback requests reached)")
+                        "$batchMessage; per-package /v1/query fallback not attempted (cap of $($FallbackBudget.MaxQueries) fallback requests reached)")
                 }
                 Write-Log -Level WARN -Message "OSV: $batchMessage; retrying $($chunk.Count) dependencies via /v1/query."
-                $fallbackTimer.Start()
+                $FallbackBudget.Timer.Start()
                 $chunkResults = @(foreach ($q in $queries) {
-                    if ($fallbackTimer.Elapsed.TotalSeconds -ge $MaxFallbackSeconds) {
+                    if ($FallbackBudget.Timer.Elapsed.TotalSeconds -ge $FallbackBudget.MaxSeconds) {
                         throw [System.IO.InvalidDataException]::new(
-                            "$batchMessage; per-package /v1/query fallback stopped at its ${MaxFallbackSeconds}s time cap")
+                            "$batchMessage; per-package /v1/query fallback stopped at its $($FallbackBudget.MaxSeconds)s time cap")
                     }
-                    $fallbackQueries++
+                    $FallbackBudget.Queries++
                     Invoke-OsvQuery -Query $q -TimeoutSec $TimeoutSec
                 })
             } catch {
                 $chunkError = $_
             } finally {
-                $fallbackTimer.Stop()
+                $FallbackBudget.Timer.Stop()
             }
         } catch {
             $chunkError = $_

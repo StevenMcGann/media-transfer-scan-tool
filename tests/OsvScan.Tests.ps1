@@ -424,6 +424,26 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
         ($gaps.Issue -join ' ') | Should -Match '50 of 250'
     }
 
+    It 'spends a shared fallback budget once across manifests, not once per call' {
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
+        Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }
+        $shared = New-OsvFallbackBudget -MaxQueries 3
+        $first  = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 3) -FallbackBudget $shared)
+        $second = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 2) -FallbackBudget $shared)
+        @(Gaps $first).Count | Should -Be 0
+        # The second manifest found the budget spent: reported, no further requests.
+        Should -Invoke -CommandName Invoke-RestMethod -Times 3 -Exactly -ParameterFilter { $Uri -like '*/query' }
+        @(Gaps $second).Count    | Should -Be 1
+        (Gaps $second)[0].Issue  | Should -Match 'cap of 3 fallback requests'
+    }
+
+    It 'gives every scan context one shared fallback budget and threads it through OsvScan' {
+        (New-AnalyzerContext -Mode online).OsvFallback.MaxQueries | Should -Be 200
+        Mock -CommandName Get-OsvDependencyFindings -MockWith { @() }
+        [void](ScanDir 'python_requirements/vulnerable' -Mode online)
+        Should -Invoke -CommandName Get-OsvDependencyFindings -ParameterFilter { $null -ne $FallbackBudget -and $FallbackBudget.MaxQueries -eq 200 }
+    }
+
     It 'stops the fallback at its time cap' {
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/querybatch' } -MockWith { '{}' | ConvertFrom-Json }
         Mock -CommandName Invoke-RestMethod -ParameterFilter { $Uri -like '*/query' } -MockWith { '{}' | ConvertFrom-Json }

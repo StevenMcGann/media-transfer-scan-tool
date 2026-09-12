@@ -80,15 +80,37 @@ function ConvertTo-KevCatalog {
         throw [System.IO.InvalidDataException]::new("KEV catalog from $Source contains no entries")
     }
 
-    $byCve = @{}
+    # Malformed entries are REJECTED, not skipped (PR #47 review): silently
+    # dropping them yields an index that looks usable and current while missing
+    # CVEs, so a known-exploited dependency would go unannotated with no warning.
+    # A partially transformed internal mirror must fail loudly instead.
+    $byCve   = @{}
+    $invalid = 0
     foreach ($e in $entries) {
-        if ($e -isnot [System.Management.Automation.PSCustomObject]) { continue }
+        if ($e -isnot [System.Management.Automation.PSCustomObject]) { $invalid++; continue }
         $cve = Get-OsvJsonProp $e 'cveID'
-        if ($cve -isnot [string] -or -not $cve) { continue }
+        if ($cve -isnot [string] -or $cve -notmatch '^CVE-\d{4}-\d{4,}$') { $invalid++; continue }
         $byCve[$cve.ToUpperInvariant()] = $e
+    }
+    if ($invalid -gt 0) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source has $invalid of $($entries.Count) entries with a missing or malformed 'cveID'")
     }
     if ($byCve.Count -eq 0) {
         throw [System.IO.InvalidDataException]::new("KEV catalog from $Source has no entries carrying a 'cveID'")
+    }
+    # The feed declares its own entry count; a mismatch means a truncated or
+    # partially rewritten copy, which must not pass as complete.
+    # Parse rather than type-test: ConvertFrom-Json may hand back Int32, Int64 or
+    # even a string depending on the document, and a too-narrow [int] test
+    # silently skipped this check entirely.
+    $declared = Get-OsvJsonProp $Parsed 'count'
+    if ($null -ne $declared) {
+        $declaredCount = 0L
+        if ([int64]::TryParse([string]$declared, [ref]$declaredCount) -and $declaredCount -ne $entries.Count) {
+            throw [System.IO.InvalidDataException]::new(
+                "KEV catalog from $Source declares count $declaredCount but carries $($entries.Count) entries")
+        }
     }
 
     [PSCustomObject]@{
@@ -119,17 +141,74 @@ function Read-KevCatalogFile {
     return ConvertTo-KevCatalog -Parsed $parsed -Source $label -Sha256 $sha
 }
 
+function Invoke-KevDownload {
+    <#
+        Stream one URL to a file, enforcing $MaxBytes DURING the transfer
+        (PR #47 review): Invoke-WebRequest -OutFile writes the whole body first,
+        so a hostile or misconfigured source could fill the temp disk long before
+        an after-the-fact size check ran. The declared Content-Length is rejected
+        up front when it is already over the cap, and the copy loop aborts the
+        moment the running total crosses it.
+
+        Separate from Invoke-KevCatalogFetch so tests can substitute it without
+        mocking the whole HTTP stack.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutFile,
+        [int]$TimeoutSec = 30,
+        [int64]$MaxBytes = 0
+    )
+    if ($MaxBytes -le 0) { $MaxBytes = $script:KevMaxBytes }
+    $capMb  = [Math]::Round($MaxBytes / 1MB, 0)
+    $client = [System.Net.Http.HttpClient]::new()
+    try {
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+        $resp = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try {
+            if (-not $resp.IsSuccessStatusCode) {
+                throw "HTTP $([int]$resp.StatusCode) $($resp.ReasonPhrase) from $Url"
+            }
+            $declared = $resp.Content.Headers.ContentLength
+            if ($null -ne $declared -and $declared -gt $MaxBytes) {
+                throw [System.IO.InvalidDataException]::new(
+                    "KEV response from $Url declares $([Math]::Round($declared / 1MB, 1)) MB, over the $capMb MB cap")
+            }
+            $in  = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $out = [System.IO.File]::Create($OutFile)
+            try {
+                $buffer = [byte[]]::new(81920)
+                $total  = 0L
+                while (($read = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $read
+                    if ($total -gt $MaxBytes) {
+                        throw [System.IO.InvalidDataException]::new(
+                            "KEV response from $Url exceeded the $capMb MB cap; transfer aborted")
+                    }
+                    $out.Write($buffer, 0, $read)
+                }
+            } finally {
+                $out.Dispose(); $in.Dispose()
+            }
+        } finally {
+            $resp.Dispose()
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
 function Invoke-KevCatalogFetch {
     <#
-        Download one candidate source to a temp file, hash it, and validate it.
-        Downloading to disk first keeps an oversized body away from the JSON
-        parser. Throws on transport failure or an invalid catalog; the caller
-        decides whether to try the next source.
+        Download one candidate source to a temp file (size-capped mid-transfer),
+        hash it, and validate it. Writing to disk first keeps an oversized body
+        away from the JSON parser. Throws on transport failure or an invalid
+        catalog; the caller decides whether to try the next source.
     #>
     param([Parameter(Mandatory)][string]$Url, [int]$TimeoutSec = 30)
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("mts-kev-{0}.json" -f [guid]::NewGuid().ToString('n'))
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $tmp -TimeoutSec $TimeoutSec -MaximumRedirection 3 -ErrorAction Stop | Out-Null
+        Invoke-KevDownload -Url $Url -OutFile $tmp -TimeoutSec $TimeoutSec
         return Read-KevCatalogFile -Path $tmp -SourceLabel $Url
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue

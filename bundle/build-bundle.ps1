@@ -30,9 +30,11 @@
     Path to a pre-downloaded official Python embeddable win-amd64 .zip. If
     omitted (and not -SkipVenv), the script downloads Python $PythonVersion.
 
-.PARAMETER SkipPwsh / -SkipVenv
-    Skip vendoring the runtime / building the venv. For testing the bundle layout
-    without the heavy download/install. A production bundle uses neither.
+.PARAMETER SkipPwsh / -SkipVenv / -SkipKev
+    Skip vendoring the runtime / building the venv / downloading the CISA KEV
+    catalog. For testing the bundle layout without the heavy download/install,
+    and for skeleton builds on a host with no network. A production bundle uses
+    none of them: each one leaves manifest.complete = false.
 #>
 [CmdletBinding()]
 param(
@@ -230,7 +232,7 @@ if ($SkipVenv) {
 # location, staleness bookkeeping, or atomic-write machinery. US Government
 # public domain, so redistribution is fine.
 if ($SkipKev) {
-    Write-Step 'Skipping KEV catalog (-SkipKev) -- offline scans will report KEV-CATALOG-UNAVAILABLE'
+    Write-Warning 'SKIP: CISA KEV catalog not vendored (-SkipKev). Bundle is NOT operator-ready; offline scans will report KEV-CATALOG-UNAVAILABLE.'
 } else {
     $kevDir = Join-Path $bundleDir 'tools/kev'
     New-Item -ItemType Directory -Path $kevDir -Force | Out-Null
@@ -240,7 +242,7 @@ if ($SkipKev) {
         Copy-Item -LiteralPath $KevCatalogPath -Destination $kevOut -Force
     } else {
         Write-Step 'Downloading CISA KEV catalog'
-        Invoke-WebRequest -Uri $script:KevDefaultSources[0] -OutFile $kevOut
+        Invoke-KevDownload -Url $script:KevDefaultSources[0] -OutFile $kevOut -TimeoutSec 60
     }
     # Validate with the engine's own loader BEFORE sealing: a proxy login page or
     # a schema change must fail the build, never ship as "the catalog".
@@ -264,7 +266,10 @@ $manifest = [ordered]@{
     }
     hashAlgorithm = 'SHA256'
     fileHashes    = (Get-SealedFileHashes -BundleDir $bundleDir)
-    complete      = (-not $SkipPwsh -and -not $SkipVenv)
+    # -SkipKev counts too (PR #47 review): a bundle without the vendored catalog
+    # cannot deliver the KEV coverage an operator-ready bundle promises, so it
+    # must not advertise itself as complete.
+    complete      = (-not $SkipPwsh -and -not $SkipVenv -and -not $SkipKev)
 }
 $manifestPath = Join-Path $bundleDir 'manifest.json'
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding utf8

@@ -5,7 +5,7 @@
 
     Offline-safe by construction: every catalog here is a fixture string parsed
     with ConvertFrom-Json, and each test that touches the network mocks
-    Invoke-WebRequest. One -Tag 'Online' test checks the live feed still has the
+    Invoke-KevDownload. One -Tag 'Online' test checks the live feed still has the
     shape we depend on, so an upstream schema change is caught deliberately
     rather than by a silent loss of coverage.
 #>
@@ -85,6 +85,20 @@ Describe 'ConvertTo-KevCatalog — validation' {
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 
+    It 'rejects a catalog whose declared count does not match its entries' {
+        # A truncated or partially rewritten mirror must fail loudly, not index
+        # what it happens to carry (PR #47 review).
+        { ConvertTo-KevCatalog -Parsed ('{"count":5,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
+    It 'rejects a catalog carrying any malformed entry, even alongside valid ones' {
+        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"not-a-cve"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
     It 'rejects an empty catalog and one whose entries carry no cveID' {
         { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
@@ -129,24 +143,24 @@ Describe 'Get-KevCatalog — source resolution' {
     AfterEach { Remove-Item $script:KevTmp -Recurse -Force -ErrorAction SilentlyContinue }
 
     It 'prefers an operator-supplied catalog and makes no request' {
-        Mock -CommandName Invoke-WebRequest -MockWith { throw 'network must not be used' }
+        Mock -CommandName Invoke-KevDownload -MockWith { throw 'network must not be used' }
         $cat = Get-KevCatalog -Mode online -CatalogPath $script:KevFile
         $cat.Count | Should -Be 1
-        Should -Invoke -CommandName Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke -CommandName Invoke-KevDownload -Times 0 -Exactly
     }
 
     It 'never makes a request in offline mode, falling back to the vendored copy' {
-        Mock -CommandName Invoke-WebRequest -MockWith { throw 'network must not be used' }
+        Mock -CommandName Invoke-KevDownload -MockWith { throw 'network must not be used' }
         $cat = Get-KevCatalog -Mode offline -VendoredPath $script:KevFile
         $cat.Source | Should -Be 'vendored bundle copy'
-        Should -Invoke -CommandName Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke -CommandName Invoke-KevDownload -Times 0 -Exactly
     }
 
     It 'falls through to the GitHub mirror when cisa.gov returns an unusable body' {
-        Mock -CommandName Invoke-WebRequest -ParameterFilter { $Uri -like '*cisa.gov*' } -MockWith {
+        Mock -CommandName Invoke-KevDownload -ParameterFilter { $Url -like '*cisa.gov*' } -MockWith {
             '<html>proxy login</html>' | Set-Content -LiteralPath $OutFile -Encoding utf8
         }
-        Mock -CommandName Invoke-WebRequest -ParameterFilter { $Uri -like '*githubusercontent*' } -MockWith {
+        Mock -CommandName Invoke-KevDownload -ParameterFilter { $Url -like '*githubusercontent*' } -MockWith {
             KevJson | Set-Content -LiteralPath $OutFile -Encoding utf8
         }
         $cat = Get-KevCatalog -Mode online
@@ -155,16 +169,16 @@ Describe 'Get-KevCatalog — source resolution' {
     }
 
     It 'returns $null with a reportable reason when every source fails' {
-        Mock -CommandName Invoke-WebRequest -MockWith { throw 'No such host is known.' }
+        Mock -CommandName Invoke-KevDownload -MockWith { throw 'No such host is known.' }
         $cat = Get-KevCatalog -Mode online
         $cat | Should -BeNullOrEmpty
         $script:KevUnavailableReason | Should -Match 'No usable KEV catalog'
     }
 
     It 'honours -KevCatalogUrl instead of the default source order' {
-        Mock -CommandName Invoke-WebRequest -MockWith { KevJson | Set-Content -LiteralPath $OutFile -Encoding utf8 }
+        Mock -CommandName Invoke-KevDownload -MockWith { KevJson | Set-Content -LiteralPath $OutFile -Encoding utf8 }
         [void](Get-KevCatalog -Mode online -CatalogUrl 'https://mirror.internal/kev.json')
-        Should -Invoke -CommandName Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://mirror.internal/kev.json' }
+        Should -Invoke -CommandName Invoke-KevDownload -Times 1 -Exactly -ParameterFilter { $Url -eq 'https://mirror.internal/kev.json' }
     }
 }
 

@@ -9,6 +9,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-11
+
 ### Fixed
 - OSV responses that are reachable but not a usable `querybatch` body (no
   top-level `results`, an empty body, a proxy page, or a result count that does

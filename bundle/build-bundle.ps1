@@ -37,8 +37,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDir   = (Join-Path $PSScriptRoot 'out'),
-    [string]$Version     = '0.14.0',
-    [string]$PwshVersion = '7.4.19',         # pinned PS 7.4 LTS patch
+    [string]$Version     = '0.15.0',
+    [string]$PwshVersion = '7.4.20',         # pinned PS 7.4 LTS patch
     [string]$PwshZip     = '',
     [string]$PythonVersion = '3.12.10',
     [string]$PythonZip   = '',

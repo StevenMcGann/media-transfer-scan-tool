@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Current package release:** v0.14.0
+- **Current package release:** v0.15.0
 - **Development target:** v1.0.0 isolated-host validation; compatible interim
   0.x maintenance releases may ship before that operational gate is complete
 - **Report schema:** `1.0.0`, frozen since package v0.9.0
@@ -75,6 +75,7 @@ major package and schema version bump.
 | v0.12.0 | NuGet identity and OSV failure-bound hardening |
 | v0.13.0 | Recursive archive-member classification/dispatch with run-wide depth, entry, byte, and staging controls |
 | v0.14.0 | Bounded metadata-only dependency auditing for archive content blocked from normal extraction |
+| v0.15.0 | OSV response-shape validation and scan-wide, logged-and-reported advisory lookup budgets |
 
 Historical release detail belongs in [CHANGELOG.md](CHANGELOG.md); this file
 tracks current architecture and remaining work.

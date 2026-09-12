@@ -88,14 +88,21 @@ Describe 'ConvertTo-KevCatalog — validation' {
     It 'rejects a catalog whose declared count does not match its entries' {
         # A truncated or partially rewritten mirror must fail loudly, not index
         # what it happens to carry (PR #47 review).
-        { ConvertTo-KevCatalog -Parsed ('{"count":5,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","count":5,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 
     It 'rejects a catalog carrying any malformed entry, even alongside valid ones' {
-        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
-        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"not-a-cve"}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"not-a-cve"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
+    It 'rejects a catalog with no parseable dateReleased (staleness could never fire)' {
+        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"not-a-date","vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 
@@ -146,6 +153,17 @@ Describe 'Get-KevCatalog — source resolution' {
         Mock -CommandName Invoke-KevDownload -MockWith { throw 'network must not be used' }
         $cat = Get-KevCatalog -Mode online -CatalogPath $script:KevFile
         $cat.Count | Should -Be 1
+        Should -Invoke -CommandName Invoke-KevDownload -Times 0 -Exactly
+    }
+
+    It 'does not fall back to the network when an explicit catalog path is unusable' {
+        # A host that pins -KevCatalogPath is constraining catalog access; a bad
+        # path must not silently become a public download (PR #47 review).
+        Mock -CommandName Invoke-KevDownload -MockWith { throw 'network must not be used' }
+        $bad = Join-Path $script:KevTmp 'broken.json'
+        '<html>not a catalog</html>' | Set-Content -LiteralPath $bad -Encoding utf8
+        $cat = Get-KevCatalog -Mode online -CatalogPath $bad -VendoredPath $script:KevFile
+        $cat.Source | Should -Be 'vendored bundle copy'   # vendored fallback still allowed
         Should -Invoke -CommandName Invoke-KevDownload -Times 0 -Exactly
     }
 

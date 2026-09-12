@@ -113,9 +113,21 @@ function ConvertTo-KevCatalog {
         }
     }
 
+    # A catalog whose release date cannot be read can never trip the staleness
+    # warning, so an arbitrarily old copy would look current forever (PR #47
+    # review). Reject it: the scan then reports KEV-CATALOG-UNAVAILABLE naming
+    # this reason, which is visible and actionable, rather than enriching from a
+    # copy whose freshness nobody can judge.
+    $released = Format-KevDate (Get-OsvJsonProp $Parsed 'dateReleased')
+    $releasedProbe = [datetime]::MinValue
+    if (-not $released -or -not [datetime]::TryParse($released, [ref]$releasedProbe)) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source has no parseable 'dateReleased', so its freshness could never be checked")
+    }
+
     [PSCustomObject]@{
         Version      = [string](Get-OsvJsonProp $Parsed 'catalogVersion')
-        DateReleased = Format-KevDate (Get-OsvJsonProp $Parsed 'dateReleased')
+        DateReleased = $released
         Count        = $byCve.Count
         Sha256       = $Sha256
         Source       = $Source
@@ -162,9 +174,14 @@ function Invoke-KevDownload {
     if ($MaxBytes -le 0) { $MaxBytes = $script:KevMaxBytes }
     $capMb  = [Math]::Round($MaxBytes / 1MB, 0)
     $client = [System.Net.Http.HttpClient]::new()
+    # HttpClient.Timeout stops applying once ResponseHeadersRead has completed, so
+    # a source that sends headers and then stalls or drip-feeds the body would hang
+    # the scan indefinitely (PR #47 review). A CancellationTokenSource deadline
+    # bounds the WHOLE operation -- headers and every body read -- at $TimeoutSec.
+    $cts = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSec))
     try {
         $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
-        $resp = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $resp = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).GetAwaiter().GetResult()
         try {
             if (-not $resp.IsSuccessStatusCode) {
                 throw "HTTP $([int]$resp.StatusCode) $($resp.ReasonPhrase) from $Url"
@@ -174,12 +191,12 @@ function Invoke-KevDownload {
                 throw [System.IO.InvalidDataException]::new(
                     "KEV response from $Url declares $([Math]::Round($declared / 1MB, 1)) MB, over the $capMb MB cap")
             }
-            $in  = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $in  = $resp.Content.ReadAsStreamAsync($cts.Token).GetAwaiter().GetResult()
             $out = [System.IO.File]::Create($OutFile)
             try {
                 $buffer = [byte[]]::new(81920)
                 $total  = 0L
-                while (($read = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                while (($read = $in.ReadAsync($buffer, 0, $buffer.Length, $cts.Token).GetAwaiter().GetResult()) -gt 0) {
                     $total += $read
                     if ($total -gt $MaxBytes) {
                         throw [System.IO.InvalidDataException]::new(
@@ -194,7 +211,7 @@ function Invoke-KevDownload {
             $resp.Dispose()
         }
     } finally {
-        $client.Dispose()
+        $client.Dispose(); $cts.Dispose()
     }
 }
 
@@ -218,7 +235,10 @@ function Invoke-KevCatalogFetch {
 function Get-KevCatalog {
     <#
         Resolve the KEV catalog for one scan, in order:
-          1. -CatalogPath (operator-supplied; wins outright, no network)
+          1. -CatalogPath (operator-supplied; wins outright, no network -- and if
+             it is unusable the online sources are NOT tried, because a host that
+             pins a local path is deliberately constraining catalog access;
+             PR #47 review)
           2. online refresh -- -CatalogUrl if given, else the default sources in
              order (cisa.gov, then the cisagov/kev-data mirror)
           3. the vendored bundle copy (tools/kev/...), which is how an
@@ -250,14 +270,14 @@ function Get-KevCatalog {
             return $cat
         } catch {
             # An explicitly supplied path that fails is operator error worth
-            # surfacing; fall through so the scan still gets whatever coverage
-            # the vendored copy can provide.
+            # surfacing. Fall through to the VENDORED copy only -- never to the
+            # network, which the operator was constraining by pinning a path.
             $attempts.Add("-KevCatalogPath '$CatalogPath': $($_.Exception.Message)")
             Write-Log -Level WARN -Message "KEV: operator-supplied catalog unusable: $($_.Exception.Message)"
         }
     }
 
-    if ($Mode -eq 'online') {
+    if ($Mode -eq 'online' -and -not $CatalogPath) {
         $urls = if ($CatalogUrl) { @($CatalogUrl) } else { $script:KevDefaultSources }
         foreach ($u in $urls) {
             try {

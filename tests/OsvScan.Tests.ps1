@@ -438,10 +438,15 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
     }
 
     It 'gives every scan context one shared fallback budget and threads it through OsvScan' {
-        (New-AnalyzerContext -Mode online).OsvFallback.MaxQueries | Should -Be 200
+        $ctx = New-AnalyzerContext -Mode online
+        $ctx.OsvFallback.MaxQueries | Should -Be 200
+        $ctx.OsvDetail.MaxFetches   | Should -Be 500
+        $ctx.OsvDetail.MaxSeconds   | Should -Be 600
         Mock -CommandName Get-OsvDependencyFindings -MockWith { @() }
         [void](ScanDir 'python_requirements/vulnerable' -Mode online)
-        Should -Invoke -CommandName Get-OsvDependencyFindings -ParameterFilter { $null -ne $FallbackBudget -and $FallbackBudget.MaxQueries -eq 200 }
+        Should -Invoke -CommandName Get-OsvDependencyFindings -ParameterFilter {
+            $null -ne $FallbackBudget -and $FallbackBudget.MaxQueries -eq 200 -and
+            $null -ne $DetailBudget -and $DetailBudget.MaxSeconds -eq 600 }
     }
 
     It 'caps each fallback request timeout by the remaining budget time, never 0 (= infinite)' {
@@ -471,6 +476,72 @@ Describe 'Get-OsvDependencyFindings — OSV response shapes (issue #42, no netwo
         $gaps.Count    | Should -Be 1
         $gaps[0].Issue | Should -Match 'could not reach api\.osv\.dev'
         Should -Invoke -CommandName Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*/query' }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+Describe 'Get-OsvDependencyFindings — scan-wide advisory-detail budget (no network)' {
+    BeforeAll {
+        function script:VulnDeps([int]$Count, [int]$Offset = 0) {
+            1..$Count | ForEach-Object {
+                $n = $_ + $Offset
+                @{ Name = "pkg$n"; Version = '1.0.0'; Ecosystem = 'PyPI'; ManifestFile = "req$Offset.txt"; DepLabel = "pkg$n 1.0.0" }
+            }
+        }
+    }
+    BeforeEach {
+        # Each dependency is vulnerable to its own distinct advisory, id derived from its name.
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith {
+            param($Queries, $TimeoutSec)
+            @($Queries | ForEach-Object { [PSCustomObject]@{ vulns = @([PSCustomObject]@{ id = "GHSA-$($_.package.name)" }) } })
+        }
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            [PSCustomObject]@{ id = $Id; summary = 'test advisory'; database_specific = [PSCustomObject]@{ severity = 'LOW' } }
+        }
+        Mock -CommandName Write-Log -MockWith { }
+    }
+
+    It 'stops at the time cap, logs it, reports it, and still reports every confirmed vulnerability' {
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(VulnDeps 2) `
+            -MaxDetailSeconds 0)
+        Should -Invoke -CommandName Get-OsvVulnDetails -Times 0 -Exactly
+        $vulns = @($findings | Where-Object { $_.Category -eq 'vuln-dependency' })
+        $vulns.Count | Should -Be 2
+        ($vulns.Severity | Select-Object -Unique) | Should -Be 'HIGH'   # detail unavailable => conservative default
+        $stopped = @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'advisory-detail lookup stopped' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match '0s total detail-fetch time cap'
+        $stopped[0].Issue | Should -Match '2 of 2'
+        Should -Invoke -CommandName Write-Log -ParameterFilter { $Level -eq 'WARN' -and $Message -match 'advisory-detail lookup stopped after reaching the 0s' }
+    }
+
+    It 'spends one detail budget across manifests, not one per call' {
+        $shared = New-OsvDetailBudget -MaxFetches 2
+        $first  = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(VulnDeps 2 0)  -DetailBudget $shared)
+        $second = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(VulnDeps 1 10) -DetailBudget $shared)
+        Should -Invoke -CommandName Get-OsvVulnDetails -Times 2 -Exactly
+        @($first | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' }).Count | Should -Be 0
+        $stopped = @($second | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' })
+        $stopped.Count    | Should -Be 1
+        $stopped[0].Issue | Should -Match '2-advisory total detail-fetch cap'
+        $stopped[0].File  | Should -Be 'req10.txt'
+        # The second manifest's confirmed hit is still reported.
+        @($second | Where-Object { $_.Category -eq 'vuln-dependency' }).Count | Should -Be 1
+    }
+
+    It 'caps each detail request timeout by the remaining budget time, never 0 (= infinite)' {
+        [void](Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(VulnDeps 2) `
+            -TimeoutSec 30 -MaxDetailSeconds 5)
+        Should -Invoke -CommandName Get-OsvVulnDetails -Times 2 -Exactly -ParameterFilter { $TimeoutSec -ge 1 -and $TimeoutSec -le 5 }
+    }
+
+    It 'logs a fallback budget cap as well as reporting it' {
+        Mock -CommandName Invoke-OsvQueryBatch -MockWith { throw [System.IO.InvalidDataException]::new("OSV querybatch returned an empty JSON object '{}'") }
+        $findings = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(VulnDeps 1) `
+            -MaxFallbackQueries 0)
+        @($findings | Where-Object { $_.TestID -eq 'OSV-QUERY-ERR' -and $_.Issue -match 'cap of 0 fallback requests' }).Count | Should -Be 1
+        Should -Invoke -CommandName Write-Log -ParameterFilter { $Level -eq 'WARN' -and $Message -match 'cap of 0 fallback requests' -and $Message -match 'OSV-QUERY-ERR' }
     }
 }
 

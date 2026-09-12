@@ -83,6 +83,8 @@ Entry points: `Scan.cmd` (bundle) and `src\Invoke-MediaTransferScan.ps1` (engine
 | `-VenvDir <dir>` | path | Use a specific scanner venv (the bundle sets this). |
 | `-Quiet` | switch | Suppress console/log noise. |
 | `-OutputFormat` | `all` (default) \| `json` | `json` echoes the JSON report path to stdout. |
+| `-KevCatalogPath <file>` | path | CISA KEV catalog JSON to use instead of downloading or the vendored copy. |
+| `-KevCatalogUrl <url>` | url | Pin KEV retrieval to one source (internal mirror) instead of the default cisa.gov → `cisagov/kev-data` order. Online mode only. |
 
 ### Exit codes (stable)
 

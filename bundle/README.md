@@ -14,7 +14,7 @@ pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -Zip
 pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -PwshZip C:\downloads\PowerShell-7.4.20-win-x64.zip -Zip
 
 # Skeleton (layout only — NOT operator-ready; for testing the build itself):
-pwsh ./bundle/build-bundle.ps1 -SkipPwsh -SkipVenv
+pwsh ./bundle/build-bundle.ps1 -SkipPwsh -SkipVenv -SkipKev
 ```
 
 ## Output layout

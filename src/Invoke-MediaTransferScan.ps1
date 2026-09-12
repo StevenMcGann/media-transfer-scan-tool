@@ -19,6 +19,12 @@
     prompting; offline mode never installs them.
 .PARAMETER OutputFormat
     'all' (default) or 'json' to also echo the JSON report path for capture.
+.PARAMETER KevCatalogPath
+    Operator-supplied CISA KEV catalog JSON. Wins over any download; required for
+    KEV coverage on an air-gapped host without a vendored catalog.
+.PARAMETER KevCatalogUrl
+    Pin KEV retrieval to one URL (an internal mirror) instead of the default
+    cisa.gov -> cisagov/kev-data order. Online mode only.
 .NOTES
     Version : 0.15.0
 #>
@@ -32,7 +38,9 @@ param(
     [switch]$AutoInstall,
     [string]$VenvDir = '',   # override scanner venv location (offline bundle points at its vendored venv)
     [switch]$Quiet,
-    [ValidateSet('all', 'json')][string]$OutputFormat = 'all'
+    [ValidateSet('all', 'json')][string]$OutputFormat = 'all',
+    [string]$KevCatalogPath = '',
+    [string]$KevCatalogUrl = ''
 )
 
 Set-StrictMode -Version Latest
@@ -44,7 +52,7 @@ $script:ToolVersion = '0.15.0'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot
-foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Osv', 'DependencyMetadata', 'Report', 'Engine') {
+foreach ($lib in 'Logging', 'Findings', 'Process', 'Classify', 'Registry', 'Provisioning', 'Expand-Archive', 'Notebook', 'Osv', 'Kev', 'DependencyMetadata', 'Report', 'Engine') {
     . (Join-Path $here "lib/$lib.ps1")
 }
 
@@ -57,7 +65,8 @@ $script:ExitBadInput = 3
 function Invoke-Main {
     param([string]$Path, [string]$Profile, [string[]]$EnableAnalyzers,
           [string[]]$DisableAnalyzers, [string]$Mode, [bool]$AutoInstall,
-          [string]$VenvDir, [bool]$Quiet, [string]$OutputFormat)
+          [string]$VenvDir, [bool]$Quiet, [string]$OutputFormat,
+          [string]$KevCatalogPath = '', [string]$KevCatalogUrl = '')
 
     $script:Quiet = $Quiet
 
@@ -100,11 +109,20 @@ function Invoke-Main {
         }
     }
 
+    # ── CISA KEV catalog (issue #41) ────────────────────────────────────────
+    # Only the RESOLUTION PLAN is built here. The catalog itself is fetched by
+    # the OSV audit on first dependency use (PR #47 review): OsvScan is enabled
+    # for every core-profile scan, so resolving here made a PDF-only submission
+    # contact -- and potentially wait on -- the KEV endpoints for nothing.
+    # Never fatal: an unresolvable catalog becomes $null and the gap is reported.
+    $kevState = New-KevResolutionState -Mode $Mode -CatalogPath $KevCatalogPath -CatalogUrl $KevCatalogUrl `
+        -VendoredPath (Join-Path (Split-Path $here -Parent) $script:KevVendoredRel)
+
     try {
         $result = Invoke-Scan -Path $scanRoot -Profile $Profile `
             -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers `
             -Mode $Mode -AnalyzerDir (Join-Path $here 'analyzers') -ReportsDir $reportsDir `
-            -HelperDir (Join-Path $here 'helpers') -ProvisionResult $provision
+            -HelperDir (Join-Path $here 'helpers') -ProvisionResult $provision -KevState $kevState
     } catch {
         Write-Log -Level ERROR -Message "Scan failed: $_"
         return $script:ExitError
@@ -123,6 +141,7 @@ function Invoke-Main {
 if ($MyInvocation.InvocationName -ne '.') {
     $code = Invoke-Main -Path $Path -Profile $Profile -EnableAnalyzers $EnableAnalyzers `
         -DisableAnalyzers $DisableAnalyzers -Mode $Mode -AutoInstall:$AutoInstall.IsPresent `
-        -VenvDir $VenvDir -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat
+        -VenvDir $VenvDir -Quiet:$Quiet.IsPresent -OutputFormat $OutputFormat `
+        -KevCatalogPath $KevCatalogPath -KevCatalogUrl $KevCatalogUrl
     exit $code
 }

@@ -56,6 +56,28 @@ select offline mode. In v0.15.0 there is no vendored OSV advisory database, so
 `-Mode offline` emits explicit INFO coverage-gap findings for dependency inputs
 instead of treating them as vulnerability-free.
 
+### CISA KEV (known exploited) enrichment
+
+Dependency vulnerabilities that appear in the CISA Known Exploited
+Vulnerabilities catalog are annotated in place — the finding names the CVE, the
+date CISA added it, whether it is linked to ransomware campaigns, and CISA's
+required action — and are raised to at least `HIGH`. The due date shown is
+CISA's BOD 22-01 deadline **for US federal agencies**; it is context, not an
+obligation on a private reviewer.
+
+The bundle ships a vendored catalog under `tools/kev/`, sealed in
+`manifest.json` like the engine. Online scans refresh it from `www.cisa.gov`,
+falling back to CISA's `raw.githubusercontent.com/cisagov/kev-data` mirror —
+allowlist either (or both) alongside `api.osv.dev` on a proxied host. Use
+`-KevCatalogPath <file>` to supply a copy directly, or `-KevCatalogUrl <url>` to
+pin an internal mirror.
+
+**Absence of a KEV note is never proof a CVE is not exploited.** When the
+catalog is missing, stale (30 days or older), or could not be evaluated, the
+report says so explicitly via `KEV-CATALOG-UNAVAILABLE`, `KEV-CATALOG-STALE`, or
+`KEV-NOT-EVALUATED`. The catalog version and source appear in the HTML and TXT
+report headers.
+
 > By default (`-Profile core`) the high-signal analyzers run and the broad,
 > false-positive-prone ones (Bandit, detect-secrets) are **off**. The report
 > always lists what was *not* checked, so a clean report never hides a gap.

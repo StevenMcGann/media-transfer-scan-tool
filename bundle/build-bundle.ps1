@@ -30,9 +30,11 @@
     Path to a pre-downloaded official Python embeddable win-amd64 .zip. If
     omitted (and not -SkipVenv), the script downloads Python $PythonVersion.
 
-.PARAMETER SkipPwsh / -SkipVenv
-    Skip vendoring the runtime / building the venv. For testing the bundle layout
-    without the heavy download/install. A production bundle uses neither.
+.PARAMETER SkipPwsh / -SkipVenv / -SkipKev
+    Skip vendoring the runtime / building the venv / downloading the CISA KEV
+    catalog. For testing the bundle layout without the heavy download/install,
+    and for skeleton builds on a host with no network. A production bundle uses
+    none of them: each one leaves manifest.complete = false.
 #>
 [CmdletBinding()]
 param(
@@ -43,8 +45,10 @@ param(
     [string]$PythonVersion = '3.12.10',
     [string]$PythonZip   = '',
     [string]$BuiltUtc    = '',               # ISO timestamp; defaults to now if empty
+    [string]$KevCatalogPath = '',            # pre-downloaded CISA KEV catalog; downloaded when empty
     [switch]$SkipPwsh,
     [switch]$SkipVenv,
+    [switch]$SkipKev,
     [switch]$Zip
 )
 
@@ -62,9 +66,13 @@ $SCANNER_PACKAGES = @(
     @{ Id = 'oletools';       Min = '0.60' }
 )
 
-# Reuse the proven provisioning functions for the venv build.
+# Reuse the proven provisioning functions for the venv build, and the engine's own
+# KEV loader so a vendored catalog is validated by exactly the code that will read
+# it at scan time (issue #41). Kev.ps1 depends on helpers in Osv.ps1.
 . (Join-Path $RepoRoot 'src/lib/Logging.ps1')
 . (Join-Path $RepoRoot 'src/lib/Provisioning.ps1')
+. (Join-Path $RepoRoot 'src/lib/Osv.ps1')
+. (Join-Path $RepoRoot 'src/lib/Kev.ps1')
 $script:Quiet = $false
 
 function Write-Step { param([string]$m) Write-Host "==> $m" -ForegroundColor Cyan }
@@ -98,6 +106,13 @@ function Get-SealedFileHashes {
     foreach ($f in 'bootstrap.ps1', 'Scan.cmd') {
         $p = Join-Path $BundleDir $f
         if (Test-Path -LiteralPath $p) { $targets.Add($p) }
+    }
+    # tools/kev IS sealed (unlike the volatile runtime/venv): it is one small,
+    # stable data file that drives a security decision, so tampering with it must
+    # be as detectable as tampering with the engine (issue #41).
+    $kevDir = Join-Path $BundleDir 'tools/kev'
+    if (Test-Path -LiteralPath $kevDir) {
+        Get-ChildItem -LiteralPath $kevDir -Recurse -File | ForEach-Object { $targets.Add($_.FullName) }
     }
     foreach ($t in ($targets | Sort-Object)) {
         # $t is absolute (Get-ChildItem .FullName / Join-Path of an absolute base)
@@ -211,6 +226,48 @@ if ($SkipVenv) {
     $toolVersions['python'] = $PythonVersion
 }
 
+# ── 3c. CISA KEV catalog (issue #41) ─────────────────────────────────────────
+# Vendored rather than cached at runtime: the bundle already seals every shipped
+# file, so an air-gapped host gets a tamper-evident catalog with no cache
+# location, staleness bookkeeping, or atomic-write machinery. US Government
+# public domain, so redistribution is fine.
+if ($SkipKev) {
+    Write-Warning 'SKIP: CISA KEV catalog not vendored (-SkipKev). Bundle is NOT operator-ready; offline scans will report KEV-CATALOG-UNAVAILABLE.'
+} else {
+    $kevDir = Join-Path $bundleDir 'tools/kev'
+    New-Item -ItemType Directory -Path $kevDir -Force | Out-Null
+    $kevOut = Join-Path $kevDir 'known_exploited_vulnerabilities.json'
+    if ($KevCatalogPath) {
+        Write-Step "Vendoring KEV catalog from $KevCatalogPath"
+        Copy-Item -LiteralPath $KevCatalogPath -Destination $kevOut -Force
+    } else {
+        # Try every configured source, not just the first (PR #47 review): the
+        # mirror exists precisely because a release host's proxy may allow
+        # raw.githubusercontent.com but not www.cisa.gov, and a build that gave
+        # up on the first source would fail before producing any bundle.
+        $kevErrors = @()
+        foreach ($kevUrl in $script:KevDefaultSources) {
+            try {
+                Write-Step "Downloading CISA KEV catalog from $kevUrl"
+                Invoke-KevDownload -Url $kevUrl -OutFile $kevOut -TimeoutSec 60
+                $kevErrors = @()
+                break
+            } catch {
+                Write-Warning "KEV source failed ($kevUrl): $($_.Exception.Message)"
+                $kevErrors += "$kevUrl : $($_.Exception.Message)"
+            }
+        }
+        if ($kevErrors.Count -gt 0) {
+            throw "Could not download the CISA KEV catalog from any source. Tried: $($kevErrors -join '; '). Supply -KevCatalogPath, or -SkipKev for a non-operator-ready build."
+        }
+    }
+    # Validate with the engine's own loader BEFORE sealing: a proxy login page or
+    # a schema change must fail the build, never ship as "the catalog".
+    $kevCat = Read-KevCatalogFile -Path $kevOut -SourceLabel 'vendored bundle copy'
+    $toolVersions['kevCatalog'] = $kevCat.Version
+    Write-Step "Vendored KEV catalog $($kevCat.Version) ($($kevCat.Count) CVEs, released $($kevCat.DateReleased))"
+}
+
 # ── 4. Manifest ──────────────────────────────────────────────────────────────
 if (-not $BuiltUtc) { $BuiltUtc = (Get-Date).ToUniversalTime().ToString('o') }
 $manifest = [ordered]@{
@@ -219,10 +276,17 @@ $manifest = [ordered]@{
     schemaVersion = '0.1.0'
     runtime       = 'powershell-7.4-lts-win-x64'
     toolVersions  = $toolVersions
-    advisoryDb    = @{ note = 'live (online) until vendored CVE/OSV cache is added'; date = $null }
+    advisoryDb    = @{
+        note              = 'OSV advisories are live (online only); the CISA KEV catalog is vendored under tools/kev'
+        date              = $null
+        kevCatalogVersion = $(if ($toolVersions.Contains('kevCatalog')) { $toolVersions['kevCatalog'] } else { $null })
+    }
     hashAlgorithm = 'SHA256'
     fileHashes    = (Get-SealedFileHashes -BundleDir $bundleDir)
-    complete      = (-not $SkipPwsh -and -not $SkipVenv)
+    # -SkipKev counts too (PR #47 review): a bundle without the vendored catalog
+    # cannot deliver the KEV coverage an operator-ready bundle promises, so it
+    # must not advertise itself as complete.
+    complete      = (-not $SkipPwsh -and -not $SkipVenv -and -not $SkipKev)
 }
 $manifestPath = Join-Path $bundleDir 'manifest.json'
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding utf8

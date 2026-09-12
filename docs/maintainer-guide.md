@@ -52,8 +52,14 @@ pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -Zip
 Produces `bundle/out/media-transfer-scan-tool-0.15.0/` (+ `.zip`) containing the
 engine, vendored portable **PowerShell 7.4 LTS** and **Python 3.12** runtimes,
 the scanner package environment, and
-`manifest.json`. Flags: `-PwshZip <path>` to use a pre-downloaded pwsh,
-`-SkipPwsh`/`-SkipVenv` for layout-only test builds.
+`manifest.json`, plus the vendored CISA KEV catalog under `tools/kev/` (sealed
+like the engine, and validated with the engine's own loader before sealing — a
+proxy page or a schema change fails the build). Flags: `-PwshZip <path>` to use a
+pre-downloaded pwsh, `-KevCatalogPath <file>` to vendor an already-downloaded KEV
+catalog, `-SkipPwsh`/`-SkipVenv`/`-SkipKev` for layout-only test builds.
+
+Build the bundle close to release: the vendored KEV catalog ages from its build
+date, and scans report `KEV-CATALOG-STALE` once it is 30 days or older.
 
 Use the current project version and current PowerShell 7.4 LTS patch for each
 release. The version values above describe v0.15.0; the release checklist below

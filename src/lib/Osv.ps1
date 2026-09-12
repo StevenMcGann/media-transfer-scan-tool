@@ -447,6 +447,9 @@ function Get-OsvDependencyFindings {
         [PSCustomObject]$DetailBudget = $null,
         [int]$MaxDetailFetches = 500,
         [int]$MaxDetailSeconds = 600,
+        # CISA KEV catalog (issue #41) from Context.KevCatalog, or $null when it
+        # could not be obtained. Enriches findings; never gates them.
+        [PSCustomObject]$KevCatalog = $null,
         # Bounds for the per-package /v1/query fallback (issue #42, PR #43 review).
         # Slow-but-successful fallback requests reset the consecutive-failure
         # counter, so without these a large manifest against a persistently
@@ -631,7 +634,18 @@ function Get-OsvDependencyFindings {
             $id = $uniqueIds[$k]
             $DetailBudget.Fetches++
             try {
-                $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
+                $fetched = Get-OsvVulnDetails -Id $id -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
+                # A truthy-but-unusable 200 (proxy login page, '{"error":...}') must
+                # NOT pass as an advisory record (PR #47 review): its missing aliases
+                # would silently defeat KEV evaluation -- no match AND no
+                # KEV-NOT-EVALUATED -- and Get-OsvSeverityBand would score HTML.
+                # Treat it as a failed fetch so the existing detail-unavailable path
+                # (HIGH + explicit gap findings) handles it.
+                if ($fetched -isnot [System.Management.Automation.PSCustomObject] -or -not (Get-OsvJsonProp $fetched 'id')) {
+                    throw [System.IO.InvalidDataException]::new(
+                        "advisory detail for $id is $(Get-OsvResponseShape $fetched), not an advisory record")
+                }
+                $detailCache[$id] = $fetched
                 $detailConsecutiveFailures = 0
             } catch {
                 Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"
@@ -668,8 +682,14 @@ function Get-OsvDependencyFindings {
         }
     }
 
+    # Manifests whose findings could not be KEV-evaluated because the advisory
+    # detail record (which carries the CVE aliases) was never obtained.
+    $kevUnevaluated = [System.Collections.Generic.List[string]]::new()
+    $kevManifests   = [System.Collections.Generic.List[string]]::new()
+
     foreach ($hit in $hits) {
         $dep = $hit.Dep
+        if (-not $kevManifests.Contains($dep.ManifestFile)) { $kevManifests.Add($dep.ManifestFile) }
         foreach ($id in $hit.VulnIds) {
             $detail = $detailCache[$id]
             if ($detail) {
@@ -698,13 +718,73 @@ function Get-OsvDependencyFindings {
                 $fixHint = if ($fixed.Count -gt 0) { " Fix: upgrade to $((@($fixed | Select-Object -Unique)) -join ' or ')." } else { '' }
                 $issue = "Dependency '$($dep.DepLabel)': ${id}: ${summary}${fixHint}"
                 $rec   = "Review and update '$($dep.Name)' to a patched version.$fixHint"
+                # KEV matches on CVE, and an OSV record is frequently GHSA- or
+                # PYSEC-primary with the CVE only in 'aliases' -- so KEV can only
+                # be evaluated when the detail record was actually fetched.
+                $kevIds = @($id) + @(Get-OsvJsonProp $detail 'aliases')
+                $kevEvaluated = $true
             } else {
                 $sev   = 'HIGH'
                 $issue = "Dependency '$($dep.DepLabel)': ${id}: known vulnerability (advisory detail lookup failed — see log for the id)."
                 $rec   = "Review '$($dep.Name) $($dep.Version)' against $id manually at https://osv.dev/vulnerability/$id."
+                $kevIds = @($id)
+                # Without the detail record the aliases are unknown, so a CVE-less
+                # primary id cannot be ruled in OR out of KEV (issue #41).
+                $kevEvaluated = ($id -match '^CVE-')
             }
+
+            $kevAnnotation = if ($kevEvaluated) { Get-KevAnnotation -Catalog $KevCatalog -Ids $kevIds } else { $null }
+            if ($kevAnnotation) {
+                $issue += Get-KevIssueText -Annotation $kevAnnotation -Catalog $KevCatalog
+                $rec   += Get-KevRecommendationText -Annotation $kevAnnotation
+                # Floor at HIGH (maintainer decision on #41: no ransomware-based
+                # escalation to CRITICAL). Only ever raises -- an advisory OSV
+                # already scored CRITICAL keeps its band.
+                if ($script:SeverityRank[$sev] -lt $script:SeverityRank['HIGH']) { $sev = 'HIGH' }
+            } elseif ($null -ne $KevCatalog -and -not $kevEvaluated -and -not $kevUnevaluated.Contains($dep.ManifestFile)) {
+                $kevUnevaluated.Add($dep.ManifestFile)
+            }
+
             $out.Add((New-Finding -Tool $Tool -Category 'vuln-dependency' -Severity $sev -Confidence 'HIGH' `
                 -UnitType $UnitType -File $dep.ManifestFile -Issue $issue -TestID $id -Recommendation $rec))
+        }
+    }
+
+    # KEV coverage gaps (issue #41). Reported only for manifests that actually
+    # produced a vulnerability finding: a manifest with nothing to enrich would
+    # just add noise. Absence of a KEV note must never read as "not exploited",
+    # so every gap is stated explicitly and logged, per the #44 bar.
+    if ($kevManifests.Count -gt 0) {
+        if ($null -eq $KevCatalog) {
+            $reason = if ($script:KevUnavailableReason) { $script:KevUnavailableReason } else { 'No KEV catalog was loaded for this scan.' }
+            Write-Log -Level WARN -Message ("KEV: {0} manifest(s) with vulnerability findings were not checked against KEV: {1}" -f $kevManifests.Count, $reason)
+            foreach ($mf in $kevManifests) {
+                $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                    -UnitType $UnitType -File $mf `
+                    -Issue ("CISA KEV enrichment unavailable -- vulnerabilities reported here were NOT checked against the KEV catalog. Absence of a KEV note is not evidence that a CVE is not actively exploited. {0}" -f $reason) `
+                    -TestID 'KEV-CATALOG-UNAVAILABLE' `
+                    -Recommendation 'Re-run online, pass -KevCatalogPath <file>, or use an operator bundle with a vendored catalog.'))
+            }
+        } else {
+            $ageDays = Get-KevCatalogAgeDays -Catalog $KevCatalog
+            if ($null -ne $ageDays -and $ageDays -ge $script:KevStaleDays) {
+                Write-Log -Level WARN -Message ("KEV: catalog {0} is {1} days old (>= {2}); newer entries are missing." -f $KevCatalog.Version, $ageDays, $script:KevStaleDays)
+                foreach ($mf in $kevManifests) {
+                    $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                        -UnitType $UnitType -File $mf `
+                        -Issue ("CISA KEV catalog {0} is {1} days old (released {2}, source: {3}). Matches remain valid, but CVEs added since then are missing -- absence of a KEV note is weaker evidence than usual." -f `
+                            $KevCatalog.Version, $ageDays, $KevCatalog.DateReleased, $KevCatalog.Source) `
+                        -TestID 'KEV-CATALOG-STALE' `
+                        -Recommendation 'Refresh the catalog with an online scan, or supply a current copy with -KevCatalogPath.'))
+                }
+            }
+            foreach ($mf in $kevUnevaluated) {
+                $out.Add((New-Finding -Tool $Tool -Category 'parser' -Severity 'INFO' -Confidence 'LOW' `
+                    -UnitType $UnitType -File $mf `
+                    -Issue 'CISA KEV could not be evaluated for one or more vulnerabilities here: the OSV advisory-detail record carrying the CVE aliases was unavailable, so a non-CVE advisory id could be neither matched nor ruled out.' `
+                    -TestID 'KEV-NOT-EVALUATED' `
+                    -Recommendation 'Re-run when api.osv.dev advisory detail is reachable, or check the advisory ids against https://www.cisa.gov/known-exploited-vulnerabilities-catalog manually.'))
+            }
         }
     }
     return $out.ToArray()

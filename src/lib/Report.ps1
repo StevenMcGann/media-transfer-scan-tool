@@ -48,14 +48,29 @@ function Write-JsonReport {
     return $ReportPath
 }
 
+function Get-KevProvenanceLine {
+    <#
+        One-line KEV catalog provenance for the HUMAN reports (issue #41).
+        Deliberately not part of the report model: the JSON report's top-level
+        fields are the frozen 1.0.0 contract, while HTML/TXT are explicitly
+        non-contractual (docs/contract.md), so provenance can surface there today
+        without a schema bump.
+    #>
+    param($KevCatalog)
+    if (-not $KevCatalog) { return 'none — dependency findings were NOT checked against CISA KEV' }
+    return ("{0} ({1} CVEs, released {2}, source: {3})" -f `
+        $KevCatalog.Version, $KevCatalog.Count, $KevCatalog.DateReleased, $KevCatalog.Source)
+}
+
 function Write-TxtReport {
-    param([PSCustomObject]$Model, [string]$ReportPath)
+    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null)
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine('media-transfer-scan-tool - summary')
     [void]$sb.AppendLine('=' * 52)
     [void]$sb.AppendLine("Scan root    : $($Model.ScanRoot)")
     [void]$sb.AppendLine("Generated    : $($Model.GeneratedUtc)")
     [void]$sb.AppendLine("Profile/Mode : $($Model.Profile) / $($Model.Mode)")
+    [void]$sb.AppendLine("KEV catalog  : $(Get-KevProvenanceLine $KevCatalog)")
     [void]$sb.AppendLine("Overall risk : $($Model.OverallRisk)")
     [void]$sb.AppendLine(("Findings     : CRIT {0}  HIGH {1}  MED {2}  LOW {3}  INFO {4}" -f `
         $Model.Counts.CRITICAL, $Model.Counts.HIGH, $Model.Counts.MEDIUM, $Model.Counts.LOW, $Model.Counts.INFO))
@@ -77,7 +92,7 @@ function Write-TxtReport {
 }
 
 function Write-HtmlReport {
-    param([PSCustomObject]$Model, [string]$ReportPath)
+    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null)
 
     $riskColor = switch ($Model.OverallRisk) {
         'CRITICAL' { '#b00020' } 'HIGH' { '#d9480f' } 'MEDIUM' { '#b8860b' }
@@ -137,7 +152,8 @@ function Write-HtmlReport {
 <p class="meta">
   Scan root: $(ConvertTo-HtmlEncoded $Model.ScanRoot)<br>
   Generated (UTC): $(ConvertTo-HtmlEncoded $Model.GeneratedUtc) &middot; elapsed $($Model.ElapsedSeconds)s<br>
-  Profile/Mode: $(ConvertTo-HtmlEncoded $Model.Profile) / $(ConvertTo-HtmlEncoded $Model.Mode) &middot; schema $(ConvertTo-HtmlEncoded $Model.SchemaVersion)
+  Profile/Mode: $(ConvertTo-HtmlEncoded $Model.Profile) / $(ConvertTo-HtmlEncoded $Model.Mode) &middot; schema $(ConvertTo-HtmlEncoded $Model.SchemaVersion)<br>
+  CISA KEV catalog: $(ConvertTo-HtmlEncoded (Get-KevProvenanceLine $KevCatalog))
 </p>
 $disabledNote
 <table>
@@ -158,10 +174,13 @@ function Write-Reports {
     if (-not (Test-Path -LiteralPath $ReportsDir)) { New-Item -ItemType Directory -Path $ReportsDir -Force | Out-Null }
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $model = Get-ReportModel -ScanResult $ScanResult
+    # Optional property: a hand-built ScanResult (unit tests) may not carry it,
+    # and a bare .KevCatalog access would throw under Set-StrictMode.
+    $kev = if ($ScanResult.PSObject.Properties['KevCatalog']) { $ScanResult.KevCatalog } else { $null }
     [PSCustomObject]@{
         Model = $model
         Json  = Write-JsonReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.json")
-        Html  = Write-HtmlReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.html")
-        Txt   = Write-TxtReport  -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.txt")
+        Html  = Write-HtmlReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.html") -KevCatalog $kev
+        Txt   = Write-TxtReport  -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.txt") -KevCatalog $kev
     }
 }

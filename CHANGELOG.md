@@ -9,6 +9,23 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+### Added
+- OSV dependency findings are now enriched with CISA Known Exploited
+  Vulnerabilities (KEV) status ([#41](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/41)).
+  A match — found via the advisory's CVE **aliases**, so GHSA- and PYSEC-primary
+  records are covered — annotates the existing finding with the CVE, KEV add
+  date, ransomware status, and CISA's required action, and floors the finding at
+  `HIGH`. No parallel finding is emitted, so one vulnerability still means one row.
+- The KEV catalog is vendored into the operator bundle (`tools/kev/`) and sealed
+  in `manifest.json` like the engine itself; `-KevCatalogPath` supplies a local
+  copy and `-KevCatalogUrl` pins an internal mirror. Online scans refresh from
+  cisa.gov, falling back to CISA's `cisagov/kev-data` GitHub mirror for hosts
+  whose proxy allows only one of the two.
+- New coverage-gap findings, logged as WARN as well as reported, so a missing
+  annotation is never mistaken for "not exploited": `KEV-CATALOG-UNAVAILABLE`,
+  `KEV-CATALOG-STALE` (catalog 30 days or older), and `KEV-NOT-EVALUATED` (the
+  OSV advisory-detail record carrying the CVE aliases was unavailable).
+
 ## [0.15.0] - 2026-09-11
 
 ### Fixed

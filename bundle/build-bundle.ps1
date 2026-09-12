@@ -43,8 +43,10 @@ param(
     [string]$PythonVersion = '3.12.10',
     [string]$PythonZip   = '',
     [string]$BuiltUtc    = '',               # ISO timestamp; defaults to now if empty
+    [string]$KevCatalogPath = '',            # pre-downloaded CISA KEV catalog; downloaded when empty
     [switch]$SkipPwsh,
     [switch]$SkipVenv,
+    [switch]$SkipKev,
     [switch]$Zip
 )
 
@@ -62,9 +64,13 @@ $SCANNER_PACKAGES = @(
     @{ Id = 'oletools';       Min = '0.60' }
 )
 
-# Reuse the proven provisioning functions for the venv build.
+# Reuse the proven provisioning functions for the venv build, and the engine's own
+# KEV loader so a vendored catalog is validated by exactly the code that will read
+# it at scan time (issue #41). Kev.ps1 depends on helpers in Osv.ps1.
 . (Join-Path $RepoRoot 'src/lib/Logging.ps1')
 . (Join-Path $RepoRoot 'src/lib/Provisioning.ps1')
+. (Join-Path $RepoRoot 'src/lib/Osv.ps1')
+. (Join-Path $RepoRoot 'src/lib/Kev.ps1')
 $script:Quiet = $false
 
 function Write-Step { param([string]$m) Write-Host "==> $m" -ForegroundColor Cyan }
@@ -98,6 +104,13 @@ function Get-SealedFileHashes {
     foreach ($f in 'bootstrap.ps1', 'Scan.cmd') {
         $p = Join-Path $BundleDir $f
         if (Test-Path -LiteralPath $p) { $targets.Add($p) }
+    }
+    # tools/kev IS sealed (unlike the volatile runtime/venv): it is one small,
+    # stable data file that drives a security decision, so tampering with it must
+    # be as detectable as tampering with the engine (issue #41).
+    $kevDir = Join-Path $BundleDir 'tools/kev'
+    if (Test-Path -LiteralPath $kevDir) {
+        Get-ChildItem -LiteralPath $kevDir -Recurse -File | ForEach-Object { $targets.Add($_.FullName) }
     }
     foreach ($t in ($targets | Sort-Object)) {
         # $t is absolute (Get-ChildItem .FullName / Join-Path of an absolute base)
@@ -211,6 +224,31 @@ if ($SkipVenv) {
     $toolVersions['python'] = $PythonVersion
 }
 
+# ── 3c. CISA KEV catalog (issue #41) ─────────────────────────────────────────
+# Vendored rather than cached at runtime: the bundle already seals every shipped
+# file, so an air-gapped host gets a tamper-evident catalog with no cache
+# location, staleness bookkeeping, or atomic-write machinery. US Government
+# public domain, so redistribution is fine.
+if ($SkipKev) {
+    Write-Step 'Skipping KEV catalog (-SkipKev) -- offline scans will report KEV-CATALOG-UNAVAILABLE'
+} else {
+    $kevDir = Join-Path $bundleDir 'tools/kev'
+    New-Item -ItemType Directory -Path $kevDir -Force | Out-Null
+    $kevOut = Join-Path $kevDir 'known_exploited_vulnerabilities.json'
+    if ($KevCatalogPath) {
+        Write-Step "Vendoring KEV catalog from $KevCatalogPath"
+        Copy-Item -LiteralPath $KevCatalogPath -Destination $kevOut -Force
+    } else {
+        Write-Step 'Downloading CISA KEV catalog'
+        Invoke-WebRequest -Uri $script:KevDefaultSources[0] -OutFile $kevOut
+    }
+    # Validate with the engine's own loader BEFORE sealing: a proxy login page or
+    # a schema change must fail the build, never ship as "the catalog".
+    $kevCat = Read-KevCatalogFile -Path $kevOut -SourceLabel 'vendored bundle copy'
+    $toolVersions['kevCatalog'] = $kevCat.Version
+    Write-Step "Vendored KEV catalog $($kevCat.Version) ($($kevCat.Count) CVEs, released $($kevCat.DateReleased))"
+}
+
 # ── 4. Manifest ──────────────────────────────────────────────────────────────
 if (-not $BuiltUtc) { $BuiltUtc = (Get-Date).ToUniversalTime().ToString('o') }
 $manifest = [ordered]@{
@@ -219,7 +257,11 @@ $manifest = [ordered]@{
     schemaVersion = '0.1.0'
     runtime       = 'powershell-7.4-lts-win-x64'
     toolVersions  = $toolVersions
-    advisoryDb    = @{ note = 'live (online) until vendored CVE/OSV cache is added'; date = $null }
+    advisoryDb    = @{
+        note              = 'OSV advisories are live (online only); the CISA KEV catalog is vendored under tools/kev'
+        date              = $null
+        kevCatalogVersion = $(if ($toolVersions.Contains('kevCatalog')) { $toolVersions['kevCatalog'] } else { $null })
+    }
     hashAlgorithm = 'SHA256'
     fileHashes    = (Get-SealedFileHashes -BundleDir $bundleDir)
     complete      = (-not $SkipPwsh -and -not $SkipVenv)

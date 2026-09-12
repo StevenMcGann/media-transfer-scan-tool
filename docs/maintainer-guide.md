@@ -47,7 +47,7 @@ fails if any new detection appears. Run it after touching analyzer signatures.
 ## Build the offline bundle
 On a **connected** host:
 ```powershell
-pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.19 -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -Zip
 ```
 Produces `bundle/out/media-transfer-scan-tool-0.15.0/` (+ `.zip`) containing the
 engine, vendored portable **PowerShell 7.4 LTS** and **Python 3.12** runtimes,

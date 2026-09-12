@@ -634,7 +634,18 @@ function Get-OsvDependencyFindings {
             $id = $uniqueIds[$k]
             $DetailBudget.Fetches++
             try {
-                $detailCache[$id] = Get-OsvVulnDetails -Id $id -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
+                $fetched = Get-OsvVulnDetails -Id $id -TimeoutSec ([Math]::Min($TimeoutSec, [int][Math]::Floor($remaining)))
+                # A truthy-but-unusable 200 (proxy login page, '{"error":...}') must
+                # NOT pass as an advisory record (PR #47 review): its missing aliases
+                # would silently defeat KEV evaluation -- no match AND no
+                # KEV-NOT-EVALUATED -- and Get-OsvSeverityBand would score HTML.
+                # Treat it as a failed fetch so the existing detail-unavailable path
+                # (HIGH + explicit gap findings) handles it.
+                if ($fetched -isnot [System.Management.Automation.PSCustomObject] -or -not (Get-OsvJsonProp $fetched 'id')) {
+                    throw [System.IO.InvalidDataException]::new(
+                        "advisory detail for $id is $(Get-OsvResponseShape $fetched), not an advisory record")
+                }
+                $detailCache[$id] = $fetched
                 $detailConsecutiveFailures = 0
             } catch {
                 Write-Log -Level WARN -Message "OSV: advisory detail fetch failed for ${id}: $_"

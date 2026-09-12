@@ -46,7 +46,7 @@ function New-AnalyzerContext {
         [string]$HelperDir = '',
         [int]$TimeoutSeconds = 300,
         [PSCustomObject]$ProvisionResult = $null,
-        [PSCustomObject]$KevCatalog = $null
+        [PSCustomObject]$KevState = $null
     )
     [PSCustomObject]@{
         # Tools: keyed by tool Id; each has .Available, .Version, .ScriptsDir / .Command
@@ -63,8 +63,9 @@ function New-AnalyzerContext {
         OsvFallback    = New-OsvFallbackBudget
         # Scan-wide budget for OSV advisory-detail fetches (count + time cap).
         OsvDetail      = New-OsvDetailBudget
-        # CISA KEV catalog for this run, or $null when unavailable (issue #41).
-        KevCatalog     = $KevCatalog
+        # CISA KEV resolution state (issue #41): the catalog is fetched lazily by
+        # the OSV audit on first dependency use, never up front.
+        Kev            = $KevState
     }
 }
 
@@ -721,7 +722,7 @@ function Invoke-Scan {
         [string]$ReportsDir,
         [string]$HelperDir = '',
         [PSCustomObject]$ProvisionResult = $null,
-        [PSCustomObject]$KevCatalog = $null
+        [PSCustomObject]$KevState = $null
     )
 
     $startTime    = Get-Date
@@ -757,7 +758,7 @@ function Invoke-Scan {
         $Profile, $sel.Enabled.Count, $sel.DisabledNames.Count)
 
     $context = New-AnalyzerContext -Mode $Mode -WorkDir $stagingRoot -ReportsDir $ReportsDir `
-                   -HelperDir $HelperDir -ProvisionResult $ProvisionResult -KevCatalog $KevCatalog
+                   -HelperDir $HelperDir -ProvisionResult $ProvisionResult -KevState $KevState
     $budget  = New-ArchiveTreeBudget
 
     $unitResults = [System.Collections.Generic.List[object]]::new()
@@ -949,9 +950,14 @@ function Invoke-Scan {
         EnabledAnalyzers  = @($sel.Enabled | ForEach-Object { $_.Name })
         DisabledAnalyzers = $sel.DisabledNames
         Units             = $unitResults.ToArray()
-        # Provenance for the human reports only. Get-ReportModel deliberately does
-        # NOT copy this into the model: the JSON report's top-level fields are the
-        # frozen 1.0.0 contract, and adding one is a schema change (issue #41).
-        KevCatalog        = $KevCatalog
+        # Provenance for the human reports only -- whatever the lazy resolution
+        # actually produced, or $null if no dependency unit ever needed it.
+        # Get-ReportModel deliberately does NOT copy this into the model: the JSON
+        # report's top-level fields are the frozen 1.0.0 contract, and adding one
+        # is a schema change (issue #41).
+        KevCatalog        = $(if ($KevState) { $KevState.Catalog } else { $null })
+        # Distinguishes "resolved and failed" from "never needed" -- see
+        # Get-KevProvenanceLine; a scan with no dependency inputs skipped nothing.
+        KevResolved       = $(if ($KevState) { [bool]$KevState.Resolved } else { $false })
     }
 }

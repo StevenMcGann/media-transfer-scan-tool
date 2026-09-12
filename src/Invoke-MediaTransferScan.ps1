@@ -110,19 +110,19 @@ function Invoke-Main {
     }
 
     # ── CISA KEV catalog (issue #41) ────────────────────────────────────────
-    # Resolved once per scan, and only when the analyzer that consumes it runs.
-    # Never fatal: Get-KevCatalog returns $null and OsvScan reports the gap.
-    $kevCatalog = $null
-    if (@($sel.Enabled | Where-Object { $_.Name -eq 'OsvScan' }).Count -gt 0) {
-        $kevCatalog = Get-KevCatalog -Mode $Mode -CatalogPath $KevCatalogPath -CatalogUrl $KevCatalogUrl `
-            -VendoredPath (Join-Path (Split-Path $here -Parent) $script:KevVendoredRel)
-    }
+    # Only the RESOLUTION PLAN is built here. The catalog itself is fetched by
+    # the OSV audit on first dependency use (PR #47 review): OsvScan is enabled
+    # for every core-profile scan, so resolving here made a PDF-only submission
+    # contact -- and potentially wait on -- the KEV endpoints for nothing.
+    # Never fatal: an unresolvable catalog becomes $null and the gap is reported.
+    $kevState = New-KevResolutionState -Mode $Mode -CatalogPath $KevCatalogPath -CatalogUrl $KevCatalogUrl `
+        -VendoredPath (Join-Path (Split-Path $here -Parent) $script:KevVendoredRel)
 
     try {
         $result = Invoke-Scan -Path $scanRoot -Profile $Profile `
             -EnableAnalyzers $EnableAnalyzers -DisableAnalyzers $DisableAnalyzers `
             -Mode $Mode -AnalyzerDir (Join-Path $here 'analyzers') -ReportsDir $reportsDir `
-            -HelperDir (Join-Path $here 'helpers') -ProvisionResult $provision -KevCatalog $kevCatalog
+            -HelperDir (Join-Path $here 'helpers') -ProvisionResult $provision -KevState $kevState
     } catch {
         Write-Log -Level ERROR -Message "Scan failed: $_"
         return $script:ExitError

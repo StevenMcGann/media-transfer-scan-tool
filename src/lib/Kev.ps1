@@ -329,6 +329,49 @@ function Get-KevCatalog {
     return $null
 }
 
+function New-KevResolutionState {
+    <#
+        Carries how to resolve the catalog, plus the once-per-scan result.
+        Lives on the analyzer context so the fetch can be DEFERRED until a
+        dependency unit actually needs it (PR #47 review): the core profile
+        enables OsvScan for every scan, so resolving up front made a submission
+        of only PDFs or binaries contact the KEV endpoints -- and wait on them --
+        for nothing.
+    #>
+    param(
+        [string]$Mode = 'online',
+        [string]$CatalogPath = '',
+        [string]$CatalogUrl = '',
+        [string]$VendoredPath = '',
+        [int]$TimeoutSec = 30
+    )
+    [PSCustomObject]@{
+        Mode         = $Mode
+        CatalogPath  = $CatalogPath
+        CatalogUrl   = $CatalogUrl
+        VendoredPath = $VendoredPath
+        TimeoutSec   = $TimeoutSec
+        Resolved     = $false
+        Catalog      = $null
+    }
+}
+
+function Resolve-KevCatalog {
+    <#
+        Return the scan's KEV catalog, resolving it on FIRST use and caching the
+        outcome (including a $null outcome, so a failed resolution is not retried
+        once per manifest). Safe to call with $null.
+    #>
+    param($State)
+    if ($null -eq $State) { return $null }
+    if (-not $State.Resolved) {
+        $State.Catalog  = Get-KevCatalog -Mode $State.Mode -CatalogPath $State.CatalogPath `
+            -CatalogUrl $State.CatalogUrl -VendoredPath $State.VendoredPath -TimeoutSec $State.TimeoutSec
+        $State.Resolved = $true
+    }
+    return $State.Catalog
+}
+
 function Get-KevCatalogAgeDays {
     <#
         Age of the catalog's own release date in days, or $null when the

@@ -958,7 +958,7 @@ function Invoke-ArchiveMetadataDependencyScan {
                 foreach ($f in @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType archive -Dependencies $resolved `
                         -TimeoutSec 30 -ErrorTestId 'OSV-QUERY-ERR' -FallbackBudget (Get-OsvJsonProp $Context 'OsvFallback') `
                         -DetailBudget (Get-OsvJsonProp $Context 'OsvDetail') `
-                        -KevCatalog (Get-OsvJsonProp $Context 'KevCatalog'))) { $findings.Add($f) }
+                        -KevCatalog (Resolve-KevCatalog (Get-OsvJsonProp $Context 'Kev')))) { $findings.Add($f) }
             }
         }
     } catch { Add-Error $RelativePath $_.Exception.Message }

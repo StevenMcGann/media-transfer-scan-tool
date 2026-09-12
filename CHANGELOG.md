@@ -21,6 +21,10 @@ validation against real untrusted transfers**, not a second contract freeze (see
   copy and `-KevCatalogUrl` pins an internal mirror. Online scans refresh from
   cisa.gov, falling back to CISA's `cisagov/kev-data` GitHub mirror for hosts
   whose proxy allows only one of the two.
+- The catalog is fetched lazily, on the first dependency unit that actually
+  needs it, so a submission of only PDFs, binaries or other non-dependency
+  inputs makes no KEV request at all. Report headers distinguish "not needed"
+  from "not checked" accordingly.
 - New coverage-gap findings, logged as WARN as well as reported, so a missing
   annotation is never mistaken for "not exploited": `KEV-CATALOG-UNAVAILABLE`,
   `KEV-CATALOG-STALE` (catalog 30 days or older), and `KEV-NOT-EVALUATED` (the

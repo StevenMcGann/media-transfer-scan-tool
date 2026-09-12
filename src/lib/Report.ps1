@@ -56,21 +56,25 @@ function Get-KevProvenanceLine {
         non-contractual (docs/contract.md), so provenance can surface there today
         without a schema bump.
     #>
-    param($KevCatalog)
+    param($KevCatalog, [bool]$Resolved = $true)
+    # "Not needed" is NOT "not checked": with lazy resolution a scan holding no
+    # dependency inputs never asks for a catalog, and reporting that as skipped
+    # coverage would invite the wrong conclusion from a reviewer.
+    if (-not $Resolved)   { return 'not needed — no dependency inputs in this scan' }
     if (-not $KevCatalog) { return 'none — dependency findings were NOT checked against CISA KEV' }
     return ("{0} ({1} CVEs, released {2}, source: {3})" -f `
         $KevCatalog.Version, $KevCatalog.Count, $KevCatalog.DateReleased, $KevCatalog.Source)
 }
 
 function Write-TxtReport {
-    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null)
+    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null, [bool]$KevResolved = $true)
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine('media-transfer-scan-tool - summary')
     [void]$sb.AppendLine('=' * 52)
     [void]$sb.AppendLine("Scan root    : $($Model.ScanRoot)")
     [void]$sb.AppendLine("Generated    : $($Model.GeneratedUtc)")
     [void]$sb.AppendLine("Profile/Mode : $($Model.Profile) / $($Model.Mode)")
-    [void]$sb.AppendLine("KEV catalog  : $(Get-KevProvenanceLine $KevCatalog)")
+    [void]$sb.AppendLine("KEV catalog  : $(Get-KevProvenanceLine $KevCatalog $KevResolved)")
     [void]$sb.AppendLine("Overall risk : $($Model.OverallRisk)")
     [void]$sb.AppendLine(("Findings     : CRIT {0}  HIGH {1}  MED {2}  LOW {3}  INFO {4}" -f `
         $Model.Counts.CRITICAL, $Model.Counts.HIGH, $Model.Counts.MEDIUM, $Model.Counts.LOW, $Model.Counts.INFO))
@@ -92,7 +96,7 @@ function Write-TxtReport {
 }
 
 function Write-HtmlReport {
-    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null)
+    param([PSCustomObject]$Model, [string]$ReportPath, $KevCatalog = $null, [bool]$KevResolved = $true)
 
     $riskColor = switch ($Model.OverallRisk) {
         'CRITICAL' { '#b00020' } 'HIGH' { '#d9480f' } 'MEDIUM' { '#b8860b' }
@@ -153,7 +157,7 @@ function Write-HtmlReport {
   Scan root: $(ConvertTo-HtmlEncoded $Model.ScanRoot)<br>
   Generated (UTC): $(ConvertTo-HtmlEncoded $Model.GeneratedUtc) &middot; elapsed $($Model.ElapsedSeconds)s<br>
   Profile/Mode: $(ConvertTo-HtmlEncoded $Model.Profile) / $(ConvertTo-HtmlEncoded $Model.Mode) &middot; schema $(ConvertTo-HtmlEncoded $Model.SchemaVersion)<br>
-  CISA KEV catalog: $(ConvertTo-HtmlEncoded (Get-KevProvenanceLine $KevCatalog))
+  CISA KEV catalog: $(ConvertTo-HtmlEncoded (Get-KevProvenanceLine $KevCatalog $KevResolved))
 </p>
 $disabledNote
 <table>
@@ -177,10 +181,11 @@ function Write-Reports {
     # Optional property: a hand-built ScanResult (unit tests) may not carry it,
     # and a bare .KevCatalog access would throw under Set-StrictMode.
     $kev = if ($ScanResult.PSObject.Properties['KevCatalog']) { $ScanResult.KevCatalog } else { $null }
+    $kevResolved = if ($ScanResult.PSObject.Properties['KevResolved']) { [bool]$ScanResult.KevResolved } else { $true }
     [PSCustomObject]@{
         Model = $model
         Json  = Write-JsonReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.json")
-        Html  = Write-HtmlReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.html") -KevCatalog $kev
-        Txt   = Write-TxtReport  -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.txt") -KevCatalog $kev
+        Html  = Write-HtmlReport -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.html") -KevCatalog $kev -KevResolved $kevResolved
+        Txt   = Write-TxtReport  -Model $model -ReportPath (Join-Path $ReportsDir "summary_$stamp.txt") -KevCatalog $kev -KevResolved $kevResolved
     }
 }

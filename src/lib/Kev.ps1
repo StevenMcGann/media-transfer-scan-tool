@@ -107,7 +107,14 @@ function ConvertTo-KevCatalog {
     $declared = Get-OsvJsonProp $Parsed 'count'
     if ($null -ne $declared) {
         $declaredCount = 0L
-        if ([int64]::TryParse([string]$declared, [ref]$declaredCount) -and $declaredCount -ne $entries.Count) {
+        # An unparseable count is itself a defect, not a reason to skip the check
+        # (PR #47 review): falling through would let a truncated entry array from
+        # a mirror that wrote count "unknown" pass as a complete catalog.
+        if (-not [int64]::TryParse([string]$declared, [ref]$declaredCount)) {
+            throw [System.IO.InvalidDataException]::new(
+                "KEV catalog from $Source declares a non-numeric count '$declared'")
+        }
+        if ($declaredCount -ne $entries.Count) {
             throw [System.IO.InvalidDataException]::new(
                 "KEV catalog from $Source declares count $declaredCount but carries $($entries.Count) entries")
         }

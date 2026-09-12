@@ -92,6 +92,14 @@ Describe 'ConvertTo-KevCatalog — validation' {
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 
+    It 'rejects a catalog whose declared count is not a number' {
+        # "unknown" / "1.0" must fail, not silently skip the count check.
+        foreach ($bad in '"unknown"', '"1.0"') {
+            { ConvertTo-KevCatalog -Parsed ("{`"dateReleased`":`"2026-09-11`",`"count`":$bad,`"vulnerabilities`":[{`"cveID`":`"CVE-2021-44228`"}]}" | ConvertFrom-Json) -Source 'x' } |
+                Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+        }
+    }
+
     It 'rejects a catalog carrying any malformed entry, even alongside valid ones' {
         { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])

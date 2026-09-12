@@ -80,10 +80,20 @@ function ConvertTo-KevCatalog {
         throw [System.IO.InvalidDataException]::new("KEV catalog from $Source contains no entries")
     }
 
-    # Malformed entries are REJECTED, not skipped (PR #47 review): silently
-    # dropping them yields an index that looks usable and current while missing
-    # CVEs, so a known-exploited dependency would go unannotated with no warning.
-    # A partially transformed internal mirror must fail loudly instead.
+    # ── Completeness gate ────────────────────────────────────────────────────
+    # One principle, applied in order: a quietly INCOMPLETE index is worse than
+    # no catalog at all, because a CVE missing from it reads to the operator as
+    # "not known to be exploited". So a copy that cannot demonstrate it is whole
+    # and datable is rejected outright, and the scan reports
+    # KEV-CATALOG-UNAVAILABLE naming the reason (visible and actionable) instead
+    # of enriching from it. Ordered so the error names the first real defect:
+    #   1. every entry is an object carrying a well-formed cveID
+    #   2. no duplicate CVEs -- a rewrite can duplicate one and drop another,
+    #      leaving the row count intact but the index short
+    #   3. the declared count is present, numeric, and equals the entries
+    #   4. dateReleased is present, parseable, and not in the future
+    # (Each clause here exists because an earlier, more permissive version of it
+    # let a defective catalog through; see the PR #47 review history.)
     $byCve   = @{}
     $invalid = 0
     foreach ($e in $entries) {
@@ -96,40 +106,40 @@ function ConvertTo-KevCatalog {
         throw [System.IO.InvalidDataException]::new(
             "KEV catalog from $Source has $invalid of $($entries.Count) entries with a missing or malformed 'cveID'")
     }
-    if ($byCve.Count -eq 0) {
-        throw [System.IO.InvalidDataException]::new("KEV catalog from $Source has no entries carrying a 'cveID'")
-    }
-    # The feed declares its own entry count; a mismatch means a truncated or
-    # partially rewritten copy, which must not pass as complete.
-    # Parse rather than type-test: ConvertFrom-Json may hand back Int32, Int64 or
-    # even a string depending on the document, and a too-narrow [int] test
-    # silently skipped this check entirely.
-    $declared = Get-OsvJsonProp $Parsed 'count'
-    if ($null -ne $declared) {
-        $declaredCount = 0L
-        # An unparseable count is itself a defect, not a reason to skip the check
-        # (PR #47 review): falling through would let a truncated entry array from
-        # a mirror that wrote count "unknown" pass as a complete catalog.
-        if (-not [int64]::TryParse([string]$declared, [ref]$declaredCount)) {
-            throw [System.IO.InvalidDataException]::new(
-                "KEV catalog from $Source declares a non-numeric count '$declared'")
-        }
-        if ($declaredCount -ne $entries.Count) {
-            throw [System.IO.InvalidDataException]::new(
-                "KEV catalog from $Source declares count $declaredCount but carries $($entries.Count) entries")
-        }
+    if ($byCve.Count -ne $entries.Count) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source carries $($entries.Count) entries but only $($byCve.Count) distinct CVEs (duplicates)")
     }
 
-    # A catalog whose release date cannot be read can never trip the staleness
-    # warning, so an arbitrarily old copy would look current forever (PR #47
-    # review). Reject it: the scan then reports KEV-CATALOG-UNAVAILABLE naming
-    # this reason, which is visible and actionable, rather than enriching from a
-    # copy whose freshness nobody can judge.
+    $declared = Get-OsvJsonProp $Parsed 'count'
+    if ($null -eq $declared) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source declares no 'count', so its completeness cannot be verified")
+    }
+    # Parse rather than type-test: ConvertFrom-Json may hand back Int32, Int64 or
+    # a string depending on the document.
+    $declaredCount = 0L
+    if (-not [int64]::TryParse([string]$declared, [ref]$declaredCount)) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source declares a non-numeric count '$declared'")
+    }
+    if ($declaredCount -ne $entries.Count) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source declares count $declaredCount but carries $($entries.Count) entries")
+    }
+
     $released = Format-KevDate (Get-OsvJsonProp $Parsed 'dateReleased')
-    $releasedProbe = [datetime]::MinValue
-    if (-not $released -or -not [datetime]::TryParse($released, [ref]$releasedProbe)) {
+    $releasedUtc = [datetime]::MinValue
+    if (-not $released -or -not [datetime]::TryParse($released, [ref]$releasedUtc)) {
         throw [System.IO.InvalidDataException]::new(
             "KEV catalog from $Source has no parseable 'dateReleased', so its freshness could never be checked")
+    }
+    # A future date clamps the computed age to zero forever, so an ancient copy
+    # would never trip KEV-CATALOG-STALE. Two days covers clock skew and time
+    # zones; anything beyond that is a defective copy, not a fast clock.
+    if ($releasedUtc.ToUniversalTime() -gt (Get-Date).ToUniversalTime().AddDays(2)) {
+        throw [System.IO.InvalidDataException]::new(
+            "KEV catalog from $Source is dated $released, in the future -- its freshness cannot be trusted")
     }
 
     [PSCustomObject]@{

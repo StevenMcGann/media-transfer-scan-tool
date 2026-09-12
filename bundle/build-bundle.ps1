@@ -241,8 +241,25 @@ if ($SkipKev) {
         Write-Step "Vendoring KEV catalog from $KevCatalogPath"
         Copy-Item -LiteralPath $KevCatalogPath -Destination $kevOut -Force
     } else {
-        Write-Step 'Downloading CISA KEV catalog'
-        Invoke-KevDownload -Url $script:KevDefaultSources[0] -OutFile $kevOut -TimeoutSec 60
+        # Try every configured source, not just the first (PR #47 review): the
+        # mirror exists precisely because a release host's proxy may allow
+        # raw.githubusercontent.com but not www.cisa.gov, and a build that gave
+        # up on the first source would fail before producing any bundle.
+        $kevErrors = @()
+        foreach ($kevUrl in $script:KevDefaultSources) {
+            try {
+                Write-Step "Downloading CISA KEV catalog from $kevUrl"
+                Invoke-KevDownload -Url $kevUrl -OutFile $kevOut -TimeoutSec 60
+                $kevErrors = @()
+                break
+            } catch {
+                Write-Warning "KEV source failed ($kevUrl): $($_.Exception.Message)"
+                $kevErrors += "$kevUrl : $($_.Exception.Message)"
+            }
+        }
+        if ($kevErrors.Count -gt 0) {
+            throw "Could not download the CISA KEV catalog from any source. Tried: $($kevErrors -join '; '). Supply -KevCatalogPath, or -SkipKev for a non-operator-ready build."
+        }
     }
     # Validate with the engine's own loader BEFORE sealing: a proxy login page or
     # a schema change must fail the build, never ship as "the catalog".

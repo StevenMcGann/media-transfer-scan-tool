@@ -101,16 +101,36 @@ Describe 'ConvertTo-KevCatalog — validation' {
     }
 
     It 'rejects a catalog carrying any malformed entry, even alongside valid ones' {
-        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","count":2,"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":null}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
-        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"not-a-cve"}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","count":2,"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"not-a-cve"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
+    It 'rejects duplicate CVEs even when the declared count still matches' {
+        # A rewrite that duplicates one CVE while dropping another keeps the row
+        # count intact but yields an index with fewer unique CVEs (PR #47 review).
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","count":2,"vulnerabilities":[{"cveID":"CVE-2021-44228"},{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
+    It 'rejects a catalog with no declared count at all' {
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"2026-09-11","vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+            Should -Throw -ExceptionType ([System.IO.InvalidDataException])
+    }
+
+    It 'rejects an implausibly future release date' {
+        # A far-future date would clamp age to zero forever, so KEV-CATALOG-STALE
+        # could never fire for an otherwise ancient copy.
+        $future = (Get-Date).ToUniversalTime().AddDays(30).ToString('yyyy-MM-dd')
+        { ConvertTo-KevCatalog -Parsed ("{`"dateReleased`":`"$future`",`"count`":1,`"vulnerabilities`":[{`"cveID`":`"CVE-2021-44228`"}]}" | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 
     It 'rejects a catalog with no parseable dateReleased (staleness could never fire)' {
-        { ConvertTo-KevCatalog -Parsed ('{"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"count":1,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
-        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"not-a-date","vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
+        { ConvertTo-KevCatalog -Parsed ('{"dateReleased":"not-a-date","count":1,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}' | ConvertFrom-Json) -Source 'x' } |
             Should -Throw -ExceptionType ([System.IO.InvalidDataException])
     }
 

@@ -47,9 +47,9 @@ fails if any new detection appears. Run it after touching analyzer signatures.
 ## Build the offline bundle
 On a **connected** host:
 ```powershell
-pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.16.0 -PwshVersion 7.4.20 -Zip
 ```
-Produces `bundle/out/media-transfer-scan-tool-0.15.0/` (+ `.zip`) containing the
+Produces `bundle/out/media-transfer-scan-tool-0.16.0/` (+ `.zip`) containing the
 engine, vendored portable **PowerShell 7.4 LTS** and **Python 3.12** runtimes,
 the scanner package environment, and
 `manifest.json`, plus the vendored CISA KEV catalog under `tools/kev/` (sealed
@@ -62,7 +62,7 @@ Build the bundle close to release: the vendored KEV catalog ages from its build
 date, and scans report `KEV-CATALOG-STALE` once it is 30 days or older.
 
 Use the current project version and current PowerShell 7.4 LTS patch for each
-release. The version values above describe v0.15.0; the release checklist below
+release. The version values above describe v0.16.0; the release checklist below
 requires updating them for later releases. GitHub's automatically generated
 source archives are not operator-ready bundles.
 

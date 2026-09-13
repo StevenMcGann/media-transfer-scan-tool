@@ -7,11 +7,11 @@ requirements in [../PLAN.md](../PLAN.md).
 ## Build (on a connected dev host)
 
 ```powershell
-# Full v0.15.0 operator bundle (downloads the pinned pwsh 7.4 LTS patch and builds the scanner venv):
-pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -Zip
+# Full v0.16.0 operator bundle (downloads the pinned pwsh 7.4 LTS patch, the CISA KEV catalog, and builds the scanner venv):
+pwsh ./bundle/build-bundle.ps1 -Version 0.16.0 -PwshVersion 7.4.20 -Zip
 
 # Using a pre-downloaded portable pwsh zip instead of fetching it:
-pwsh ./bundle/build-bundle.ps1 -Version 0.15.0 -PwshVersion 7.4.20 -PwshZip C:\downloads\PowerShell-7.4.20-win-x64.zip -Zip
+pwsh ./bundle/build-bundle.ps1 -Version 0.16.0 -PwshVersion 7.4.20 -PwshZip C:\downloads\PowerShell-7.4.20-win-x64.zip -Zip
 
 # Skeleton (layout only — NOT operator-ready; for testing the build itself):
 pwsh ./bundle/build-bundle.ps1 -SkipPwsh -SkipVenv -SkipKev

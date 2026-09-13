@@ -52,14 +52,18 @@ A malware-handling host almost always has AV/EDR watching. There are **two
 distinct interactions**, and they are not the same problem:
 
 **1. The scanner tripping AV on its *own* code — should not happen, by design.**
-The PowerShell analyzer's detection signatures (AMSI-tamper, Defender-preference,
-downloader, encoded-command, etc.) are **assembled from string fragments at
-runtime**, so the contiguous trigger strings never appear in the engine's source
-on disk. Without that, simply *loading* the engine made Defender fire **“Possible
-AMSI tampering” (DefenseEvasion, High)** — a false positive caused by our own
-detection patterns. If you still see an AMSI/EDR alert attributed to the
+The PowerShell analyzer compares SHA-256 identities of normalized candidate
+tokens; it neither stores the high-risk tokens in PowerShell source nor rebuilds
+them at runtime. A stdlib-only Python helper is preferred, with the same hashed
+comparison available as a PowerShell fallback. The earlier v0.9.0 approach used
+fragment concatenation, which current antimalware engines can emulate and was
+therefore not a durable boundary. If you see an AMSI/EDR alert attributed to the
 scanner's own scripts (`src\...`), treat it as a regression and report it — do
 **not** add a blanket exclusion for the engine to paper over it.
+
+`tools/verify-amsi.ps1` checks local Microsoft Defender Antivirus history only.
+For Defender for Endpoint, also verify the device timeline/alert queue after the
+enterprise sensor and cloud analytics have processed the test run.
 
 **2. AV acting on the *submissions* — expected, and it can hide findings.**
 When you scan genuinely malicious files, the host's real-time AV will detect and
@@ -69,14 +73,15 @@ has a side effect: **if AV removes a file before the scanner reads it, the
 scanner can’t report on it**, so the report under-counts. To get a complete,
 attributable scanner report on the isolated host, pick one:
 
-- **Exclude the scan paths for the run** — add the submission folder **and** the
-  scanner’s staging dir (`%TEMP%\mts-staging-*`) to Defender exclusions while you
-  run, then remove the exclusions. The host stays protected for everything else.
 - **Audit/passive mode** — put Defender in passive/audit on the *isolated,
   reverted* VM so it logs rather than quarantines. Only acceptable because the VM
   is disposable and offline.
 - **Accept AV quarantine as the verdict** — if a file is quarantined, record that
   as the finding and move on. Simplest, but you lose the scanner’s detail.
+- **Narrow, temporary contextual exclusion** — only when approved by the
+  enterprise security owner, scope an exclusion to the disposable scan path and
+  specific scan context, then remove and verify it after the run. Every exclusion
+  is a protection gap; never apply one broadly or on a production workstation.
 
 Whichever you choose: the isolated VM should be a host where malware alerts are
 **expected and understood**, not auto-escalated to a SOC as live incidents.

@@ -9,6 +9,21 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+### Fixed
+- Replaced the v0.9.0 PowerShell indicator-fragment workaround with token-aware
+  SHA-256 comparisons. The preferred stdlib-only Python helper and the offline
+  PowerShell fallback preserve the existing risky-script findings without
+  storing or reconstructing high-risk indicator text in shipped PowerShell,
+  removing the fragment assembly that Defender Enterprise continued to flag.
+  Disguised-file classification uses the same hashed signals, and the test
+  suite now fails if a protected token is reintroduced into `src/*.ps1`.
+
+### Changed
+- Clarified that `tools/verify-amsi.ps1` observes local Defender Antivirus
+  detections only; Defender for Endpoint cloud/EDR validation must also be
+  completed in the enterprise portal. Documentation no longer presents a broad
+  scan-path exclusion as a routine option.
+
 ## [0.16.0] - 2026-09-12
 
 ### Added

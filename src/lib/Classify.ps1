@@ -81,21 +81,13 @@ $script:ScriptTypes = @('python', 'powershell', 'shell', 'batch', 'npm', 'vba')
 # the highest count >= 2 wins. Patterns are chosen to be specific enough that
 # ordinary prose does not trigger them.
 #
-# The offensive-PowerShell tokens are ASSEMBLED FROM FRAGMENTS so this engine
-# file does not itself carry the contiguous strings that on-disk file AV / AMSI
-# heuristics flag (same rationale as analyzers/PSScriptAnalyzer.ps1).
-$psIex = 'Invoke-' + 'Expression'
-$psDlS = 'Download' + 'String'
-$psDlF = 'Download' + 'File'
 $script:ContentSignatures = [ordered]@{
     powershell = @(
         '\[CmdletBinding\(\)\]',
         '\bparam\s*\(',
         '\$PSVersionTable',
-        "\b($psIex)\b", '\bIEX\b',
         '\b(Get|Set|New|Remove|Invoke|Import|Export|Write|Start|Stop)-[A-Za-z]\w+',
         '-ErrorAction\b',
-        "\.($psDlS)\(", "\.($psDlF)\(",
         '\bWrite-(Host|Output|Error|Verbose)\b',
         '\[System\.\w'
     )
@@ -242,6 +234,16 @@ function Get-ContentSignature {
         $hits = 0
         foreach ($pat in $script:ContentSignatures[$lang]) {
             if ($text -match $pat) { $hits++ }
+        }
+        # Preserve detection of minimal disguised PowerShell download cradles
+        # without storing or reconstructing their high-risk tokens in this
+        # script. Each distinct classifier rule contributes one content signal.
+        if ($lang -eq 'powershell') {
+            $hashedSignals = @(Find-MtsPowerShellRiskIndicator -Text $text |
+                Where-Object { $_.Rule.Classifier } |
+                ForEach-Object { $_.Rule.TestID } |
+                Sort-Object -Unique)
+            $hits += $hashedSignals.Count
         }
         if ($hits -ge 2 -and ($null -eq $best -or $hits -gt $best.Score)) {
             $best = [PSCustomObject]@{ Type = $lang; Score = $hits }

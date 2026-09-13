@@ -2,24 +2,23 @@
     Defender / AMSI self-check  (Windows + Microsoft Defender only).
 
     Confirms the scanner's OWN code does not trip Microsoft Defender when it is
-    loaded. The PowerShell analyzer used to carry the offensive-PowerShell
-    signatures it detects (AMSI-tamper, Defender-preference, downloaders, ...) as
-    contiguous literal strings; loading the engine then matched Defender's
-    "Trojan:PowerShell/PsAttack.*" signature and fired "Possible AMSI tampering".
-    Those tokens are now assembled from fragments at runtime, so the contiguous
-    strings never appear in any shipped file. This script proves that on a real
-    Defender host.
+    loaded. Earlier analyzer versions carried the same high-risk PowerShell
+    terms they were intended to detect. Loading the engine could therefore
+    resemble an offensive script to Defender. Those terms are now represented
+    only by SHA-256 identities and are never stored or reconstructed in shipped
+    PowerShell. This script verifies local Microsoft Defender Antivirus behavior
+    on one host.
 
-    How it works (no EDR portal needed): Microsoft Defender records every local
-    detection in its threat-detection history (Get-MpThreatDetection). We snapshot
-    the history, load the full engine from disk in a fresh pwsh (the same path
-    that previously triggered the alert), then check whether any NEW detection
-    appeared. A clean load => no new detection.
+    For the local antivirus check, Microsoft Defender records detections in its
+    threat-detection history (Get-MpThreatDetection). We snapshot the history,
+    load the full engine from disk in a fresh pwsh (the same path that previously
+    triggered the alert), then check whether any NEW local detection appeared.
 
     Usage:   pwsh -NoProfile -File tools/verify-amsi.ps1
 
-    Note: this script never writes the trigger tokens to disk or to a command
-    line, so running it does not itself create a detection.
+    Limitation: Get-MpThreatDetection does not cover every cloud/EDR alert in
+    Defender for Endpoint. Enterprise validation must also check the device
+    timeline and alert queue after sensor/cloud processing.
 #>
 [CmdletBinding()]
 param()
@@ -31,7 +30,7 @@ $entry = Join-Path $root 'src/Invoke-MediaTransferScan.ps1'
 
 if (-not (Get-Command Get-MpThreatDetection -ErrorAction SilentlyContinue)) {
     Write-Host "Get-MpThreatDetection is unavailable — this check requires Windows + Microsoft Defender." -ForegroundColor Yellow
-    Write-Host "On a non-Defender host the fragmentation fix still applies; it just can't be self-verified here."
+    Write-Host "On a non-Defender host the token-hash design still applies; it just can't be self-verified here."
     exit 2
 }
 
@@ -40,7 +39,7 @@ function Get-RecentDetections {
         Sort-Object InitialDetectionTime -Descending)
 }
 
-$before = Get-RecentDetections
+$before = @(Get-RecentDetections)
 $beforeKeys = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($d in $before) { [void]$beforeKeys.Add("$($d.DetectionID)") }
 $latest = if ($before) { $before[0].InitialDetectionTime } else { '(none)' }
@@ -57,7 +56,7 @@ Write-Host "  engine loaded and registered analyzers OK."
 
 Start-Sleep -Seconds 6   # give Defender a moment to flush any detection to history
 
-$after = Get-RecentDetections
+$after = @(Get-RecentDetections)
 $new = @($after | Where-Object { -not $beforeKeys.Contains("$($_.DetectionID)") })
 
 Write-Host ""
@@ -73,5 +72,5 @@ foreach ($d in $new) {
     Write-Host ("  [{0}] {1}" -f $d.InitialDetectionTime, $name) -ForegroundColor Red
     Write-Host ("     {0}" -f $res.Substring(0, [Math]::Min(200, $res.Length))) -ForegroundColor DarkGray
 }
-Write-Host "`nA shipped file still carries a contiguous trigger token — find and fragment it." -ForegroundColor Red
+Write-Host "`nThe engine load caused a local Defender detection; inspect the affected resource and detection source." -ForegroundColor Red
 exit 1

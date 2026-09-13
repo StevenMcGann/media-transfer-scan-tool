@@ -9,6 +9,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-12
+
 ### Added
 - OSV dependency findings are now enriched with CISA Known Exploited
   Vulnerabilities (KEV) status ([#41](https://github.com/StevenMcGann/media-transfer-scan-tool/issues/41)).
@@ -23,12 +25,21 @@ validation against real untrusted transfers**, not a second contract freeze (see
   whose proxy allows only one of the two.
 - The catalog is fetched lazily, on the first dependency unit that actually
   needs it, so a submission of only PDFs, binaries or other non-dependency
-  inputs makes no KEV request at all. Report headers distinguish "not needed"
-  from "not checked" accordingly.
+  inputs makes no KEV request at all. Report headers state whether a dependency
+  audit ran at all, rather than implying why KEV was skipped.
 - New coverage-gap findings, logged as WARN as well as reported, so a missing
   annotation is never mistaken for "not exploited": `KEV-CATALOG-UNAVAILABLE`,
   `KEV-CATALOG-STALE` (catalog 30 days or older), and `KEV-NOT-EVALUATED` (the
   OSV advisory-detail record carrying the CVE aliases was unavailable).
+
+### Fixed
+- OSV advisory-detail responses are now verified to be an advisory object
+  carrying the id that was requested. A truthy but unusable `200` (proxy login
+  page, `{"error":...}`) or a record for a *different* advisory was previously
+  trusted, which could mis-score severity and, with KEV enrichment, attribute
+  another advisory's exploited status to an unrelated dependency. Such a
+  response is now treated as a failed fetch, so the existing detail-unavailable
+  path reports it explicitly instead.
 
 ## [0.15.0] - 2026-09-11
 

@@ -6,7 +6,7 @@ A Windows-focused static security scanner for reviewing untrusted files before t
 
 Point the scanner at a submission folder and it will inventory, classify, hash, and route the files through the appropriate analyzers. Each scan produces a durable report in JSON, HTML, and text formats.
 
-> **Status:** **v0.15.0** is the current release. It hardens the OSV dependency audit: a reachable but unusable OSV response is no longer reported as a connectivity failure, and advisory lookups are bounded scan-wide with every limit reached recorded in both the log and the report. Every originally planned file-type family remains implemented: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives.
+> **Status:** **v0.16.0** is the current release. It adds CISA KEV enrichment: a dependency vulnerability that CISA lists as known exploited is annotated in place with the CVE, catalog add date, ransomware status, and required action, and raised to at least HIGH — with explicit coverage-gap findings whenever the catalog is missing, stale, or could not be evaluated. Every originally planned file-type family remains implemented: Python, disguised scripts, Office/PDF, shell, PowerShell, VBA/VBScript, npm, NuGet, native binaries, ML/model files, and recursively inspected archives.
 >
 > The JSON schema and CLI contract have been frozen since v0.9.0; see [docs/contract.md](docs/contract.md). The package remains on the 0.x line while it is validated against real untrusted transfers on an isolated host. That operational validation—not another planned file-type family—is the remaining gate for v1.0.0. See [PLAN.md](PLAN.md).
 

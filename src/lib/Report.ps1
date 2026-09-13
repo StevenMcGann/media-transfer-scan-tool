@@ -57,10 +57,13 @@ function Get-KevProvenanceLine {
         without a schema bump.
     #>
     param($KevCatalog, [bool]$Resolved = $true)
-    # "Not needed" is NOT "not checked": with lazy resolution a scan holding no
-    # dependency inputs never asks for a catalog, and reporting that as skipped
-    # coverage would invite the wrong conclusion from a reviewer.
-    if (-not $Resolved)   { return 'not needed — no dependency inputs in this scan' }
+    # $Resolved says only whether the OSV audit ever asked for a catalog -- it
+    # does NOT say why it didn't. Offline mode, OsvScan disabled, and a manifest
+    # whose dependencies are all unpinned each skip the audit while dependency
+    # inputs plainly exist, so inferring "no dependency inputs" here could
+    # contradict this same report's coverage-gap findings (PR #47 review).
+    # State the fact, not a guess at its cause.
+    if (-not $Resolved)   { return 'not consulted — no dependency audit ran in this scan' }
     if (-not $KevCatalog) { return 'none — dependency findings were NOT checked against CISA KEV' }
     return ("{0} ({1} CVEs, released {2}, source: {3})" -f `
         $KevCatalog.Version, $KevCatalog.Count, $KevCatalog.DateReleased, $KevCatalog.Source)

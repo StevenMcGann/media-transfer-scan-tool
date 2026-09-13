@@ -641,9 +641,18 @@ function Get-OsvDependencyFindings {
                 # KEV-NOT-EVALUATED -- and Get-OsvSeverityBand would score HTML.
                 # Treat it as a failed fetch so the existing detail-unavailable path
                 # (HIGH + explicit gap findings) handles it.
-                if ($fetched -isnot [System.Management.Automation.PSCustomObject] -or -not (Get-OsvJsonProp $fetched 'id')) {
+                $fetchedId = Get-OsvJsonProp $fetched 'id'
+                if ($fetched -isnot [System.Management.Automation.PSCustomObject] -or -not $fetchedId) {
                     throw [System.IO.InvalidDataException]::new(
                         "advisory detail for $id is $(Get-OsvResponseShape $fetched), not an advisory record")
+                }
+                # The record must be the one we asked for (PR #47 review): a stale
+                # cache or intercepting proxy returning a DIFFERENT advisory would
+                # otherwise be stored under $id and its aliases trusted, which can
+                # mark an unrelated dependency as known-exploited.
+                if ([string]$fetchedId -ne $id) {
+                    throw [System.IO.InvalidDataException]::new(
+                        "advisory detail requested for $id came back as '$fetchedId'; its aliases cannot be trusted for $id")
                 }
                 $detailCache[$id] = $fetched
                 $detailConsecutiveFailures = 0

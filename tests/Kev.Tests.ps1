@@ -304,6 +304,21 @@ Describe 'OSV findings — KEV enrichment (no network)' {
         $v.Issue    | Should -Not -Match 'CISA KEV'
     }
 
+    It 'rejects a detail record for a DIFFERENT advisory rather than trusting its aliases' {
+        # A stale cache or proxy returning someone else's advisory must not mark
+        # this dependency known-exploited via that record's aliases (PR #47 review).
+        Mock -CommandName Get-OsvVulnDetails -MockWith {
+            param($Id, $TimeoutSec)
+            [PSCustomObject]@{ id = 'GHSA-zzzz-zzzz-zzzz'; summary = 'someone else'; aliases = @('CVE-2021-44228') }
+        }
+        $f = @(Get-OsvDependencyFindings -Tool 'OsvScan' -UnitType 'python-requirements' -Dependencies @(Deps 1) `
+                -KevCatalog (KevCatalogFixture))
+        $v = @($f | Where-Object { $_.Category -eq 'vuln-dependency' })[0]
+        $v.Issue    | Should -Not -Match 'CISA KEV'     # not enriched from the wrong record
+        $v.Severity | Should -Be 'HIGH'                 # detail-unavailable fallback
+        @($f | Where-Object { $_.TestID -eq 'KEV-NOT-EVALUATED' }).Count | Should -Be 1
+    }
+
     It 'still evaluates KEV for a CVE-primary advisory when detail is unavailable' {
         Mock -CommandName Invoke-OsvQueryBatch -MockWith {
             param($Queries, $TimeoutSec)
@@ -318,6 +333,22 @@ Describe 'OSV findings — KEV enrichment (no network)' {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+Describe 'KEV report provenance wording' {
+    It 'states that no audit ran, without inferring why' {
+        # Offline mode, OsvScan disabled, and all-unpinned manifests also leave
+        # resolution untouched, so claiming "no dependency inputs" could
+        # contradict this report's own coverage-gap findings.
+        $line = Get-KevProvenanceLine $null $false
+        $line | Should -Match 'no dependency audit ran'
+        $line | Should -Not -Match 'no dependency inputs'
+    }
+
+    It 'distinguishes an audit that ran without a catalog from one that never ran' {
+        Get-KevProvenanceLine $null $true | Should -Match 'NOT checked'
+        (Get-KevProvenanceLine (KevCatalogFixture) $true) | Should -Match '2026\.09\.11'
+    }
+}
+
 Describe 'CISA KEV live feed — schema compatibility' -Tag 'Online' {
     It 'still serves a catalog this client can parse' {
         $cat = Invoke-KevCatalogFetch -Url 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json' -TimeoutSec 60

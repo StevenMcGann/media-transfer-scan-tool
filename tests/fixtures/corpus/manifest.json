@@ -68,6 +68,10 @@
     "disguised/memo.txt": {
       "expectNoDisguise": true
     },
+    "disguised_pair/cradle.txt": {
+      "expectFinding": "MTS-DISGUISE-002",
+      "detectedType": "powershell"
+    },
     "pdf/pdf_clean.pdf": {
       "expectActiveContent": false
     },

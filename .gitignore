@@ -25,6 +25,7 @@ tests/fixtures/corpus/native/
 tests/fixtures/corpus/pysource/
 tests/fixtures/corpus/notebook/
 tests/fixtures/corpus/disguised/
+tests/fixtures/corpus/disguised_pair/
 tests/fixtures/corpus/pdf/
 tests/fixtures/corpus/office/
 tests/fixtures/corpus/shell/

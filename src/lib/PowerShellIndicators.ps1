@@ -124,6 +124,31 @@ function Get-MtsPreviousNonWhitespaceCharacter {
     return ''
 }
 
+function Test-MtsPowerShellPairSeparator {
+    <#
+        Accept command-argument separators, not assignment or collection syntax.
+        $Start/$End bound the separator; $TailEnd is where the tail token ends.
+        An opening quote must be closed right AFTER the tail token -- reading
+        $Text[$End] instead sees the tail's first character, which never equals
+        the quote, silently dropping quoted pairs such as -Opt 'Value'.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][int]$Start,
+        [Parameter(Mandatory)][int]$End,
+        [Parameter(Mandatory)][int]$TailEnd
+    )
+
+    if ($End -lt $Start) { return $false }
+    $separator = $Text.Substring($Start, $End - $Start)
+    $separatorMatch = [regex]::Match(
+        $separator,
+        '\A(?:(?:[^\S\r\n]+|`(?:\r\n|\r|\n)[^\S\r\n]*)+|:(?:(?:[^\S\r\n]+|`(?:\r\n|\r|\n)[^\S\r\n]*))*)(?<Quote>[''"]?)\z')
+    if (-not $separatorMatch.Success) { return $false }
+    $quote = $separatorMatch.Groups['Quote'].Value
+    return -not $quote -or ($TailEnd -lt $Text.Length -and [string]$Text[$TailEnd] -eq $quote)
+}
+
 function Find-MtsPowerShellRiskIndicator {
     <# Return token-aware matches without returning the source token itself. #>
     param(
@@ -169,7 +194,11 @@ function Find-MtsPowerShellRiskIndicator {
                     (Get-MtsNextNonWhitespaceCharacter -Text $Text -Start ($token.Index + $token.Length)) -eq '('
                 }
                 'Pair' {
-                    $nextToken.Success -and (Get-MtsTokenDigest -Token $nextToken.Value) -eq $rule.PairDigest
+                    $nextToken.Success -and
+                    (Get-MtsTokenDigest -Token $nextToken.Value) -eq $rule.PairDigest -and
+                    (Test-MtsPowerShellPairSeparator -Text $Text `
+                        -Start ($token.Index + $token.Length) -End $nextToken.Index `
+                        -TailEnd ($nextToken.Index + $nextToken.Length))
                 }
                 default { $true }
             }

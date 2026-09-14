@@ -21,7 +21,9 @@ validation against real untrusted transfers**, not a second contract freeze (see
   alternate text encodings cannot suppress these findings. Both helper and
   fallback paths now enforce byte, token, finding, and time boundaries with
   explicit HIGH coverage-gap findings; a failed bounded helper is never retried
-  against the same untrusted input in-process.
+  against the same untrusted input in-process. Paired option rules also require
+  command-argument separators, avoiding false positives from assignments and
+  collection literals.
 
 ### Changed
 - Clarified that `tools/verify-amsi.ps1` observes local Defender Antivirus

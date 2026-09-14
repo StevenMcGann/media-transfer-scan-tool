@@ -22,6 +22,11 @@ MAX_BYTES = 5_000_000
 MAX_TOKENS = 500_000
 MAX_FINDINGS = 1_000
 TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?:-[A-Za-z][A-Za-z0-9_-]*|[A-Za-z][A-Za-z0-9_-]*)(?![A-Za-z0-9_])")
+PAIR_SEPARATOR_RE = re.compile(
+    r"(?:(?:[^\S\r\n]+|`(?:\r\n|\r|\n)[^\S\r\n]*)+|"
+    r":(?:(?:[^\S\r\n]+|`(?:\r\n|\r|\n)[^\S\r\n]*))*)"
+    r"(?P<quote>['\"]?)\Z"
+)
 
 # digest -> (severity, test id, context, optional pair-tail digest, message)
 RULES = {
@@ -76,6 +81,23 @@ def next_non_whitespace(text: str, start: int) -> str:
             return text[start]
         start += 1
     return ""
+
+
+def valid_pair_separator(text: str, start: int, end: int, tail_end: int) -> bool:
+    """Accept PowerShell argument separators, not arbitrary intervening syntax.
+
+    ``start``/``end`` bound the separator; ``tail_end`` is where the tail token
+    ends. An opening quote must be closed right AFTER the tail token -- checking
+    ``text[end]`` instead reads the tail's first character, which never equals
+    the quote, silently dropping quoted pairs such as ``-Opt 'Value'``.
+    """
+    if end < start:
+        return False
+    match = PAIR_SEPARATOR_RE.fullmatch(text[start:end])
+    if match is None:
+        return False
+    quote = match.group("quote")
+    return not quote or (tail_end < len(text) and text[tail_end] == quote)
 
 
 def decode_source(data: bytes) -> str:
@@ -139,7 +161,9 @@ def scan_text(text: str) -> list[dict]:
             elif context == "call":
                 applies = next_non_whitespace(text, match.end()) == "("
             elif context == "pair":
-                applies = following is not None and digest(following.group(0)) == pair_digest
+                applies = (following is not None and
+                           digest(following.group(0)) == pair_digest and
+                           valid_pair_separator(text, match.end(), following.start(), following.end()))
             else:
                 applies = True
 

@@ -79,6 +79,59 @@ Describe 'PowerShell token-hash rule paths' {
             Should -BeNullOrEmpty
     }
 
+    It 'requires valid command separators between paired option tokens' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $fixtureText = [IO.File]::ReadAllText(
+            (Join-Path $script:PsDir 'encoded.ps1'), [Text.Encoding]::UTF8)
+        $fixtureTokens = @($script:MtsPowerShellTokenPattern.Matches($fixtureText))
+        $head = ''
+        $tail = ''
+        for ($i = 0; $i -lt ($fixtureTokens.Count - 1); $i++) {
+            $ruleDigest = Get-MtsTokenDigest -Token $fixtureTokens[$i].Value
+            if (-not $script:MtsPowerShellIndicatorRules.Contains($ruleDigest)) { continue }
+            $rule = $script:MtsPowerShellIndicatorRules[$ruleDigest]
+            if ($rule.Context -eq 'Pair' -and
+                (Get-MtsTokenDigest -Token $fixtureTokens[$i + 1].Value) -eq $rule.PairDigest) {
+                $head = $fixtureTokens[$i].Value
+                $tail = $fixtureTokens[$i + 1].Value
+                break
+            }
+        }
+        $head | Should -Not -BeNullOrEmpty
+        $tail | Should -Not -BeNullOrEmpty
+
+        $cases = @(
+            @{ Name = 'space';        Text = "$head $tail";       Expected = 1 }
+            @{ Name = 'colon';        Text = "${head}:$tail";     Expected = 1 }
+            @{ Name = 'quoted';       Text = "$head '$tail'";     Expected = 1 }
+            @{ Name = 'assignment';   Text = "$head = $tail";     Expected = 0 }
+            @{ Name = 'quoted-key';   Text = "'$head' = '$tail'"; Expected = 0 }
+            @{ Name = 'collection';   Text = "'$head', '$tail'";  Expected = 0 }
+            @{ Name = 'statement';    Text = "$head; $tail";     Expected = 0 }
+            @{ Name = 'next-line';    Text = "$head`n$tail";     Expected = 0 }
+            @{ Name = 'continuation'; Text = "$head ```n  $tail"; Expected = 1 }
+        )
+
+        foreach ($case in $cases) {
+            $fallback = @(Find-MtsPowerShellRiskIndicator -Text $case.Text |
+                Where-Object { $_.Rule.TestID -eq 'PS-HIDDEN-WINDOW' })
+            $fallback.Count | Should -Be $case.Expected -Because "$($case.Name) fallback syntax"
+
+            $target = Join-Path $script:Out "pair-$($case.Name).ps1"
+            $output = Join-Path $script:Out "pair-$($case.Name).json"
+            [IO.File]::WriteAllText($target, $case.Text, [Text.UTF8Encoding]::new($false))
+            & $script:PythonExe $script:PsHelper $target $output
+            $LASTEXITCODE | Should -Be 0
+            $helperResult = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+            @($helperResult.findings | Where-Object { $_.testId -eq 'PS-HIDDEN-WINDOW' }).Count |
+                Should -Be $case.Expected -Because "$($case.Name) helper syntax"
+        }
+    }
+
     It 'the Python helper preserves the custom-rule findings' {
         if (-not $script:PythonExe) {
             Set-ItResult -Skipped -Because 'Python 3 is unavailable'

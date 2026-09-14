@@ -29,19 +29,28 @@ pwsh ./tests/Run-Tests.ps1                  # full Pester suite
 - **dependabot.yml** — keeps GitHub Actions current.
 
 ## Defender / AMSI self-check
-The PowerShell analyzer detects offensive-PowerShell signatures (AMSI-tamper,
-Defender-preference, downloaders, ...). Those tokens must **never** appear as
-contiguous literals in shipped source — if they do, simply loading the engine
-trips Defender's `Trojan:PowerShell/PsAttack.*` signature ("Possible AMSI
-tampering"). They are assembled from fragments at runtime to avoid this.
+The PowerShell analyzer detects offensive script constructs. Those indicator
+tokens must **never** appear as literals or be reconstructed in shipped
+PowerShell source. The v0.9.0 fragment-concatenation mitigation was not durable:
+current antimalware engines can emulate simple concatenation and inspect the
+result. The scanner now compares normalized token SHA-256 identities instead.
+
+The preferred rule path is the stdlib-only `src/helpers/scan_powershell.py`;
+`src/lib/PowerShellIndicators.ps1` provides the same digest comparison when no
+Python interpreter is available. Neither path executes submitted content. The
+Pester suite scans every shipped `src/*.ps1` file and fails if a protected token
+is accidentally reintroduced in plaintext.
 
 On a Windows + Microsoft Defender host, verify the engine loads without tripping
 Defender:
 ```powershell
-pwsh ./tools/verify-amsi.ps1   # exit 0 = no new detection; 1 = a token leaked into a shipped file
+pwsh ./tools/verify-amsi.ps1   # exit 0 = no new local detection; 1 = a new local detection
 ```
 It snapshots `Get-MpThreatDetection`, loads the full engine in a fresh `pwsh`, and
-fails if any new detection appears. Run it after touching analyzer signatures.
+fails if any new local antivirus detection appears. Run it after touching
+analyzer signatures. This is a local Microsoft Defender Antivirus check; it
+does **not** prove that Defender for Endpoint created no delayed cloud/EDR alert.
+Validate the signed release candidate in the enterprise portal before release.
 **Never** add a literal trigger token (even in a comment) to a `src/` file.
 
 ## Build the offline bundle

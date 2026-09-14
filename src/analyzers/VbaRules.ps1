@@ -118,7 +118,7 @@
                Sev = 'HIGH'; Cat = 'risky-code'; Conf = 'HIGH'
                Msg = 'Hidden/encoded PowerShell invocation'
                TID = 'VBA-POWERSHELL-ENC'
-               Rec = 'Decode the -EncodedCommand payload before making a disposition decision.' }
+               Rec = 'Decode the encoded command payload before making a disposition decision.' }
 
             @{ Re  = '(?im)^\s*(Public\s+|Private\s+)?Declare\s+(PtrSafe\s+)?(Sub|Function)\s+\w+\s+Lib\s+["'']'
                Sev = 'MEDIUM'; Cat = 'risky-code'; Conf = 'HIGH'

@@ -40,6 +40,19 @@ Describe 'Content-signature detection (no shebang)' {
     }
 }
 
+Describe 'Hashed-indicator scoring' {
+    It 'counts two distinct download tokens as two signals, not one shared rule' {
+        # The fixture's ONLY PowerShell signals are two different download methods
+        # under the same PS-DOWNLOAD rule. Deduplicating by TestID scored it 1,
+        # left it 'unsupported', and never routed it to the PowerShell analyzer
+        # (PR #50 review). Each distinct token digest must count.
+        $pairDir = Join-Path $PSScriptRoot 'fixtures/corpus/disguised_pair'
+        $r = New-Unit -File (Get-Item (Join-Path $pairDir 'cradle.txt')) -ScanRoot $pairDir
+        $r.Unit.DetectedType | Should -Be 'powershell'
+        @($r.Findings | Where-Object { $_.TestID -eq 'MTS-DISGUISE-002' }).Count | Should -Be 1
+    }
+}
+
 Describe 'False-positive guard' {
     It 'does NOT flag plain English prose as a disguised script' {
         $r = Classify 'memo.txt'
@@ -60,6 +73,49 @@ Describe 'Get-ContentSignature — unit behavior' {
         'The report will print() the totals.' | Set-Content $f -Encoding utf8
         Get-ContentSignature -Path $f | Should -BeNullOrEmpty
         Remove-Item $f -Force
+    }
+
+    It 'detects BOM-marked UTF-16 and UTF-32 PowerShell hidden in text files' {
+        $tempDir = Join-Path $env:TEMP "mts-wide-disguise-$(Get-Random)"
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        try {
+            $sourceText = [IO.File]::ReadAllText(
+                (Join-Path $script:Dis 'readme.txt'), [Text.Encoding]::UTF8)
+            $cleanText = [IO.File]::ReadAllText(
+                (Join-Path $script:Dis 'memo.txt'), [Text.Encoding]::UTF8)
+            $encodings = @(
+                @{ Name = 'utf16le'; Encoding = [Text.UnicodeEncoding]::new($false, $true) }
+                @{ Name = 'utf16be'; Encoding = [Text.UnicodeEncoding]::new($true, $true) }
+                @{ Name = 'utf32le'; Encoding = [Text.UTF32Encoding]::new($false, $true) }
+                @{ Name = 'utf32be'; Encoding = [Text.UTF32Encoding]::new($true, $true) }
+            )
+            foreach ($case in $encodings) {
+                [IO.File]::WriteAllText(
+                    (Join-Path $tempDir "payload-$($case.Name).txt"), $sourceText, $case.Encoding)
+                [IO.File]::WriteAllText(
+                    (Join-Path $tempDir "memo-$($case.Name).txt"), $cleanText, $case.Encoding)
+            }
+
+            $result = Invoke-Scan -Path $tempDir -Profile core `
+                -AnalyzerDir (Join-Path $Root 'src/analyzers') -ReportsDir $tempDir -Mode offline
+            foreach ($case in $encodings) {
+                $payload = $result.Units | Where-Object { $_.Name -eq "payload-$($case.Name).txt" }
+                $payload.Type | Should -Be 'powershell'
+                @($payload.Findings | Where-Object { $_.TestID -eq 'MTS-DISGUISE-002' }).Count |
+                    Should -Be 1
+                @($payload.Findings | Where-Object { $_.TestID -eq 'PS-IEX' }).Count |
+                    Should -BeGreaterThan 0
+                @($payload.Findings | Where-Object { $_.TestID -eq 'PS-DOWNLOAD' }).Count |
+                    Should -BeGreaterThan 0
+
+                $memo = $result.Units | Where-Object { $_.Name -eq "memo-$($case.Name).txt" }
+                $memo.Type | Should -Be 'unsupported'
+                @($memo.Findings | Where-Object { $_.Category -eq 'disguised-file' }).Count |
+                    Should -Be 0
+            }
+        } finally {
+            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

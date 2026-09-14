@@ -81,21 +81,13 @@ $script:ScriptTypes = @('python', 'powershell', 'shell', 'batch', 'npm', 'vba')
 # the highest count >= 2 wins. Patterns are chosen to be specific enough that
 # ordinary prose does not trigger them.
 #
-# The offensive-PowerShell tokens are ASSEMBLED FROM FRAGMENTS so this engine
-# file does not itself carry the contiguous strings that on-disk file AV / AMSI
-# heuristics flag (same rationale as analyzers/PSScriptAnalyzer.ps1).
-$psIex = 'Invoke-' + 'Expression'
-$psDlS = 'Download' + 'String'
-$psDlF = 'Download' + 'File'
 $script:ContentSignatures = [ordered]@{
     powershell = @(
         '\[CmdletBinding\(\)\]',
         '\bparam\s*\(',
         '\$PSVersionTable',
-        "\b($psIex)\b", '\bIEX\b',
         '\b(Get|Set|New|Remove|Invoke|Import|Export|Write|Start|Stop)-[A-Za-z]\w+',
         '-ErrorAction\b',
-        "\.($psDlS)\(", "\.($psDlF)\(",
         '\bWrite-(Host|Output|Error|Verbose)\b',
         '\[System\.\w'
     )
@@ -207,6 +199,40 @@ function Get-MagicType {
     return $null
 }
 
+function ConvertFrom-MtsContentBytes {
+    <# Decode the BOM-aware text formats recognized by PowerShell/.NET. #>
+    # An empty file is valid, fully scannable input. Without AllowEmptyCollection
+    # a mandatory [byte[]] rejects it at binding time, and the no-Python fallback
+    # reported that as a HIGH coverage gap for a clean zero-byte script (PR #50).
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+
+    $offset = 0
+    $encoding = [Text.Encoding]::UTF8
+    if ($Bytes.Length -ge 4 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and
+        $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {
+        $offset = 4
+        $encoding = [Text.UTF32Encoding]::new($false, $false)
+    } elseif ($Bytes.Length -ge 4 -and $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and
+              $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {
+        $offset = 4
+        $encoding = [Text.UTF32Encoding]::new($true, $false)
+    } elseif ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and
+              $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        $offset = 3
+    } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+        $offset = 2
+        $encoding = [Text.Encoding]::Unicode
+    } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+        $offset = 2
+        $encoding = [Text.Encoding]::BigEndianUnicode
+    }
+
+    [PSCustomObject]@{
+        Text   = $encoding.GetString($Bytes, $offset, $Bytes.Length - $offset)
+        HasBom = $offset -gt 0
+    }
+}
+
 function Get-ContentSignature {
     <#
         Signal 3: score the leading text against language signatures. Returns
@@ -226,22 +252,50 @@ function Get-ContentSignature {
         } finally { $fs.Dispose() }
     } catch { return $null }
 
-    # Text-likeness gate: mostly printable/whitespace, no NUL bytes.
-    $printable = 0
-    foreach ($b in $bytes) {
-        if ($b -eq 0) { return $null }                                  # NUL → binary
-        if ($b -ge 32 -and $b -le 126) { $printable++ }
-        elseif ($b -in 9, 10, 13) { $printable++ }                      # tab/CR/LF
-    }
-    if (($printable / $bytes.Count) -lt 0.90) { return $null }
+    $decoded = ConvertFrom-MtsContentBytes -Bytes $bytes
+    $text = $decoded.Text
 
-    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    # Preserve the byte-level gate for BOM-less input. For explicit BOM text,
+    # apply the same printable/NUL rule after decoding so UTF-16/32 NUL bytes
+    # are not mistaken for binary content.
+    $printable = 0
+    if ($decoded.HasBom) {
+        if ([string]::IsNullOrEmpty($text)) { return $null }
+        foreach ($char in $text.ToCharArray()) {
+            $value = [int]$char
+            if ($value -eq 0) { return $null }
+            if (($value -ge 32 -and $value -le 126) -or $value -in 9, 10, 13) { $printable++ }
+        }
+        if (($printable / $text.Length) -lt 0.90) { return $null }
+    } else {
+        foreach ($b in $bytes) {
+            if ($b -eq 0) { return $null }
+            if ($b -ge 32 -and $b -le 126) { $printable++ }
+            elseif ($b -in 9, 10, 13) { $printable++ }
+        }
+        if (($printable / $bytes.Count) -lt 0.90) { return $null }
+    }
 
     $best = $null
     foreach ($lang in $script:ContentSignatures.Keys) {
         $hits = 0
         foreach ($pat in $script:ContentSignatures[$lang]) {
             if ($text -match $pat) { $hits++ }
+        }
+        # Preserve detection of minimal disguised PowerShell download cradles
+        # without storing or reconstructing their high-risk tokens in this
+        # script. Each DISTINCT indicator token contributes one signal --
+        # deduplicated by digest, not TestID (PR #50 review). The signature list
+        # this replaced scored each token pattern separately, so two download
+        # methods were two signals; collapsing them into one PS-DOWNLOAD left a
+        # disguised cradle at score 1, classified 'unsupported', and never
+        # handed to the PowerShell analyzer at all.
+        if ($lang -eq 'powershell') {
+            $hashedSignals = @(Find-MtsPowerShellRiskIndicator -Text $text |
+                Where-Object { $_.Rule.Classifier } |
+                ForEach-Object { $_.Digest } |
+                Sort-Object -Unique)
+            $hits += $hashedSignals.Count
         }
         if ($hits -ge 2 -and ($null -eq $best -or $hits -gt $best.Score)) {
             $best = [PSCustomObject]@{ Type = $lang; Score = $hits }

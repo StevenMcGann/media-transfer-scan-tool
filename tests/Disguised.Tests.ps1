@@ -40,6 +40,19 @@ Describe 'Content-signature detection (no shebang)' {
     }
 }
 
+Describe 'Hashed-indicator scoring' {
+    It 'counts two distinct download tokens as two signals, not one shared rule' {
+        # The fixture's ONLY PowerShell signals are two different download methods
+        # under the same PS-DOWNLOAD rule. Deduplicating by TestID scored it 1,
+        # left it 'unsupported', and never routed it to the PowerShell analyzer
+        # (PR #50 review). Each distinct token digest must count.
+        $pairDir = Join-Path $PSScriptRoot 'fixtures/corpus/disguised_pair'
+        $r = New-Unit -File (Get-Item (Join-Path $pairDir 'cradle.txt')) -ScanRoot $pairDir
+        $r.Unit.DetectedType | Should -Be 'powershell'
+        @($r.Findings | Where-Object { $_.TestID -eq 'MTS-DISGUISE-002' }).Count | Should -Be 1
+    }
+}
+
 Describe 'False-positive guard' {
     It 'does NOT flag plain English prose as a disguised script' {
         $r = Classify 'memo.txt'

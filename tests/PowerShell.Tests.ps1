@@ -402,6 +402,25 @@ Path(sys.argv[2]).write_text('{"scanned":1,"findings":[]}', encoding='utf-8')
         @($result | Where-Object { $_.TestID -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 1
     }
 
+    It 'scans a zero-byte script in the no-Python fallback without a false coverage gap' {
+        # An empty [byte[]] snapshot used to fail mandatory-parameter binding in the
+        # decoder, which the fallback reported as a HIGH MTS-PSSRULES-FAILED gap for
+        # a file that was fully scannable and clean (PR #50 review).
+        $target = Join-Path $script:Out 'fallback-empty.ps1'
+        [IO.File]::WriteAllBytes($target, [byte[]]::new(0))
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'fallback-empty.ps1'; Type = 'powershell'; Name = 'fallback-empty.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}; Venv = $null; HelperDir = (Join-Path $script:Out 'missing-helpers')
+            TimeoutSeconds = 5
+        }
+
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        @($result | Where-Object { $_.TestID -like 'MTS-PSSRULES-*' }).Count | Should -Be 0
+        @($result | Where-Object { $_.Tool -eq 'PowerShellRules' -and $_.Severity -eq 'HIGH' }).Count | Should -Be 0
+    }
+
     It 'bounds fallback token and finding density with an explicit reason' {
         $tokenReason = ''
         $tokenResults = @(Find-MtsPowerShellRiskIndicator -Text 'one two three four five six' `

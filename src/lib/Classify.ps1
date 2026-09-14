@@ -201,7 +201,10 @@ function Get-MagicType {
 
 function ConvertFrom-MtsContentBytes {
     <# Decode the BOM-aware text formats recognized by PowerShell/.NET. #>
-    param([Parameter(Mandatory)][byte[]]$Bytes)
+    # An empty file is valid, fully scannable input. Without AllowEmptyCollection
+    # a mandatory [byte[]] rejects it at binding time, and the no-Python fallback
+    # reported that as a HIGH coverage gap for a clean zero-byte script (PR #50).
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
 
     $offset = 0
     $encoding = [Text.Encoding]::UTF8
@@ -281,11 +284,16 @@ function Get-ContentSignature {
         }
         # Preserve detection of minimal disguised PowerShell download cradles
         # without storing or reconstructing their high-risk tokens in this
-        # script. Each distinct classifier rule contributes one content signal.
+        # script. Each DISTINCT indicator token contributes one signal --
+        # deduplicated by digest, not TestID (PR #50 review). The signature list
+        # this replaced scored each token pattern separately, so two download
+        # methods were two signals; collapsing them into one PS-DOWNLOAD left a
+        # disguised cradle at score 1, classified 'unsupported', and never
+        # handed to the PowerShell analyzer at all.
         if ($lang -eq 'powershell') {
             $hashedSignals = @(Find-MtsPowerShellRiskIndicator -Text $text |
                 Where-Object { $_.Rule.Classifier } |
-                ForEach-Object { $_.Rule.TestID } |
+                ForEach-Object { $_.Digest } |
                 Sort-Object -Unique)
             $hits += $hashedSignals.Count
         }

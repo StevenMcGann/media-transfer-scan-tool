@@ -26,7 +26,7 @@
     Pin KEV retrieval to one URL (an internal mirror) instead of the default
     cisa.gov -> cisagov/kev-data order. Online mode only.
 .NOTES
-    Version : 0.16.0
+    Version : 0.17.0
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 
 # Single source of truth for the tool version (keep in sync with the .NOTES block,
 # CHANGELOG, and the git tag). Report schemaVersion is tracked separately in Report.ps1.
-$script:ToolVersion = '0.16.0'
+$script:ToolVersion = '0.17.0'
 
 # --- Load engine ------------------------------------------------------------
 $here = $PSScriptRoot

@@ -52,7 +52,7 @@ REM Air-gapped host: use vendored tools and skip live advisory lookups:
 Scan.cmd -Path "D:\incoming\sub" -Mode offline
 ```
 The bundle uses its vendored tools in either mode. It does not automatically
-select offline mode. In v0.16.0 there is no vendored OSV advisory database, so
+select offline mode. In v0.17.0 there is no vendored OSV advisory database, so
 `-Mode offline` emits explicit INFO coverage-gap findings for dependency inputs
 instead of treating them as vulnerability-free.
 
@@ -122,7 +122,7 @@ they are, not by their empty finding list.
 
 ### Archive coverage findings
 
-v0.16.0 recursively classifies and dispatches ordinary members of ZIP and tar
+v0.17.0 recursively classifies and dispatches ordinary members of ZIP and tar
 archives. The archive tree has run-wide limits of five nested archive levels,
 5,000 staged entries, and 1 GB of expanded file content. Review these INFO
 findings even when overall risk is CLEAN:

@@ -9,6 +9,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-14
+
 ### Fixed
 - Replaced the v0.9.0 PowerShell indicator-fragment workaround with token-aware
   SHA-256 comparisons. The preferred stdlib-only Python helper and the offline

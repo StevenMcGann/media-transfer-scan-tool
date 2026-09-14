@@ -17,6 +17,8 @@ validation against real untrusted transfers**, not a second contract freeze (see
   removing the fragment assembly that Defender Enterprise continued to flag.
   Disguised-file classification uses the same hashed signals, and the test
   suite now fails if a protected token is reintroduced into `src/*.ps1`.
+  BOM-marked UTF-8, UTF-16, and UTF-32 scripts are decoded before hashing so
+  alternate text encodings cannot suppress these findings.
 
 ### Changed
 - Clarified that `tools/verify-amsi.ps1` observes local Defender Antivirus

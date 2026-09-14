@@ -18,6 +18,14 @@ BeforeAll {
         $devPython = Join-Path $Root 'src/.scan-venv/Scripts/python.exe'
         if (Test-Path -LiteralPath $devPython -PathType Leaf) { $script:PythonExe = $devPython }
     }
+    $script:PowerShellEncodings = @(
+        @{ Name = 'utf8';    Encoding = [Text.UTF8Encoding]::new($false) }
+        @{ Name = 'utf8bom'; Encoding = [Text.UTF8Encoding]::new($true) }
+        @{ Name = 'utf16le'; Encoding = [Text.UnicodeEncoding]::new($false, $true) }
+        @{ Name = 'utf16be'; Encoding = [Text.UnicodeEncoding]::new($true, $true) }
+        @{ Name = 'utf32le'; Encoding = [Text.UTF32Encoding]::new($false, $true) }
+        @{ Name = 'utf32be'; Encoding = [Text.UTF32Encoding]::new($true, $true) }
+    )
     New-Item -ItemType Directory -Path $script:Out -Force | Out-Null
 
     function script:PsCount($Result, $Name, [scriptblock]$Pred) {
@@ -90,6 +98,75 @@ Describe 'PowerShell token-hash rule paths' {
                 Sort-Object)
             @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual) |
                 Should -BeNullOrEmpty -Because "the Python and PowerShell paths must agree for $($file.Name)"
+        }
+    }
+
+    It 'decodes BOM-marked PowerShell before hashing through the preferred analyzer path' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $descriptor = Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers |
+            Where-Object { $_.Name -eq 'PSScriptAnalyzer' }
+        $context = [PSCustomObject]@{
+            Tools = @{}
+            Venv = [PSCustomObject]@{ Python = $script:PythonExe }
+            HelperDir = Split-Path $script:PsHelper -Parent
+            TimeoutSeconds = 30
+        }
+        $sourcePath = Join-Path $script:PsDir 'amsi.ps1'
+        $sourceText = [IO.File]::ReadAllText($sourcePath, [Text.Encoding]::UTF8)
+        $expected = @(Find-MtsPowerShellRiskIndicator -Text $sourceText |
+            ForEach-Object { "$($_.Line):$($_.Rule.TestID)" } |
+            Sort-Object)
+
+        foreach ($case in $script:PowerShellEncodings) {
+            $encodedPath = Join-Path $script:Out "amsi-$($case.Name).ps1"
+            $output = Join-Path $script:Out "amsi-$($case.Name).json"
+            [IO.File]::WriteAllText($encodedPath, $sourceText, $case.Encoding)
+
+            & $script:PythonExe $script:PsHelper $encodedPath $output
+            $LASTEXITCODE | Should -Be 0
+            $helperResult = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+            $helperResult.scanned | Should -Be 1
+            $helperFindings = @($helperResult.findings |
+                ForEach-Object { "$($_.line):$($_.testId)" } |
+                Sort-Object)
+            @(Compare-Object -ReferenceObject $expected -DifferenceObject $helperFindings) |
+                Should -BeNullOrEmpty -Because "$($case.Name) must preserve helper findings"
+
+            $unit = [PSCustomObject]@{
+                Path = $encodedPath; RelativePath = "amsi-$($case.Name).ps1"
+                Type = 'powershell'; Name = "amsi-$($case.Name).ps1"
+            }
+            $analyzerFindings = @(& $descriptor.Invoke $unit $context |
+                Where-Object { $_.Tool -eq 'PowerShellRules' } |
+                ForEach-Object { "$($_.Line):$($_.TestID)" } |
+                Sort-Object)
+            @(Compare-Object -ReferenceObject $expected -DifferenceObject $analyzerFindings) |
+                Should -BeNullOrEmpty -Because "$($case.Name) must preserve analyzer findings"
+        }
+    }
+
+    It 'accepts clean BOM-marked PowerShell as a successful zero-finding scan' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $sourceText = [IO.File]::ReadAllText(
+            (Join-Path $script:PsDir 'clean.ps1'), [Text.Encoding]::UTF8)
+        foreach ($case in $script:PowerShellEncodings | Where-Object { $_.Name -ne 'utf8' }) {
+            $encodedPath = Join-Path $script:Out "clean-$($case.Name).ps1"
+            $output = Join-Path $script:Out "clean-$($case.Name).json"
+            [IO.File]::WriteAllText($encodedPath, $sourceText, $case.Encoding)
+
+            & $script:PythonExe $script:PsHelper $encodedPath $output
+            $LASTEXITCODE | Should -Be 0
+            $result = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+            $result.scanned | Should -Be 1
+            @($result.findings).Count | Should -Be 0
         }
     }
 

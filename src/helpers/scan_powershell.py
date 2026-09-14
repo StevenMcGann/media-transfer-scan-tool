@@ -10,6 +10,7 @@ Output: {scanned, findings:[{line,severity,confidence,testId,issue,category}]}
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import re
@@ -75,6 +76,23 @@ def next_non_whitespace(text: str, start: int) -> str:
     return ""
 
 
+def decode_source(data: bytes) -> str:
+    """Decode the BOM-aware text formats recognized by PowerShell/.NET."""
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        encoding = "utf-32"
+    elif data.startswith(codecs.BOM_UTF8):
+        encoding = "utf-8-sig"
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"
+    else:
+        encoding = "utf-8"
+
+    text = data.decode(encoding, errors="replace")
+    # Path.read_text() used universal newlines; retain that behavior now that
+    # decoding starts from bytes.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def scan_text(text: str) -> list[dict]:
     tokens = list(TOKEN_RE.finditer(text))
     digests = [digest(match.group(0)) for match in tokens]
@@ -114,7 +132,7 @@ def scan_file(path: Path) -> dict:
     if path.stat().st_size > MAX_BYTES:
         return {"scanned": 0, "findings": [], "error": "input exceeds static-rule size limit"}
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = decode_source(path.read_bytes())
     except OSError as exc:
         return {"scanned": 0, "findings": [], "error": f"could not read input: {exc}"}
     return {"scanned": 1, "findings": scan_text(text)}

@@ -17,6 +17,12 @@ $script:MtsPowerShellTokenPattern = [regex]::new(
     [Text.RegularExpressions.RegexOptions]::Compiled -bor
     [Text.RegularExpressions.RegexOptions]::CultureInvariant)
 
+$script:MtsPowerShellRuleMaxBytes = 5000000
+$script:MtsPowerShellFallbackMaxBytes = 262144
+$script:MtsPowerShellFallbackMaxTokens = 100000
+$script:MtsPowerShellFallbackMaxFindings = 1000
+$script:MtsPowerShellFallbackMaxMilliseconds = 5000
+
 # Digest -> rule.  Pair rules name the digest of the immediately following
 # token; tail tokens are not independently reportable.
 $script:MtsPowerShellIndicatorRules = [ordered]@{
@@ -120,45 +126,73 @@ function Get-MtsPreviousNonWhitespaceCharacter {
 
 function Find-MtsPowerShellRiskIndicator {
     <# Return token-aware matches without returning the source token itself. #>
-    param([AllowEmptyString()][string]$Text)
+    param(
+        [AllowEmptyString()][string]$Text,
+        [int]$MaxTokens = 0,
+        [int]$MaxResults = 0,
+        [int]$MaxMilliseconds = 0,
+        [ref]$LimitReason
+    )
+
+    if ($null -ne $LimitReason) { $LimitReason.Value = '' }
 
     if ([string]::IsNullOrEmpty($Text)) { return @() }
 
-    $tokens = @($script:MtsPowerShellTokenPattern.Matches($Text))
-    $digests = [string[]]::new($tokens.Count)
-    for ($i = 0; $i -lt $tokens.Count; $i++) {
-        $digests[$i] = Get-MtsTokenDigest -Token $tokens[$i].Value
-    }
-
     $results = [Collections.Generic.List[object]]::new()
-    for ($i = 0; $i -lt $tokens.Count; $i++) {
-        $digest = $digests[$i]
-        if (-not $script:MtsPowerShellIndicatorRules.Contains($digest)) { continue }
+    $token = $script:MtsPowerShellTokenPattern.Match($Text)
+    $tokenCount = 0
+    $line = 1
+    $lineCursor = 0
+    $timer = if ($MaxMilliseconds -gt 0) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
 
-        $token = $tokens[$i]
-        $rule = $script:MtsPowerShellIndicatorRules[$digest]
-        $contextMatches = switch ($rule.Context) {
-            'MemberCall' {
-                (Get-MtsPreviousNonWhitespaceCharacter -Text $Text -Start ($token.Index - 1)) -eq '.' -and
-                (Get-MtsNextNonWhitespaceCharacter -Text $Text -Start ($token.Index + $token.Length)) -eq '('
-            }
-            'Call' {
-                (Get-MtsNextNonWhitespaceCharacter -Text $Text -Start ($token.Index + $token.Length)) -eq '('
-            }
-            'Pair' {
-                ($i + 1) -lt $tokens.Count -and $digests[$i + 1] -eq $rule.PairDigest
-            }
-            default { $true }
+    while ($token.Success) {
+        $nextToken = $token.NextMatch()
+        $tokenCount++
+        if ($MaxTokens -gt 0 -and $tokenCount -gt $MaxTokens) {
+            if ($null -ne $LimitReason) { $LimitReason.Value = "candidate-token limit ($MaxTokens)" }
+            break
         }
-        if (-not $contextMatches) { continue }
+        if ($timer -and ($tokenCount % 1024) -eq 0 -and $timer.ElapsedMilliseconds -ge $MaxMilliseconds) {
+            if ($null -ne $LimitReason) { $LimitReason.Value = "time limit (${MaxMilliseconds}ms)" }
+            break
+        }
 
-        $line = ($Text.Substring(0, $token.Index) -split '\r?\n').Count
-        $results.Add([PSCustomObject]@{
-            Index  = $token.Index
-            Line   = $line
-            Digest = $digest
-            Rule   = $rule
-        })
+        $digest = Get-MtsTokenDigest -Token $token.Value
+        if ($script:MtsPowerShellIndicatorRules.Contains($digest)) {
+            $rule = $script:MtsPowerShellIndicatorRules[$digest]
+            $contextMatches = switch ($rule.Context) {
+                'MemberCall' {
+                    (Get-MtsPreviousNonWhitespaceCharacter -Text $Text -Start ($token.Index - 1)) -eq '.' -and
+                    (Get-MtsNextNonWhitespaceCharacter -Text $Text -Start ($token.Index + $token.Length)) -eq '('
+                }
+                'Call' {
+                    (Get-MtsNextNonWhitespaceCharacter -Text $Text -Start ($token.Index + $token.Length)) -eq '('
+                }
+                'Pair' {
+                    $nextToken.Success -and (Get-MtsTokenDigest -Token $nextToken.Value) -eq $rule.PairDigest
+                }
+                default { $true }
+            }
+
+            if ($contextMatches) {
+                while ($lineCursor -lt $token.Index) {
+                    if ($Text[$lineCursor] -eq "`n") { $line++ }
+                    $lineCursor++
+                }
+                $results.Add([PSCustomObject]@{
+                    Index  = $token.Index
+                    Line   = $line
+                    Digest = $digest
+                    Rule   = $rule
+                })
+                if ($MaxResults -gt 0 -and $results.Count -ge $MaxResults -and $nextToken.Success) {
+                    if ($null -ne $LimitReason) { $LimitReason.Value = "finding limit ($MaxResults)" }
+                    break
+                }
+            }
+        }
+        $token = $nextToken
     }
+    if ($timer) { $timer.Stop() }
     return $results.ToArray()
 }

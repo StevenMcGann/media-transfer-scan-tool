@@ -27,6 +27,8 @@ BeforeAll {
         @{ Name = 'utf32be'; Encoding = [Text.UTF32Encoding]::new($true, $true) }
     )
     New-Item -ItemType Directory -Path $script:Out -Force | Out-Null
+    $script:PsDescriptor = Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers |
+        Where-Object { $_.Name -eq 'PSScriptAnalyzer' }
 
     function script:PsCount($Result, $Name, [scriptblock]$Pred) {
         @(($Result.Units | Where-Object { $_.Name -eq $Name }).Findings | Where-Object $Pred).Count
@@ -171,8 +173,6 @@ Describe 'PowerShell token-hash rule paths' {
     }
 
     It 'the safe PowerShell fallback preserves the custom-rule findings' {
-        $descriptor = Import-AnalyzerRegistry -AnalyzerDir $script:Analyzers |
-            Where-Object { $_.Name -eq 'PSScriptAnalyzer' }
         $target = Join-Path $script:PsDir 'defender.ps1'
         $unit = [PSCustomObject]@{
             Path = $target; RelativePath = 'defender.ps1'; Type = 'powershell'; Name = 'defender.ps1'
@@ -182,8 +182,253 @@ Describe 'PowerShell token-hash rule paths' {
             TimeoutSeconds = 30
         }
 
-        $result = @(& $descriptor.Invoke $unit $context)
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
         @($result | Where-Object { $_.TestID -eq 'PS-DEFENDER-TAMPER' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'reports a helper timeout without retrying the hostile input in-process' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $helperDir = Join-Path $script:Out 'timeout-helper'
+        New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $helperDir 'scan_powershell.py'),
+            "import time`ntime.sleep(30)`n",
+            [Text.UTF8Encoding]::new($false))
+        $target = Join-Path $script:PsDir 'amsi.ps1'
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'amsi.ps1'; Type = 'powershell'; Name = 'amsi.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}; Venv = [PSCustomObject]@{ Python = $script:PythonExe }
+            HelperDir = $helperDir; TimeoutSeconds = 1
+        }
+
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        $timer.Stop()
+        @($result | Where-Object { $_.TestID -eq 'MTS-ANALYZER-TIMEOUT' }).Count | Should -Be 1
+        @($result | Where-Object { $_.TestID -eq 'PS-AMSI-TAMPER' }).Count | Should -Be 0
+        $timer.Elapsed.TotalSeconds | Should -BeLessThan 10
+    }
+
+    It 'reports a blocked helper without retrying the hostile input in-process' {
+        $helperDir = Join-Path $script:Out 'blocked-helper'
+        New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $helperDir 'scan_powershell.py'),
+            "raise SystemExit(0)`n",
+            [Text.UTF8Encoding]::new($false))
+        $target = Join-Path $script:PsDir 'amsi.ps1'
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'amsi.ps1'; Type = 'powershell'; Name = 'amsi.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}
+            Venv = [PSCustomObject]@{ Python = (Join-Path $script:Out 'blocked-python.exe') }
+            HelperDir = $helperDir; TimeoutSeconds = 5
+        }
+
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        @($result | Where-Object { $_.TestID -eq 'MTS-TOOL-BLOCKED' }).Count | Should -Be 1
+        @($result | Where-Object { $_.TestID -eq 'PS-AMSI-TAMPER' }).Count | Should -Be 0
+    }
+
+    It 'reports malformed helper output without retrying the hostile input in-process' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $helperDir = Join-Path $script:Out 'malformed-helper'
+        New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $helperDir 'scan_powershell.py'),
+            "from pathlib import Path`nimport sys`nPath(sys.argv[2]).write_text('{', encoding='utf-8')`n",
+            [Text.UTF8Encoding]::new($false))
+        $target = Join-Path $script:PsDir 'amsi.ps1'
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'amsi.ps1'; Type = 'powershell'; Name = 'amsi.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}; Venv = [PSCustomObject]@{ Python = $script:PythonExe }
+            HelperDir = $helperDir; TimeoutSeconds = 5
+        }
+
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        @($result | Where-Object { $_.TestID -eq 'MTS-PSSRULES-FAILED' }).Count | Should -Be 1
+        @($result | Where-Object { $_.TestID -eq 'PS-AMSI-TAMPER' }).Count | Should -Be 0
+    }
+
+    It 'treats helper failure states as authoritative instead of falling back' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $cases = @(
+            @{
+                Name = 'nonzero'; Expected = 'MTS-PSSRULES-FAILED'; Script = @'
+raise SystemExit(3)
+'@
+            }
+            @{
+                Name = 'scanned-zero'; Expected = 'MTS-PSSRULES-FAILED'; Script = @'
+from pathlib import Path
+import sys
+Path(sys.argv[2]).write_text('{"scanned":0,"findings":[],"error":"could not read input"}', encoding='utf-8')
+'@
+            }
+            @{
+                Name = 'valid-empty'; Expected = ''; Script = @'
+from pathlib import Path
+import sys
+Path(sys.argv[2]).write_text('{"scanned":1,"findings":[]}', encoding='utf-8')
+'@
+            }
+        )
+        $target = Join-Path $script:PsDir 'amsi.ps1'
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'amsi.ps1'; Type = 'powershell'; Name = 'amsi.ps1'
+        }
+
+        foreach ($case in $cases) {
+            $helperDir = Join-Path $script:Out "$($case.Name)-helper"
+            New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+            [IO.File]::WriteAllText(
+                (Join-Path $helperDir 'scan_powershell.py'),
+                $case.Script,
+                [Text.UTF8Encoding]::new($false))
+            $context = [PSCustomObject]@{
+                Tools = @{}; Venv = [PSCustomObject]@{ Python = $script:PythonExe }
+                HelperDir = $helperDir; TimeoutSeconds = 5
+            }
+
+            $result = @(& $script:PsDescriptor.Invoke $unit $context)
+            @($result | Where-Object { $_.TestID -eq 'PS-AMSI-TAMPER' }).Count |
+                Should -Be 0 -Because "$($case.Name) must not invoke the fallback"
+            @($result | Where-Object { $_.TestID -like 'MTS-PSSRULES-*' }).Count |
+                Should -Be ([int][bool]$case.Expected) -Because "$($case.Name) must preserve protocol semantics"
+            if ($case.Expected) {
+                @($result | Where-Object { $_.TestID -eq $case.Expected }).Count | Should -Be 1
+            }
+        }
+    }
+
+    It 'rejects a file above the static-rule byte limit before launching a helper' {
+        $target = Join-Path $script:Out 'oversized.ps1'
+        [IO.File]::WriteAllBytes($target, [byte[]]::new($script:MtsPowerShellRuleMaxBytes + 1))
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'oversized.ps1'; Type = 'powershell'; Name = 'oversized.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}; Venv = [PSCustomObject]@{ Python = (Join-Path $script:Out 'must-not-run.exe') }
+            HelperDir = Split-Path $script:PsHelper -Parent; TimeoutSeconds = 5
+        }
+
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        @($result | Where-Object { $_.TestID -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 1
+        @($result | Where-Object { $_.TestID -eq 'MTS-TOOL-BLOCKED' }).Count | Should -Be 0
+    }
+
+    It 'bounds the no-Python fallback by bytes and reports the coverage gap' {
+        $target = Join-Path $script:Out 'fallback-oversized.ps1'
+        [IO.File]::WriteAllBytes($target, [byte[]]::new($script:MtsPowerShellFallbackMaxBytes + 1))
+        $unit = [PSCustomObject]@{
+            Path = $target; RelativePath = 'fallback-oversized.ps1'; Type = 'powershell'; Name = 'fallback-oversized.ps1'
+        }
+        $context = [PSCustomObject]@{
+            Tools = @{}; Venv = $null; HelperDir = (Join-Path $script:Out 'missing-helpers')
+            TimeoutSeconds = 5
+        }
+
+        $result = @(& $script:PsDescriptor.Invoke $unit $context)
+        @($result | Where-Object { $_.TestID -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 1
+    }
+
+    It 'bounds fallback token and finding density with an explicit reason' {
+        $tokenReason = ''
+        $tokenResults = @(Find-MtsPowerShellRiskIndicator -Text 'one two three four five six' `
+            -MaxTokens 5 -LimitReason ([ref]$tokenReason))
+        $tokenResults.Count | Should -Be 0
+        $tokenReason | Should -Match 'candidate-token limit'
+
+        $source = [IO.File]::ReadAllText(
+            (Join-Path $script:PsDir 'defender.ps1'), [Text.Encoding]::UTF8)
+        $findingReason = ''
+        $findingResults = @(Find-MtsPowerShellRiskIndicator -Text (($source + "`n") * 2 -join '') `
+            -MaxResults 1 -LimitReason ([ref]$findingReason))
+        $findingResults.Count | Should -Be 1
+        $findingReason | Should -Match 'finding limit'
+
+        $lastRiskMatch = @(Find-MtsPowerShellRiskIndicator -Text $source)[-1]
+        $riskToken = $script:MtsPowerShellTokenPattern.Match($source, $lastRiskMatch.Index).Value
+        $exactReason = ''
+        $exactResults = @(Find-MtsPowerShellRiskIndicator -Text $riskToken `
+            -MaxResults 1 -LimitReason ([ref]$exactReason))
+        $exactResults.Count | Should -Be 1
+        $exactReason | Should -BeNullOrEmpty
+    }
+
+    It 'bounds Python helper token and finding density with explicit findings' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $tokenPath = Join-Path $script:Out 'token-dense.ps1'
+        $output = Join-Path $script:Out 'token-dense.json'
+        $tokenText = [string]::new('x', 1000002).Replace('xx', 'a ')
+        [IO.File]::WriteAllText($tokenPath, $tokenText, [Text.UTF8Encoding]::new($false))
+        & $script:PythonExe $script:PsHelper $tokenPath $output
+        $LASTEXITCODE | Should -Be 0
+        $tokenResult = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+        @($tokenResult.findings | Where-Object { $_.testId -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 1
+
+        $source = [IO.File]::ReadAllText(
+            (Join-Path $script:PsDir 'defender.ps1'), [Text.Encoding]::UTF8)
+        $findingPath = Join-Path $script:Out 'finding-dense.ps1'
+        $findingText = (($source + "`n") * 1001 -join '')
+        [IO.File]::WriteAllText($findingPath, $findingText, [Text.UTF8Encoding]::new($false))
+        & $script:PythonExe $script:PsHelper $findingPath $output
+        $LASTEXITCODE | Should -Be 0
+        $findingResult = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+        @($findingResult.findings | Where-Object { $_.testId -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 1
+        @($findingResult.findings).Count | Should -BeLessOrEqual 1001
+
+        $lastRiskMatch = @(Find-MtsPowerShellRiskIndicator -Text $source)[-1]
+        $riskToken = $script:MtsPowerShellTokenPattern.Match($source, $lastRiskMatch.Index).Value
+        $exactText = (($riskToken + ' ') * 999 -join '') + $riskToken
+        [IO.File]::WriteAllText($findingPath, $exactText, [Text.UTF8Encoding]::new($false))
+        & $script:PythonExe $script:PsHelper $findingPath $output
+        $LASTEXITCODE | Should -Be 0
+        $exactResult = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+        @($exactResult.findings).Count | Should -Be 1000
+        @($exactResult.findings | Where-Object { $_.testId -eq 'MTS-PSSRULES-LIMIT' }).Count | Should -Be 0
+    }
+
+    It 'accepts exactly the Python helper byte limit and rejects one byte more' {
+        if (-not $script:PythonExe) {
+            Set-ItResult -Skipped -Because 'Python 3 is unavailable'
+            return
+        }
+
+        $target = Join-Path $script:Out 'helper-byte-boundary.ps1'
+        $output = Join-Path $script:Out 'helper-byte-boundary.json'
+        [IO.File]::WriteAllBytes($target, [byte[]]::new(5000000))
+        & $script:PythonExe $script:PsHelper $target $output
+        $LASTEXITCODE | Should -Be 0
+        (Get-Content -LiteralPath $output -Raw | ConvertFrom-Json).scanned | Should -Be 1
+
+        [IO.File]::WriteAllBytes($target, [byte[]]::new(5000001))
+        & $script:PythonExe $script:PsHelper $target $output
+        $LASTEXITCODE | Should -Be 1
+        $result = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+        $result.scanned | Should -Be 0
+        $result.error | Should -Match 'size limit'
     }
 
     It 'shipped PowerShell source contains no plaintext high-risk indicator tokens' {

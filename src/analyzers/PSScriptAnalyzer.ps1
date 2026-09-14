@@ -8,10 +8,11 @@
     1. PSScriptAnalyzer (PS module): structural/best-practice/security rules
        (PSAvoidUsingInvokeExpression, plaintext-password rules, etc.). Static AST
        analysis — never runs the script.
-    2. Custom token rules (always run, no module needed): high-signal execution,
-       download, obfuscation, antimalware-tampering, and policy-bypass indicators.
-       The preferred stdlib-only Python helper and the PowerShell fallback both
-       compare SHA-256 token identities; neither stores or rebuilds indicator text.
+    2. Custom token rules (always attempted, no module needed): high-signal
+       execution, download, obfuscation, antimalware-tampering, and policy-bypass
+       indicators. The preferred stdlib-only Python helper and the PowerShell
+       fallback both compare SHA-256 token identities; neither stores or rebuilds
+       indicator text. Any resource or execution limit is an explicit HIGH gap.
     3. Authenticode signature status (Get-AuthenticodeSignature) — a tampered
        signed file (HashMismatch) is HIGH; valid/unsigned are recorded as INFO.
 
@@ -83,47 +84,127 @@
             [int]$Context.TimeoutSeconds
         } else { 300 }
 
-        if ($pythonExe -and $helper -and (Test-Path -LiteralPath $helper -PathType Leaf)) {
+        $addRuleGap = {
+            param(
+                [Parameter(Mandatory)][string]$TestID,
+                [Parameter(Mandatory)][string]$Issue
+            )
+            $findings.Add((New-Finding -Tool 'PowerShellRules' -Category 'parser' `
+                -Severity 'HIGH' -Confidence 'HIGH' -UnitType 'powershell' `
+                -File $Unit.RelativePath -Issue $Issue -TestID $TestID `
+                -Recommendation 'Treat the file as suspicious and inspect it in isolation; absence of static-rule findings is not proof that the file is clean.'))
+        }
+
+        try {
+            $ruleInputLength = (Get-Item -LiteralPath $target -ErrorAction Stop).Length
+        } catch {
+            & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                -Issue "Static PowerShell rule scanning could not inspect the input size, so this unit was NOT fully analyzed: $_"
+            $ruleScanComplete = $true
+        }
+
+        if (-not $ruleScanComplete -and $ruleInputLength -gt $script:MtsPowerShellRuleMaxBytes) {
+            & $addRuleGap -TestID 'MTS-PSSRULES-LIMIT' `
+                -Issue "Static PowerShell rule scanning skipped this $ruleInputLength-byte file because it exceeds the $script:MtsPowerShellRuleMaxBytes-byte analysis limit; this unit was NOT fully analyzed."
+            $ruleScanComplete = $true
+        }
+
+        $helperAvailable = $pythonExe -and $helper -and (Test-Path -LiteralPath $helper -PathType Leaf)
+        if (-not $ruleScanComplete -and $helperAvailable) {
             $tmpJson = Join-Path $env:TEMP "mts_psrules_$([IO.Path]::GetRandomFileName()).json"
             try {
                 $result = Invoke-BoundedProcess -FilePath $pythonExe `
                     -Arguments @($helper, $target, $tmpJson) -TimeoutSeconds $timeoutSeconds
-                if (-not $result.TimedOut -and $result.ExitCode -eq 0 -and
-                    (Test-Path -LiteralPath $tmpJson -PathType Leaf)) {
-                    $raw = Get-Content -LiteralPath $tmpJson -Raw | ConvertFrom-Json
-                    if ([int]$raw.scanned -eq 1) {
+
+                if (-not $result.Started) {
+                    $findings.Add((New-ToolBlockedFinding -Tool 'PowerShellRules' `
+                        -UnitType 'powershell' -File $Unit.RelativePath -Reason $result.StartError))
+                } elseif ($result.TimedOut) {
+                    $findings.Add((New-TimeoutFinding -Tool 'PowerShellRules' `
+                        -UnitType 'powershell' -File $Unit.RelativePath -TimeoutSeconds $timeoutSeconds))
+                } elseif ($result.ExitCode -ne 0) {
+                    & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                        -Issue "The bounded static PowerShell rule helper exited with code $($result.ExitCode), so this unit was NOT fully analyzed."
+                } elseif (-not (Test-Path -LiteralPath $tmpJson -PathType Leaf)) {
+                    & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                        -Issue 'The bounded static PowerShell rule helper produced no result, so this unit was NOT fully analyzed.'
+                } else {
+                    $raw = Get-Content -LiteralPath $tmpJson -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if (-not $raw.PSObject.Properties['scanned'] -or
+                        -not $raw.PSObject.Properties['findings']) {
+                        & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                            -Issue 'The bounded static PowerShell rule helper returned an invalid result, so this unit was NOT fully analyzed.'
+                    } elseif ([int]$raw.scanned -ne 1) {
+                        $helperError = if ($raw.PSObject.Properties['error'] -and $raw.error) {
+                            ": $($raw.error)"
+                        } else { '' }
+                        $helperFailureId = if ($helperError -match 'size limit') {
+                            'MTS-PSSRULES-LIMIT'
+                        } else { 'MTS-PSSRULES-FAILED' }
+                        & $addRuleGap -TestID $helperFailureId `
+                            -Issue "The bounded static PowerShell rule helper declined the input$helperError; this unit was NOT fully analyzed."
+                    } else {
                         foreach ($finding in @($raw.findings)) {
                             $findings.Add((New-Finding -Tool 'PowerShellRules' -Category $finding.category `
                                 -Severity $finding.severity -Confidence $finding.confidence -UnitType 'powershell' `
                                 -File $Unit.RelativePath -Line ([int]$finding.line) `
                                 -Issue $finding.issue -TestID $finding.testId))
                         }
-                        $ruleScanComplete = $true
                     }
                 }
-                if (-not $ruleScanComplete) {
-                    $why = if ($result.TimedOut) { 'timed out' } else { "exited $($result.ExitCode)" }
-                    Write-Log -Level WARN -Message "PowerShellRules helper $why for $($Unit.RelativePath); using safe token-hash fallback."
-                }
             } catch {
-                Write-Log -Level WARN -Message "PowerShellRules helper error for $($Unit.RelativePath): $_; using safe token-hash fallback."
+                & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                    -Issue "The bounded static PowerShell rule helper returned an unreadable result, so this unit was NOT fully analyzed: $_"
             } finally {
                 Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
             }
+            # An attempted bounded helper is authoritative. Retrying the same
+            # hostile input in-process would defeat its wall-clock boundary.
+            $ruleScanComplete = $true
         }
 
         if (-not $ruleScanComplete) {
+            $stream = $null
             try {
-                $text = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8)
-                foreach ($match in @(Find-MtsPowerShellRiskIndicator -Text $text)) {
-                    $rule = $match.Rule
-                    $findings.Add((New-Finding -Tool 'PowerShellRules' -Category 'risky-code' `
-                        -Severity $rule.Severity -Confidence 'MEDIUM' -UnitType 'powershell' `
-                        -File $Unit.RelativePath -Line $match.Line -Issue $rule.Message -TestID $rule.TestID))
+                $stream = [IO.FileStream]::new(
+                    $target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                $buffer = [byte[]]::new($script:MtsPowerShellFallbackMaxBytes + 1)
+                $bytesRead = 0
+                while ($bytesRead -lt $buffer.Length) {
+                    $read = $stream.Read($buffer, $bytesRead, $buffer.Length - $bytesRead)
+                    if ($read -eq 0) { break }
+                    $bytesRead += $read
+                }
+                if ($bytesRead -gt $script:MtsPowerShellFallbackMaxBytes) {
+                    & $addRuleGap -TestID 'MTS-PSSRULES-LIMIT' `
+                        -Issue "The in-process static PowerShell fallback stopped after its $script:MtsPowerShellFallbackMaxBytes-byte safety limit; this unit was NOT fully analyzed."
+                } else {
+                    $snapshot = [byte[]]::new($bytesRead)
+                    if ($bytesRead -gt 0) { [Array]::Copy($buffer, $snapshot, $bytesRead) }
+                    $text = (ConvertFrom-MtsContentBytes -Bytes $snapshot).Text
+                    $limitReason = ''
+                    foreach ($match in @(Find-MtsPowerShellRiskIndicator -Text $text `
+                        -MaxTokens $script:MtsPowerShellFallbackMaxTokens `
+                        -MaxResults $script:MtsPowerShellFallbackMaxFindings `
+                        -MaxMilliseconds $script:MtsPowerShellFallbackMaxMilliseconds `
+                        -LimitReason ([ref]$limitReason))) {
+                        $rule = $match.Rule
+                        $findings.Add((New-Finding -Tool 'PowerShellRules' -Category 'risky-code' `
+                            -Severity $rule.Severity -Confidence 'MEDIUM' -UnitType 'powershell' `
+                            -File $Unit.RelativePath -Line $match.Line -Issue $rule.Message -TestID $rule.TestID))
+                    }
+                    if ($limitReason) {
+                        & $addRuleGap -TestID 'MTS-PSSRULES-LIMIT' `
+                            -Issue "The in-process static PowerShell fallback reached its $limitReason and stopped; this unit was NOT fully analyzed."
+                    }
                 }
                 $ruleScanComplete = $true
             } catch {
-                Write-Log -Level WARN -Message "PowerShellRules fallback error for $($Unit.RelativePath): $_"
+                & $addRuleGap -TestID 'MTS-PSSRULES-FAILED' `
+                    -Issue "The in-process static PowerShell fallback failed, so this unit was NOT fully analyzed: $_"
+                $ruleScanComplete = $true
+            } finally {
+                if ($stream) { $stream.Dispose() }
             }
         }
         Write-Log -Level INFO -Message "PowerShellRules: $($findings.Count - $ruleStart) finding(s) in $($Unit.RelativePath)."

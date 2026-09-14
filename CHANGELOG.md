@@ -18,7 +18,10 @@ validation against real untrusted transfers**, not a second contract freeze (see
   Disguised-file classification uses the same hashed signals, and the test
   suite now fails if a protected token is reintroduced into `src/*.ps1`.
   BOM-marked UTF-8, UTF-16, and UTF-32 scripts are decoded before hashing so
-  alternate text encodings cannot suppress these findings.
+  alternate text encodings cannot suppress these findings. Both helper and
+  fallback paths now enforce byte, token, finding, and time boundaries with
+  explicit HIGH coverage-gap findings; a failed bounded helper is never retried
+  against the same untrusted input in-process.
 
 ### Changed
 - Clarified that `tools/verify-amsi.ps1` observes local Defender Antivirus

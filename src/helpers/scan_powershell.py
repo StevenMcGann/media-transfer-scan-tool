@@ -19,6 +19,8 @@ from pathlib import Path
 
 
 MAX_BYTES = 5_000_000
+MAX_TOKENS = 500_000
+MAX_FINDINGS = 1_000
 TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?:-[A-Za-z][A-Za-z0-9_-]*|[A-Za-z][A-Za-z0-9_-]*)(?![A-Za-z0-9_])")
 
 # digest -> (severity, test id, context, optional pair-tail digest, message)
@@ -93,48 +95,87 @@ def decode_source(data: bytes) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def limit_finding(line: int, issue: str) -> dict:
+    return {
+        "line": line,
+        "severity": "HIGH",
+        "confidence": "HIGH",
+        "testId": "MTS-PSSRULES-LIMIT",
+        "issue": issue,
+        "category": "parser",
+    }
+
+
 def scan_text(text: str) -> list[dict]:
-    tokens = list(TOKEN_RE.finditer(text))
-    digests = [digest(match.group(0)) for match in tokens]
     findings = []
+    tokens = iter(TOKEN_RE.finditer(text))
+    match = next(tokens, None)
+    following = next(tokens, None)
+    token_count = 0
+    line = 1
+    line_cursor = 0
 
-    for index, match in enumerate(tokens):
-        rule = RULES.get(digests[index])
-        if not rule:
-            continue
-        severity, test_id, context, pair_digest, issue = rule
-        if context == "member_call":
-            applies = (previous_non_whitespace(text, match.start() - 1) == "." and
-                       next_non_whitespace(text, match.end()) == "(")
-        elif context == "call":
-            applies = next_non_whitespace(text, match.end()) == "("
-        elif context == "pair":
-            applies = index + 1 < len(tokens) and digests[index + 1] == pair_digest
-        else:
-            applies = True
-        if not applies:
-            continue
+    def line_number(position: int) -> int:
+        nonlocal line, line_cursor
+        line += text.count("\n", line_cursor, position)
+        line_cursor = position
+        return line
 
-        findings.append({
-            "line": text.count("\n", 0, match.start()) + 1,
-            "severity": severity,
-            "confidence": "MEDIUM",
-            "testId": test_id,
-            "issue": issue,
-            "category": "risky-code",
-        })
+    while match is not None:
+        token_count += 1
+        if token_count > MAX_TOKENS:
+            findings.append(limit_finding(
+                line_number(match.start()),
+                f"Static PowerShell rule scan stopped after {MAX_TOKENS} candidate tokens; the file was not fully analyzed.",
+            ))
+            break
+
+        rule = RULES.get(digest(match.group(0)))
+        if rule:
+            severity, test_id, context, pair_digest, issue = rule
+            if context == "member_call":
+                applies = (previous_non_whitespace(text, match.start() - 1) == "." and
+                           next_non_whitespace(text, match.end()) == "(")
+            elif context == "call":
+                applies = next_non_whitespace(text, match.end()) == "("
+            elif context == "pair":
+                applies = following is not None and digest(following.group(0)) == pair_digest
+            else:
+                applies = True
+
+            if applies:
+                finding_line = line_number(match.start())
+                findings.append({
+                    "line": finding_line,
+                    "severity": severity,
+                    "confidence": "MEDIUM",
+                    "testId": test_id,
+                    "issue": issue,
+                    "category": "risky-code",
+                })
+                if len(findings) >= MAX_FINDINGS and following is not None:
+                    findings.append(limit_finding(
+                        finding_line,
+                        f"Static PowerShell rule output stopped after {MAX_FINDINGS} findings; the file was not fully analyzed.",
+                    ))
+                    break
+
+        match = following
+        following = next(tokens, None)
     return findings
 
 
 def scan_file(path: Path) -> dict:
     if not path.is_file():
         return {"scanned": 0, "findings": [], "error": f"not found: {path}"}
-    if path.stat().st_size > MAX_BYTES:
-        return {"scanned": 0, "findings": [], "error": "input exceeds static-rule size limit"}
     try:
-        text = decode_source(path.read_bytes())
+        with path.open("rb") as source:
+            data = source.read(MAX_BYTES + 1)
     except OSError as exc:
         return {"scanned": 0, "findings": [], "error": f"could not read input: {exc}"}
+    if len(data) > MAX_BYTES:
+        return {"scanned": 0, "findings": [], "error": "input exceeds static-rule size limit"}
+    text = decode_source(data)
     return {"scanned": 1, "findings": scan_text(text)}
 
 
